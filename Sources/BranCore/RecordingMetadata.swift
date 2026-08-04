@@ -55,6 +55,10 @@ public struct RecordingMetadata: Codable, Identifiable, Equatable, Sendable {
     public var companyName: String?
     public var companyID: String?
 
+    /// Lien de la réunion, tel que le RDV cal.com le porte. Permet de rouvrir
+    /// la visio depuis la bibliothèque.
+    public var meetingURL: String?
+
     /// Dernier `stage` connu : `upload` `queued` `transcribing` `summarizing`
     /// `ready` `failed`.
     public var crmStage: String?

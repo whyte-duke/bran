@@ -21,10 +21,7 @@ final class UploadService {
 
     func state(for id: UUID) -> UploadState? { states[id] }
 
-    private func client() -> CRMClient? {
-        guard configuration.isConfigured, let endpoint = configuration.endpoint else { return nil }
-        return CRMClient(endpoint: endpoint, token: configuration.token)
-    }
+    private func client() -> CRMClient? { configuration.makeClient() }
 
     // MARK: - Choix du RDV
 

@@ -61,6 +61,11 @@ final class CRMConfiguration {
         token.hasPrefix("rec_") && URL(string: baseURL)?.host != nil
     }
 
+    func makeClient() -> CRMClient? {
+        guard isConfigured, let endpoint else { return nil }
+        return CRMClient(endpoint: endpoint, token: token)
+    }
+
     var endpoint: URL? {
         URL(string: baseURL.trimmingCharacters(in: .whitespaces).trimmingSuffix("/"))
     }

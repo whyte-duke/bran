@@ -22,6 +22,7 @@ public final class AppModel {
     let loginItem = LoginItemService()
     let storage = StorageLocation()
     let uploads: UploadService
+    let directory: MeetingDirectory
 
     /// Réunion détectée, en attente d'une décision de l'utilisateur.
     /// Non nil ≠ enregistrement en cours.
@@ -60,6 +61,10 @@ public final class AppModel {
     private let capture: CaptureSession
     private let processor = PostProcessor()
     /// Depuis quand une proposition n'a plus de signal à l'écran.
+    /// RDV reconnu par son code Meet. Rapprochement certain : pas besoin de
+    /// demander à qui rattacher l'audio.
+    private(set) var linkedBooking: CRMBooking?
+
     private var proposalMissingSince: Date?
 
     /// Délai avant d'abandonner une proposition dont la fenêtre a disparu.
@@ -84,6 +89,7 @@ public final class AppModel {
         self.capture = capture
         self.engine = RecordingEngine(backend: capture)
         self.uploads = UploadService(store: store)
+        self.directory = MeetingDirectory(configuration: uploads.configuration)
 
         Task { [weak self, capture] in
             for await reason in capture.failures {
@@ -100,6 +106,8 @@ public final class AppModel {
 
         Task { await capture.updateQuality(quality) }
         applyStorageRoot()
+
+        directory.start()
 
         // La surveillance est permanente. Il n'y a pas de raison de la
         // suspendre : elle ne fait qu'observer des titres de fenêtres, et une
@@ -312,11 +320,15 @@ public final class AppModel {
         case .start(let meeting):
             // Proposition, pas démarrage.
             guard hasOpenSession == false else { return }
-            pendingMeeting = meeting
-            notifications.proposeRecording(title: meeting.title)
+
+            let booking = meeting.meetCode.flatMap { directory.booking(forMeetCode: $0) }
+            linkedBooking = booking
+            pendingMeeting = booking.map { enrich(meeting, with: $0) } ?? meeting
+            notifications.proposeRecording(title: pendingMeeting?.title)
 
         case .stop:
             pendingMeeting = nil
+            linkedBooking = nil
             notifications.withdrawProposals()
             // Une session en pause s'arrête aussi : la réunion est terminée.
             if hasOpenSession { stopRecording() }
@@ -355,6 +367,20 @@ public final class AppModel {
         resolver.forget()
     }
 
+    /// Le RDV du CRM porte le nom de l'entreprise, les participants et
+    /// l'identifiant de rattachement. Autant les inscrire dès le départ : un
+    /// enregistrement nommé « ORPHEO GNB » se retrouve, pas un UUID.
+    private func enrich(_ meeting: MeetingRef, with booking: CRMBooking) -> MeetingRef {
+        MeetingRef(
+            id: meeting.id,
+            startedAt: meeting.startedAt,
+            title: booking.company?.nom ?? booking.attendee_name ?? booking.detected_domain,
+            meetCode: meeting.meetCode,
+            calendarEventID: booking.booking_id,
+            attendees: [booking.attendee_email].compactMap(\.self)
+        )
+    }
+
     private func begin(_ meeting: MeetingRef) async {
         permissions.refresh()
         guard permissions.canRecord else {
@@ -370,6 +396,16 @@ public final class AppModel {
         // signale ensuite une session interrompue : c'est la sentinelle du §10,
         // sans fichier `.lock` séparé à gérer.
         store.beginSession(meeting)
+
+        if let booking = linkedBooking {
+            await store.mutate(meeting.id) { metadata in
+                metadata.bookingID = booking.booking_id
+                metadata.companyID = booking.company?.id
+                metadata.companyName = booking.company?.nom
+                metadata.meetingURL = booking.meeting_url
+            }
+        }
+
         await engine.handle(.start(meeting))
 
         if isRecording {
@@ -391,6 +427,17 @@ public final class AppModel {
         guard uploads.configuration.isConfigured,
               let recording = store.recordings.first(where: { $0.id == id })
         else { return }
+
+        // Rattachement certain par le code Meet : aucune ambiguïté à lever.
+        if let bookingID = recording.metadata.bookingID,
+           let booking = directory.bookings.first(where: { $0.booking_id == bookingID }) {
+            if uploads.configuration.autoUpload {
+                uploads.send(recording, to: booking, complement: nil)
+            } else {
+                pendingUpload = (recording, [booking])
+            }
+            return
+        }
 
         do {
             switch try await uploads.resolveBooking(for: recording) {

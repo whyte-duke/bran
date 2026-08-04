@@ -68,20 +68,43 @@ enum AudioExporter {
         let writer = try AVAssetWriter(outputURL: destination, fileType: .m4a)
         let reader = try AVAssetReader(asset: asset)
 
+        // `AVAssetWriter` n'est PAS un convertisseur : il encode ce qu'on lui
+        // donne, tel quel. Lui livrer du PCM 48 kHz stéréo en lui demandant de
+        // l'AAC mono 16 kHz échoue avec « Cannot Encode Media ».
+        //
+        // La conversion se fait donc à la LECTURE. `AVAssetReaderAudioMixOutput`
+        // est fait pour ça : c'est le seul chemin qui sache à la fois
+        // rééchantillonner et replier deux canaux sur un.
+        let output = AVAssetReaderAudioMixOutput(audioTracks: [track], audioSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 16_000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ])
+        reader.add(output)
+
+        var monoLayout = AudioChannelLayout()
+        monoLayout.mChannelLayoutTag = kAudioChannelLayoutTag_Mono
+
+        // 48 kbit/s et pas 64 : le débit maximal de l'encodeur AAC d'Apple
+        // dépend de la fréquence d'échantillonnage, et à 16 kHz mono il
+        // plafonne là. Mesuré : 48 passe, 56 échoue sur « Cannot Encode Media ».
+        // ffmpeg accepte 64 kbit/s au même réglage — c'est un autre encodeur.
+        //
+        // Aucune perte pour l'usage : le §6 du contrat CRM liste lui-même
+        // 48 kbit/s mono comme la marge confortable, à ≈ 22 Mo l'heure.
         let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVNumberOfChannelsKey: 1,      // mono : Azure n'analyse que le canal 0
             AVSampleRateKey: 16_000,       // la parole est transcrite à 16 kHz
-            AVEncoderBitRateKey: 64_000,
+            AVEncoderBitRateKey: 48_000,
+            AVChannelLayoutKey: Data(bytes: &monoLayout, count: MemoryLayout<AudioChannelLayout>.size),
         ])
         input.expectsMediaDataInRealTime = false
         writer.add(input)
-
-        let output = AVAssetReaderTrackOutput(
-            track: track,
-            outputSettings: [AVFormatIDKey: kAudioFormatLinearPCM]
-        )
-        reader.add(output)
 
         guard reader.startReading() else {
             throw ExportError.exportFailed(reader.error?.localizedDescription ?? "lecture impossible")
@@ -114,7 +137,10 @@ enum AudioExporter {
         await writer.finishWriting()
 
         guard writer.status == .completed else {
-            throw ExportError.exportFailed(writer.error?.localizedDescription ?? "statut \(writer.status.rawValue)")
+            let detail = writer.error?.localizedDescription
+                ?? reader.error?.localizedDescription
+                ?? "statut \(writer.status.rawValue)"
+            throw ExportError.exportFailed(detail)
         }
 
         let attributes = try? FileManager.default.attributesOfItem(atPath: destination.path(percentEncoded: false))
@@ -135,7 +161,7 @@ enum AudioExporter {
 }
 
 private struct AudioPump: @unchecked Sendable {
-    let output: AVAssetReaderTrackOutput
+    let output: AVAssetReaderOutput
     let input: AVAssetWriterInput
 }
 

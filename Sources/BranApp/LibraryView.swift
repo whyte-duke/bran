@@ -42,6 +42,7 @@ struct LibraryView: View {
             // Le CRM n'envoie aucune notification : c'est à bran de redemander
             // l'état des jobs laissés en plan par une fermeture de l'app.
             model.uploads.resumeTracking(model.store.recordings)
+            await model.directory.refresh()
         }
         .sheet(item: uploadTarget) { target in
             BookingPickerSheet(
@@ -66,6 +67,12 @@ struct LibraryView: View {
                     description: Text("Rejoignez une réunion Meet : bran vous proposera de l'enregistrer.")
                 )
                 .listRowSeparator(.hidden)
+            }
+
+            if model.uploads.configuration.isConfigured {
+                Section {
+                    UpcomingMeetingsPanel(directory: model.directory)
+                }
             }
 
             ForEach(groupedByDay, id: \.day) { group in

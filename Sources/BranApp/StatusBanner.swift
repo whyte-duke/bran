@@ -69,9 +69,13 @@ struct StatusBanner: View {
         case .failed:
             "Aucun enregistrement en cours."
         case .idle:
-            model.pendingMeeting != nil
-                ? "Rien n'est enregistré tant que vous ne l'avez pas demandé."
-                : "bran surveille les fenêtres Meet en permanence."
+            if let booking = model.linkedBooking {
+                "Rattaché à « \(booking.displayName) » — rien n'est enregistré tant que vous ne l'avez pas demandé."
+            } else if model.pendingMeeting != nil {
+                "Réunion non reconnue par le CRM. Rien n'est enregistré tant que vous ne l'avez pas demandé."
+            } else {
+                "bran surveille les fenêtres Meet en permanence."
+            }
         }
     }
 

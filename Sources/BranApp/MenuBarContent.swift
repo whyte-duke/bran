@@ -6,6 +6,14 @@ struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        if let next = model.directory.next, model.hasOpenSession == false {
+            Text("Prochain RDV — \(next.displayName)")
+            if let link = next.meeting_url, let url = URL(string: link) {
+                Link("Rejoindre la visio", destination: url)
+            }
+            Divider()
+        }
+
         Button("Ouvrir bran…", systemImage: "macwindow") {
             WindowPresenter.bringToFront("library", using: openWindow)
         }
@@ -33,7 +41,7 @@ struct MenuBarContent: View {
             }
             .keyboardShortcut("s")
         } else if let meeting = model.pendingMeeting {
-            Button("Démarrer — \(meeting.title ?? "réunion en cours")") {
+            Button("Démarrer — \(meeting.title ?? "réunion non reconnue")") {
                 model.startPendingRecording()
             }
             .keyboardShortcut("r")
