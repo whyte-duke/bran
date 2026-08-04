@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Secrets. Le jeton d'enregistrement vit dans le Trousseau, pas dans le dépôt.
+.env
+.env.*
+!.env.example
