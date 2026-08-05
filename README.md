@@ -42,6 +42,41 @@ summarisation. That part is specific to one deployment and entirely opt-in — s
 
 ---
 
+## Local dictation
+
+Hold a key, talk, and the text appears where your cursor was. Everything runs on
+your Mac — no account, no API key, nothing leaves the machine.
+
+- **NVIDIA Parakeet TDT 0.6B v3**, running on the Neural Engine through
+  [FluidAudio](https://github.com/FluidInference/FluidAudio) (Apache 2.0).
+  25 European languages, and you can pin one so it stops half-translating you.
+- **Measured on a MacBook Pro M2 Pro:** 506 MB on disk, 42 MB of process
+  footprint, **67× realtime** — 4 minutes of speech transcribed in ~3.6 s.
+  Run `swift run BranSpike speech` to get the number on your own machine
+  instead of taking ours.
+- **No chunking.** At 67× realtime, splitting audio while you speak buys nothing
+  on paste latency and costs correctness: sliding windows *revise* their output,
+  so you would watch words change under your cursor.
+- **The model loads while you talk.** Loading starts on key-down, in parallel
+  with capture, so a cold start is hidden by the first two seconds of speech.
+- **Right Command by default**, configurable, hold-to-talk or press-to-toggle.
+  Escape cancels.
+- **Notch overlay** on MacBooks that have one, a floating pill everywhere else —
+  because the feature is useless if it goes silent the moment you plug in a
+  monitor.
+- **A correction dictionary.** Whisper-class models mangle your company and
+  client names. Twenty entries fixes most of it.
+- **History is a folder.** Text is kept forever, audio is purged after a week
+  (configurable). Once the audio is gone, retry is *disabled with a reason*
+  rather than failing.
+
+Dictation needs the **Accessibility** permission — macOS requires it both to read
+a global hotkey and to paste. Because bran is signed with a certificate you
+generate locally, macOS will warn you before you can grant it. That is the
+trade-off of an unnotarised app; see [Permissions](#permissions).
+
+---
+
 ## Requirements
 
 | | |
@@ -89,12 +124,24 @@ On first launch bran asks for:
 | Permission | Required | Why |
 |---|---|---|
 | Screen Recording | yes | capture, and the window titles used for detection |
-| Microphone | yes | your own voice |
+| Microphone | yes | your own voice, and dictation |
 | Notifications | recommended | the "record this meeting?" prompt |
+| Accessibility | only for dictation | reading the global hotkey, and pasting |
 | Calendar | no | names the recording after the calendar event |
 
-macOS only applies the Screen Recording grant at the **next process start** —
-quit and relaunch bran after granting it.
+macOS only applies the Screen Recording and Accessibility grants at the **next
+process start** — quit and relaunch bran after granting them.
+
+**What the keyboard access is used for.** The event tap is installed in
+listen-only mode and inspects nothing but modifier flags and the two key codes
+you bound. It never swallows an event, never logs a keystroke, and is only
+installed when you turn dictation on. `Sources/BranApp/Dictation/HotkeyMonitor.swift`
+is 200 lines — read it.
+
+**One thing macOS will do to you.** When the cursor is in a password field, or
+when Terminal's *Secure Keyboard Entry* is switched on, macOS disables every
+event tap system-wide. Your hotkey stops responding and nothing explains why.
+bran detects this and names the likely culprit instead of looking broken.
 
 ---
 

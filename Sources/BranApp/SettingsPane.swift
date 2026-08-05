@@ -49,6 +49,8 @@ struct SettingsPane: View {
                         .foregroundStyle(.secondary)
                 }
 
+                DictationSettingsSection(model: model)
+
                 CRMSettingsSection(configuration: model.uploads.configuration, uploads: model.uploads)
 
                 Section("Autorisations") {
@@ -106,7 +108,7 @@ struct SettingsPane: View {
             }
             .padding(16)
         }
-        .frame(width: 520, height: 560)
+        .frame(width: 560, height: 620)
     }
 }
 

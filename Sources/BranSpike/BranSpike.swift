@@ -1,4 +1,5 @@
 import AVFoundation
+import BranSpeech
 import Foundation
 
 @main
@@ -28,6 +29,16 @@ struct BranSpike {
             case "inspect":
                 guard let path = arguments.first else { throw SpikeUsageError.missingPath }
                 try await FileReport.print(for: URL(fileURLWithPath: path))
+
+            case "speech":
+                let seconds = Double(value(of: "--seconds", in: arguments) ?? "") ?? 20
+                let file = value(of: "--file", in: arguments).map(URL.init(fileURLWithPath:))
+                let code = value(of: "--language", in: arguments) ?? "french"
+                try await SpeechSpike(
+                    seconds: seconds,
+                    file: file,
+                    language: SpeechLanguage(rawValue: code) ?? .french
+                ).run()
 
             default:
                 printUsage()
@@ -64,6 +75,12 @@ struct BranSpike {
               Rapport sur un fichier existant. Sert au test de résilience :
               après un `kill -9` en cours d'enregistrement, le .mp4 est-il
               encore lisible ?
+
+          speech [--seconds 20] [--file <chemin.wav>] [--language french]
+              Mesure Parakeet TDT 0.6B v3 sur CETTE machine : temps de
+              chargement à froid, mémoire résidente, place occupée sur le
+              disque, et rapport au temps réel. Les 110-190× annoncés le sont
+              sur M4 Pro ; ici on obtient le vrai chiffre.
 
         Lancer depuis le Terminal : les autorisations TCC (Enregistrement de
         l'écran, Microphone) sont celles du Terminal, pas besoin du certificat

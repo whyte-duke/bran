@@ -61,9 +61,16 @@ $ICON_ENTRY
     <!-- Textes affichés par macOS dans la fenêtre d'autorisation. Ils doivent
          dire à quoi sert la permission, pas la réclamer. -->
     <key>NSMicrophoneUsageDescription</key>
-    <string>bran enregistre votre voix pendant les réunions, pour que vous vous entendiez dans le replay.</string>
+    <string>bran enregistre votre voix pendant les réunions, et pendant la dictée pour la transcrire sur votre Mac.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>
     <string>bran lit l'événement en cours pour donner son titre et ses participants à l'enregistrement.</string>
+
+    <!-- La dictée lit le raccourci global et colle le texte : les deux passent
+         par l'Accessibilité. macOS ne montre pas ce texte dans sa fenêtre de
+         permission, mais il apparaît dans certains outils d'audit — et il dit
+         franchement ce que fait l'application. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>bran colle le texte dicté dans l'application où se trouve votre curseur.</string>
 </dict>
 </plist>
 PLIST

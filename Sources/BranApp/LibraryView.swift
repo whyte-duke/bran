@@ -6,6 +6,37 @@ struct LibraryView: View {
     @State private var selection: UUID?
     @State private var showsSettings = false
 
+    /// Deux usages dans une seule fenêtre, plutôt que deux applications à
+    /// installer, deux icônes dans la barre de menus et deux endroits où
+    /// chercher. Le sélecteur est en tête de colonne, là où l'œil arrive.
+    @State private var pane: Pane = .meetings
+    @State private var dictationSelection: UUID?
+    @State private var dictationQuery = ""
+
+    /// Surtout pas `Section` : ce nom masquerait celui de SwiftUI dans toute la
+    /// vue, et chaque `Section { … }` de la colonne se mettrait à désigner cet
+    /// énuméré. Le compilateur le signale mal, et on cherche longtemps.
+    enum Pane: String, CaseIterable, Identifiable {
+        case meetings
+        case dictation
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .meetings: "Réunions"
+            case .dictation: "Dictées"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .meetings: "film.stack"
+            case .dictation: "waveform"
+            }
+        }
+    }
+
     /// `pendingUpload` du modèle, présenté comme un `Identifiable` pour `.sheet`.
     private var uploadTarget: Binding<UploadTarget?> {
         Binding(
@@ -59,7 +90,67 @@ struct LibraryView: View {
 
     // MARK: - Colonne
 
+    @ViewBuilder
     private var sidebar: some View {
+        switch pane {
+        case .meetings: meetingsSidebar
+        case .dictation: dictationSidebar
+        }
+    }
+
+    /// Le sélecteur de section, en tête de colonne.
+    private var panePicker: some View {
+        Picker("Section", selection: $pane) {
+            ForEach(Pane.allCases) { pane in
+                Label(pane.label, systemImage: pane.symbol).tag(pane)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
+    }
+
+    @ToolbarContentBuilder
+    private var sharedToolbar: some ToolbarContent {
+        ToolbarItem {
+            Button("Réglages", systemImage: "gearshape") { showsSettings = true }
+        }
+    }
+
+    // MARK: - Colonne « Dictées »
+
+    private var dictationSidebar: some View {
+        List(selection: $dictationSelection) {
+            DictationHistoryList(controller: model.dictation, query: $dictationQuery)
+        }
+        .listStyle(.sidebar)
+        .searchable(text: $dictationQuery, placement: .sidebar, prompt: "Chercher dans les dictées")
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
+                panePicker
+                DictationBanner(model: model)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+            }
+            .background(.bar)
+        }
+        .toolbar {
+            sharedToolbar
+            ToolbarItem {
+                Button("Actualiser", systemImage: "arrow.clockwise") {
+                    Task { await model.dictation.store.reload() }
+                }
+            }
+        }
+        .sheet(isPresented: $showsSettings) { SettingsPane(model: model) }
+        .task { await model.dictation.store.reload() }
+    }
+
+    // MARK: - Colonne « Réunions »
+
+    private var meetingsSidebar: some View {
         List(selection: $selection) {
             if model.store.recordings.isEmpty {
                 ContentUnavailableView(
@@ -105,11 +196,15 @@ struct LibraryView: View {
             }
         }
         .listStyle(.sidebar)
-        .safeAreaInset(edge: .top, spacing: 0) { statusBanner }
-        .toolbar {
-            ToolbarItem {
-                Button("Réglages", systemImage: "gearshape") { showsSettings = true }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
+                panePicker
+                statusBanner
             }
+            .background(.bar)
+        }
+        .toolbar {
+            sharedToolbar
             ToolbarItem {
                 Button("Actualiser", systemImage: "arrow.clockwise") {
                     Task { await model.store.reload() }
@@ -133,8 +228,7 @@ struct LibraryView: View {
         if model.hasOpenSession == false {
             StatusBanner(model: model)
                 .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(.bar)
+                .padding(.bottom, 10)
         }
     }
 
@@ -142,6 +236,30 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var detail: some View {
+        switch pane {
+        case .meetings: meetingsDetail
+        case .dictation: dictationDetail
+        }
+    }
+
+    @ViewBuilder
+    private var dictationDetail: some View {
+        if let entry = model.dictation.store.entries.first(where: { $0.id == dictationSelection }) {
+            DictationDetailView(entry: entry, controller: model.dictation)
+                .id(entry.id)
+        } else {
+            ContentUnavailableView(
+                "Sélectionnez une dictée",
+                systemImage: "waveform",
+                description: Text(model.dictation.settings.isEnabled
+                    ? "Appuyez sur \(model.dictation.settings.trigger.displayName) n'importe où, parlez, le texte est collé là où était votre curseur."
+                    : "La dictée est désactivée. Activez-la dans les réglages.")
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var meetingsDetail: some View {
         if let recording = model.store.recordings.first(where: { $0.id == selection }) {
             RecordingDetailView(recording: recording, model: model)
                 .id(recording.id)

@@ -24,6 +24,15 @@ public final class AppModel {
     let uploads: UploadService
     let directory: MeetingDirectory
 
+    /// La dictée. Volontairement autonome : elle a sa propre machine à états,
+    /// son propre stockage et ses propres autorisations. Le seul lien avec
+    /// l'enregistreur de réunions est le dossier de destination — et, un jour,
+    /// le modèle Parakeet, qui pourrait transcrire les closings sur place au
+    /// lieu de les téléverser.
+    let dictationSettings = DictationSettings()
+    let dictation: DictationController
+    private var notchPresenter: NotchPresenter?
+
     /// Réunion détectée, en attente d'une décision de l'utilisateur.
     /// Non nil ≠ enregistrement en cours.
     public private(set) var pendingMeeting: MeetingRef?
@@ -91,6 +100,13 @@ public final class AppModel {
         self.uploads = UploadService(store: store)
         self.directory = MeetingDirectory(configuration: uploads.configuration)
 
+        let settings = self.dictationSettings
+        let dictationStore = DictationStore(
+            root: { [storage] in storage.root },
+            retention: settings.retention
+        )
+        self.dictation = DictationController(settings: settings, store: dictationStore)
+
         Task { [weak self, capture] in
             for await reason in capture.failures {
                 guard let self else { return }
@@ -108,11 +124,41 @@ public final class AppModel {
         applyStorageRoot()
 
         directory.start()
+        startDictation()
 
         // La surveillance est permanente. Il n'y a pas de raison de la
         // suspendre : elle ne fait qu'observer des titres de fenêtres, et une
         // surveillance qu'on oublie d'activer ne sert à rien.
         startWatching()
+    }
+
+    // MARK: - Dictée
+
+    private func startDictation() {
+        notchPresenter = NotchPresenter(controller: dictation)
+        dictation.applySettings()
+        dictation.host.refreshAvailability()
+
+        if dictationSettings.isEnabled {
+            // Une autorisation d'Accessibilité peut avoir été retirée entre deux
+            // lancements. Si l'installation échoue, le réglage repasse à « non »
+            // et l'interface le dira — plutôt qu'un interrupteur qui prétend
+            // surveiller sans rien surveiller.
+            dictation.setEnabled(true)
+        }
+
+        Task { [dictation] in
+            await dictation.store.reload()
+            // La purge tourne au lancement, pas à chaque ouverture d'une vue où
+            // elle ne ferait que ralentir un affichage.
+            await dictation.store.purgeExpiredAudio()
+        }
+    }
+
+    /// Active la dictée, en signalant si l'Accessibilité manque.
+    @discardableResult
+    func enableDictation(_ enabled: Bool) -> Bool {
+        dictation.setEnabled(enabled)
     }
 
     // MARK: - État affiché
