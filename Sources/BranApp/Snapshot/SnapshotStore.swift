@@ -107,9 +107,15 @@ final class SnapshotStore {
                 stored.imageFileName = name
             } catch {
                 // L'image est un confort ; le texte est l'essentiel. On garde
-                // l'entrée sans son image plutôt que de tout perdre.
+                // l'entrée sans son image plutôt que de tout perdre — mais on
+                // **dit pourquoi**. La première version avalait l'erreur, et
+                // c'est exactement ce qui a empêché de diagnostiquer une
+                // capture vide : plus d'image, donc plus rien à regarder.
+                problem = "Image non conservée : \(error.localizedDescription)"
                 stored.imageFileName = nil
             }
+        } else if image != nil, retention.keepsNothing {
+            problem = "Image non conservée : la durée de conservation est réglée sur zéro."
         }
 
         write(stored)

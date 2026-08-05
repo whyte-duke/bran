@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import BranVision
 
@@ -194,5 +195,29 @@ struct SnapshotMachineTests {
         #expect(SnapshotMachine.Phase.preparing(nil).isBusy)
         #expect(SnapshotMachine.Phase.recognising.isBusy)
         #expect(SnapshotMachine.Phase.copying.isBusy)
+    }
+}
+
+@Suite("Échecs d'autorisation d'écran")
+struct ScreenFailureTests {
+
+    @Test("Un écran aveugle porte son propre remède, pas celui d'un refus")
+    func aveugleDiffereDuRefus() {
+        // Les deux ne se réparent pas pareil : un refus se coche, une
+        // autorisation périmée se retire puis se rajoute. Les confondre envoie
+        // l'utilisateur cocher une case déjà cochée.
+        let refus = SnapshotFailure.screenRecordingDenied
+        let aveugle = SnapshotFailure.screenRecordingBlind("retirez bran puis rajoutez-le")
+
+        #expect(refus.remedy != aveugle.remedy)
+        #expect(aveugle.remedy == "retirez bran puis rajoutez-le")
+        #expect(aveugle.summary.isEmpty == false)
+    }
+
+    @Test("Un écran aveugle survit à un aller-retour d'encodage")
+    func aveugleEstCodable() throws {
+        let original = SnapshotFailure.screenRecordingBlind("détail")
+        let data = try JSONEncoder().encode(original)
+        #expect(try JSONDecoder().decode(SnapshotFailure.self, from: data) == original)
     }
 }

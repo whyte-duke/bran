@@ -47,6 +47,10 @@ struct SnapshotPane: View {
                 )
             }
 
+            if let problem = controller.store.problem {
+                NoticeRow(text: problem, symbol: "externaldrive.badge.xmark", tint: .orange)
+            }
+
             if case .failed(let reason) = controller.phase {
                 NoticeRow(text: reason.remedy, symbol: "exclamationmark.triangle.fill", tint: .red) {
                     Button("Compris") { controller.acknowledgeFailure() }

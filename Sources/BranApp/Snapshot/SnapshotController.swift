@@ -122,9 +122,9 @@ final class SnapshotController {
         // fenêtre**. Une image sans texte, donc un « Aucun texte trouvé » qui
         // envoie chercher un problème de reconnaissance là où il n'y a qu'une
         // case à cocher. Un refus doit se dire, pas se déguiser en zone vide.
-        guard CGPreflightScreenCaptureAccess() else {
-            CGRequestScreenCaptureAccess()
-            apply(machine.handle(.failed(.screenRecordingDenied)))
+        guard ScreenAccess.isUsable else {
+            if ScreenAccess.isDeclaredGranted == false { CGRequestScreenCaptureAccess() }
+            apply(machine.handle(.failed(.screenRecordingBlind(ScreenAccess.diagnosis))))
             return
         }
 

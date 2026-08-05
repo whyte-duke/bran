@@ -180,6 +180,10 @@ public struct SnapshotMachine: Sendable {
 /// quoi faire ne vaut pas mieux qu'un silence.
 public enum SnapshotFailure: Equatable, Sendable, Codable {
     case screenRecordingDenied
+    /// L'autorisation est déclarée accordée mais bran ne voit rien : elle a été
+    /// donnée à une signature antérieure du binaire. Le diagnostic complet est
+    /// porté par le cas parce que le remède diffère du simple refus.
+    case screenRecordingBlind(String)
     case accessibilityDenied
     case selectionFailed(String)
     case engineUnavailable(String)
@@ -190,6 +194,8 @@ public enum SnapshotFailure: Equatable, Sendable, Codable {
         switch self {
         case .screenRecordingDenied:
             "bran n'a pas accès à l'enregistrement de l'écran."
+        case .screenRecordingBlind:
+            "bran ne voit pas l'écran : la capture ne contiendrait que le fond d'écran."
         case .accessibilityDenied:
             "bran n'a pas l'autorisation d'Accessibilité."
         case .selectionFailed(let detail):
@@ -211,6 +217,8 @@ public enum SnapshotFailure: Equatable, Sendable, Codable {
             l'écran, puis cochez bran. C'est la même autorisation que pour \
             l'enregistrement des réunions.
             """
+        case .screenRecordingBlind(let diagnosis):
+            diagnosis
         case .accessibilityDenied:
             """
             Réglages système › Confidentialité et sécurité › Accessibilité, \
