@@ -60,10 +60,42 @@ struct DictationPane: View {
 
             if case .failed(let reason) = controller.phase {
                 NoticeRow(text: reason.remedy, symbol: "exclamationmark.triangle.fill", tint: .red) {
-                    Button("Compris") { controller.acknowledgeFailure() }
-                        .controlSize(.small)
+                    HStack(spacing: 8) {
+                        // Le bouton de réparation d'abord : c'est ce qu'on veut
+                        // faire, pas acquitter un message.
+                        if let repair = repair(for: reason) {
+                            Button(repair.title) {
+                                Task {
+                                    await repair.action()
+                                    controller.acknowledgeFailure()
+                                }
+                            }
+                            .controlSize(.small)
+                            .buttonStyle(.borderedProminent)
+                        }
+                        Button("Compris") { controller.acknowledgeFailure() }
+                            .controlSize(.small)
+                    }
                 }
             }
+        }
+    }
+
+    /// Ce qu'on peut réellement faire pour réparer, selon l'échec.
+    ///
+    /// Rien pour ceux qui ne se réparent pas d'un clic — une saisie sécurisée se
+    /// referme, un disque plein se vide. Proposer un bouton qui ne changerait
+    /// rien serait un faux espoir de plus.
+    private func repair(for failure: DictationFailure) -> (title: String, action: () async -> Void)? {
+        switch failure {
+        case .microphoneDenied, .microphoneSilent:
+            ("Redemander le micro", { _ = await SystemSettings.reRequestMicrophone() })
+        case .accessibilityDenied:
+            ("Redemander l'Accessibilité", { _ = SystemSettings.reRequestAccessibility() })
+        case .modelUnavailable:
+            ("Retélécharger le modèle", { controller.host.warmUp() })
+        case .secureInputActive, .captureFailed, .transcriptionFailed, .diskFull:
+            nil
         }
     }
 

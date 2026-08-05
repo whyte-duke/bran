@@ -190,3 +190,51 @@ struct DictationMachineTests {
         #expect(DictationFailure.secureInputActive(app: "Terminal").summary.contains("Terminal"))
     }
 }
+
+@Suite("Jamais de faux espoir")
+struct NoFalseHopeTests {
+
+    @Test("Un micro muet interrompt la dictée au lieu de faire semblant")
+    func microMuetInterrompt() {
+        var machine = DictationMachine()
+        machine.handle(.hotkeyDown)
+        #expect(machine.phase == .capturing)
+
+        // Ce que la surveillance envoie quand aucun son n'arrive. Sans elle,
+        // l'encoche affichait « écoute » avec un chrono figé à 00:00 pendant
+        // qu'on parlait — et l'arrêt annonçait « rien entendu », ce qui accuse
+        // l'utilisateur d'un problème qui n'est pas le sien.
+        #expect(machine.handle(.failed(.microphoneSilent)) == [.discardCapture])
+        #expect(machine.phase == .failed(.microphoneSilent))
+    }
+
+    @Test("Un micro muet se distingue d'un micro refusé")
+    func muetDiffereDeRefuse() {
+        // Les deux ne se réparent pas pareil : un refus s'accorde, un micro
+        // muet se choisit ou se rebranche. Le message et le bouton diffèrent.
+        #expect(DictationFailure.microphoneSilent.summary != DictationFailure.microphoneDenied.summary)
+        #expect(DictationFailure.microphoneSilent.remedy != DictationFailure.microphoneDenied.remedy)
+    }
+
+    @Test("Chaque échec de dictée dit quoi faire")
+    func chaqueEchecEstReparable() {
+        let cas: [DictationFailure] = [
+            .microphoneDenied, .microphoneSilent, .accessibilityDenied,
+            .secureInputActive(app: "Terminal"), .modelUnavailable("x"),
+            .captureFailed("x"), .transcriptionFailed("x"), .diskFull,
+        ]
+        for échec in cas {
+            #expect(échec.summary.isEmpty == false)
+            #expect(échec.remedy.isEmpty == false)
+        }
+    }
+
+    @Test("Après un micro muet, le raccourci relance proprement")
+    func relanceApresMicroMuet() {
+        var machine = DictationMachine()
+        machine.handle(.hotkeyDown)
+        machine.handle(.failed(.microphoneSilent))
+        #expect(machine.handle(.hotkeyDown) == [.startCapture])
+        #expect(machine.phase == .capturing)
+    }
+}

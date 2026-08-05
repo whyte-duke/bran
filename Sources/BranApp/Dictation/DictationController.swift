@@ -39,6 +39,8 @@ final class DictationController {
 
     private var capturedSamples: [Float] = []
     private var tickTask: Task<Void, Never>?
+    /// Surveille que le micro envoie réellement du son. Voir `startSilenceWatchdog`.
+    private var watchdogTask: Task<Void, Never>?
     /// Jeton de la dictée en cours. Une transcription qui revient après une
     /// annulation porte un jeton périmé et se jette en silence.
     private var currentToken = UUID()
@@ -183,8 +185,22 @@ final class DictationController {
             return
         }
 
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
-            requestMicrophoneThenRetry()
+        // Trois cas, et ils ne se traitent pas pareil. Les confondre laissait
+        // l'encoche annoncer « écoute » sur un micro qui n'enregistrait rien :
+        // la machine restait en `.capturing`, `startedAt` n'était jamais posé —
+        // d'où un chrono figé à 00:00 — et l'arrêt ne rendait aucun échantillon,
+        // donc « rien entendu ». Un refus doit se dire, pas se mimer.
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            break
+        case .notDetermined:
+            requestMicrophoneThenStart()
+            return
+        case .denied, .restricted:
+            apply(machine.handle(.failed(.microphoneDenied)))
+            return
+        @unknown default:
+            apply(machine.handle(.failed(.microphoneDenied)))
             return
         }
 
@@ -194,12 +210,59 @@ final class DictationController {
             startedAt = .now
             if settings.playsSound { Self.playStartCue() }
             startTicking()
+            startSilenceWatchdog()
         } catch {
             apply(machine.handle(.failed(.captureFailed(error.localizedDescription))))
         }
     }
 
+    /// Vérifie que le micro envoie réellement quelque chose.
+    ///
+    /// **Le principe : jamais de faux espoir.** Une encoche qui affiche « écoute »
+    /// pendant qu'on parle dans un micro muet est pire qu'une erreur — on parle
+    /// trente secondes avant de comprendre, et on ne sait toujours pas pourquoi.
+    ///
+    /// Deux vérifications, à deux instants, parce qu'elles ne détectent pas la
+    /// même panne :
+    ///
+    /// ```
+    ///   1,2 s   aucun échantillon reçu   → le flux ne tourne pas du tout
+    ///   3,0 s   des échantillons, mais   → le flux tourne et rend du silence
+    ///           un pic resté à zéro         numérique : micro coupé, mauvais
+    ///                                        périphérique, autorisation périmée
+    /// ```
+    ///
+    /// Le second seuil est volontairement plus long : quelqu'un peut appuyer sur
+    /// le raccourci puis prendre une seconde avant de parler, et l'accuser d'un
+    /// micro muet serait faux.
+    private func startSilenceWatchdog() {
+        watchdogTask?.cancel()
+        watchdogTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard let self, Task.isCancelled == false, machine.phase == .capturing else { return }
+
+            guard mic.duration > 0 else {
+                apply(machine.handle(.failed(.microphoneSilent)))
+                return
+            }
+
+            try? await Task.sleep(for: .milliseconds(1800))
+            guard Task.isCancelled == false, machine.phase == .capturing else { return }
+
+            // Un vrai micro a toujours un plancher de bruit. Un pic exactement
+            // nul sur trois secondes n'est pas du silence, c'est une panne.
+            guard mic.peakLevel <= 0 else { return }
+            apply(machine.handle(.failed(.microphoneSilent)))
+        }
+    }
+
+    private func stopSilenceWatchdog() {
+        watchdogTask?.cancel()
+        watchdogTask = nil
+    }
+
     private func finishCapture() {
+        stopSilenceWatchdog()
         stopTicking()
         capturedSamples = mic.stop()
         let duration = Double(capturedSamples.count) / SpeechAudioFormat.sampleRate
@@ -262,6 +325,7 @@ final class DictationController {
     }
 
     private func discardCapture() {
+        stopSilenceWatchdog()
         currentToken = UUID()
         stopTicking()
         mic.discard()
@@ -416,15 +480,35 @@ final class DictationController {
 
     // MARK: - Micro
 
-    private func requestMicrophoneThenRetry() {
+    /// Demande le micro, puis démarre la capture.
+    ///
+    /// Deux pièges, tous deux vécus :
+    ///
+    /// **La fenêtre système peut s'ouvrir derrière tout le reste.** bran est un
+    /// agent sans icône du Dock : il ne passe pas au premier plan de lui-même, et
+    /// une demande d'autorisation invisible ressemble exactement à une
+    /// application qui a planté.
+    ///
+    /// **On relance la capture, pas l'événement.** Renvoyer `.hotkeyDown` à une
+    /// machine déjà en `.capturing` la fait basculer en `.transcribing` en mode
+    /// bascule — donc arrêter la dictée à l'instant précis où elle vient d'être
+    /// autorisée.
+    private func requestMicrophoneThenStart() {
+        NSApp.activate(ignoringOtherApps: true)
+
         Task { [weak self] in
             let granted = await AVCaptureDevice.requestAccess(for: .audio)
             guard let self else { return }
-            if granted {
-                apply(machine.handle(.hotkeyDown))
-            } else {
+
+            guard granted else {
                 apply(machine.handle(.failed(.microphoneDenied)))
+                return
             }
+
+            // Le raccourci a pu être relâché, ou la dictée annulée, pendant que
+            // la fenêtre système attendait une réponse.
+            guard machine.phase == .capturing else { return }
+            startCapture()
         }
     }
 

@@ -178,6 +178,10 @@ public enum DictationFailure: Equatable, Sendable, Codable {
     case secureInputActive(app: String?)
     case modelUnavailable(String)
     case captureFailed(String)
+    /// Le micro a démarré mais n'envoie rien. Distinct de `captureFailed` :
+    /// techniquement tout va bien, sauf qu'aucun son n'arrive — micro coupé,
+    /// périphérique débranché, ou autorisation qui rend du silence.
+    case microphoneSilent
     case transcriptionFailed(String)
     case diskFull
 
@@ -197,6 +201,8 @@ public enum DictationFailure: Equatable, Sendable, Codable {
             "Le modèle de transcription n'est pas disponible — \(detail)"
         case .captureFailed(let detail):
             "La capture du micro a échoué — \(detail)"
+        case .microphoneSilent:
+            "Le micro n'envoie aucun son : rien n'a été enregistré."
         case .transcriptionFailed(let detail):
             "La transcription a échoué — \(detail)"
         case .diskFull:
@@ -225,6 +231,13 @@ public enum DictationFailure: Equatable, Sendable, Codable {
             "Ouvrez les réglages de la dictée pour retélécharger le modèle."
         case .captureFailed:
             "Vérifiez que le micro choisi est bien connecté."
+        case .microphoneSilent:
+            """
+            Vérifiez que le bon micro est choisi dans les réglages de la dictée, \
+            qu'il n'est pas coupé, et que bran figure bien dans Réglages système › \
+            Confidentialité et sécurité › Microphone. Une autorisation périmée \
+            rend du silence au lieu d'une erreur.
+            """
         case .transcriptionFailed:
             "L'audio est conservé : vous pouvez réessayer depuis l'historique."
         case .diskFull:

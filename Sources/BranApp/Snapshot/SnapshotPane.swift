@@ -53,10 +53,36 @@ struct SnapshotPane: View {
 
             if case .failed(let reason) = controller.phase {
                 NoticeRow(text: reason.remedy, symbol: "exclamationmark.triangle.fill", tint: .red) {
-                    Button("Compris") { controller.acknowledgeFailure() }
-                        .controlSize(.small)
+                    HStack(spacing: 8) {
+                        if let repair = repair(for: reason) {
+                            Button(repair.title) {
+                                repair.action()
+                                controller.acknowledgeFailure()
+                            }
+                            .controlSize(.small)
+                            .buttonStyle(.borderedProminent)
+                        }
+                        Button("Compris") { controller.acknowledgeFailure() }
+                            .controlSize(.small)
+                    }
                 }
             }
+        }
+    }
+
+    private func repair(for failure: SnapshotFailure) -> (title: String, action: () -> Void)? {
+        switch failure {
+        case .screenRecordingDenied:
+            ("Redemander l'accès à l'écran", { _ = SystemSettings.reRequestScreenRecording() })
+        case .screenRecordingBlind:
+            // Une autorisation périmée ne se redemande pas : macOS la croit
+            // accordée. Il faut retirer bran de la liste et l'y remettre, donc
+            // ouvrir la page plutôt que rappeler une API qui répondra « oui ».
+            ("Ouvrir les Réglages", { SystemSettings.open(.screenRecording) })
+        case .accessibilityDenied:
+            ("Redemander l'Accessibilité", { _ = SystemSettings.reRequestAccessibility() })
+        case .selectionFailed, .engineUnavailable, .recognitionFailed, .diskFull:
+            nil
         }
     }
 
