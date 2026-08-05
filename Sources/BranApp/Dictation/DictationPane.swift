@@ -227,14 +227,20 @@ private struct DictationCard: View {
         .onTapGesture {
             withAnimation(.snappy(duration: 0.28)) { isExpanded.toggle() }
         }
+        .animation(.smooth(duration: 0.3), value: isRetrying)
+        .animation(.smooth(duration: 0.3), value: entry.text)
         .accessibilityElement(children: .contain)
     }
 
     // MARK: -
 
+    private var isRetrying: Bool { controller.isRetrying(entry.id) }
+
     @ViewBuilder
     private var text: some View {
-        if entry.text.isEmpty, let failure = entry.failure {
+        if isRetrying {
+            retryingText
+        } else if entry.text.isEmpty, let failure = entry.failure {
             Label(failure, systemImage: "exclamationmark.triangle.fill")
                 .font(.callout)
                 .foregroundStyle(.orange)
@@ -248,7 +254,39 @@ private struct DictationCard: View {
                 .lineLimit(isExpanded ? nil : 3)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // Le texte arrivé par une relance se substitue à l'ancien en
+                // fondu, plutôt que d'apparaître d'un coup — c'est la seule
+                // façon de voir que quelque chose a changé.
+                .transition(.opacity)
+                .id(entry.text)
         }
+    }
+
+    /// Ce qu'on montre pendant une relance.
+    ///
+    /// L'ancien texte reste en filigrane, à 12 %. Deux raisons : la carte garde
+    /// exactement la même hauteur — sinon toute la liste sursaute à chaque
+    /// relance — et on continue de savoir de quelle dictée il s'agit.
+    private var retryingText: some View {
+        ZStack(alignment: .topLeading) {
+            Text(entry.text.isEmpty ? " " : entry.text)
+                .font(.callout)
+                .lineLimit(isExpanded ? nil : 3)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(0.12)
+                .accessibilityHidden(true)
+
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.8)
+                Text("Transcription…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .transition(.opacity)
     }
 
     private var metadata: some View {
@@ -304,11 +342,19 @@ private struct DictationCard: View {
             }
             .disabled(entry.text.isEmpty)
 
-            if isHovering {
-                CardAction(symbol: "arrow.clockwise", help: retryHelp) {
+            // La flèche reste visible pendant la relance, même si le curseur
+            // est parti ailleurs : c'est le seul repère qui dit quelle carte
+            // travaille quand on en a relancé plusieurs.
+            if isHovering || isRetrying {
+                CardAction(
+                    symbol: "arrow.clockwise",
+                    help: retryHelp,
+                    tint: isRetrying ? .accentColor : nil,
+                    isSpinning: isRetrying
+                ) {
                     controller.retry(entry)
                 }
-                .disabled(entry.canRetry == false)
+                .disabled(entry.canRetry == false || isRetrying)
 
                 CardAction(symbol: "folder", help: "Afficher l'audio dans le Finder") {
                     guard let url = controller.store.audioURL(for: entry) else { return }
@@ -341,14 +387,28 @@ struct CardAction: View {
     let symbol: String
     let help: String
     var tint: Color?
+    /// Fait tourner l'icône en continu. Une flèche de rechargement qui tourne
+    /// dit « c'est en cours » sans avoir à écrire un mot.
+    var isSpinning = false
     let action: () -> Void
 
     @State private var isHovering = false
+    @State private var angle: Double = 0
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 11.5, weight: .medium))
+                .rotationEffect(.degrees(angle))
+                // À l'arrêt, durée nulle : sans ça l'icône déroule les 360°
+                // à l'envers pendant une demi-seconde, ce qui se lit comme une
+                // erreur plutôt que comme une fin.
+                .animation(
+                    isSpinning
+                        ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                        : .linear(duration: 0),
+                    value: angle
+                )
                 .frame(width: 24, height: 22)
                 .background {
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -361,6 +421,12 @@ struct CardAction: View {
         .onHover { isHovering = $0 }
         .help(help)
         .accessibilityLabel(help)
+        .onChange(of: isSpinning) { _, spinning in
+            // Remettre l'angle à zéro à l'arrêt : sinon l'icône garde
+            // l'inclinaison où la rotation s'est interrompue.
+            angle = spinning ? 360 : 0
+        }
+        .onAppear { if isSpinning { angle = 360 } }
     }
 }
 

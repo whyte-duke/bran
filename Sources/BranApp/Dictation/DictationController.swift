@@ -311,12 +311,30 @@ final class DictationController {
         await store.save(entry, samples: samples)
     }
 
+    /// Les transcriptions en cours de relance.
+    ///
+    /// Sans cet état, réessayer était un clic sans aucun retour : le texte
+    /// restait le même pendant deux secondes, et on ne savait pas si le bouton
+    /// avait été pris en compte. On recliquait, et deux transcriptions partaient.
+    private(set) var retrying: Set<UUID> = []
+
+    func isRetrying(_ id: UUID) -> Bool { retrying.contains(id) }
+
     /// Relance la transcription d'une entrée conservée.
     func retry(_ entry: TranscriptEntry) {
         guard let url = store.audioURL(for: entry) else { return }
+        // Un second clic pendant que ça tourne ne doit rien relancer.
+        guard retrying.contains(entry.id) == false else { return }
+
+        retrying.insert(entry.id)
+        // Le modèle est peut-être froid : on le réveille tout de suite, comme à
+        // l'appui sur le raccourci.
+        host.warmUp()
 
         Task { [weak self] in
             guard let self else { return }
+            defer { retrying.remove(entry.id) }
+
             do {
                 let samples = try DictationStore.readSamples(from: url)
                 let outcome = try await host.transcribe(samples, language: settings.language)
