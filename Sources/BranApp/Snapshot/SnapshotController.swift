@@ -122,6 +122,10 @@ final class SnapshotController {
         // fenêtre**. Une image sans texte, donc un « Aucun texte trouvé » qui
         // envoie chercher un problème de reconnaissance là où il n'y a qu'une
         // case à cocher. Un refus doit se dire, pas se déguiser en zone vide.
+        SnapshotLog.record(
+            "déclenchement — autorisation déclarée=\(ScreenAccess.isDeclaredGranted) "
+            + "titres de fenêtres lisibles=\(ScreenAccess.canSeeOtherWindows)"
+        )
         guard ScreenAccess.isUsable else {
             if ScreenAccess.isDeclaredGranted == false { CGRequestScreenCaptureAccess() }
             apply(machine.handle(.failed(.screenRecordingBlind(ScreenAccess.diagnosis))))
@@ -221,6 +225,7 @@ final class SnapshotController {
                         image: pending.image
                     )
                     self.pending = nil
+                    selfTest("après une capture vide")
                     apply(machine.handle(.recognisedNothing))
                     return
                 }
@@ -297,8 +302,17 @@ final class SnapshotController {
         case .monospaced: try await engine.recogniseCode(handle)
         case .prose: try await engine.recognise(handle, language: language)
         }
+        SnapshotLog.record("moteur → \(regions.count) régions (\(layout.rawValue))")
+        for region in regions.prefix(3) {
+            SnapshotLog.record(String(
+                format: "   x=%.4f y=%.4f l=%.4f h=%.4f conf=%.2f « %@ »",
+                region.x, region.y, region.width, region.height, region.confidence,
+                String(region.text.prefix(40))
+            ))
+        }
 
         let raw = TextAssembler.assemble(regions, layout: layout)
+        SnapshotLog.record("assemblage → \(raw.count) caractères")
         var text = CharacterFixer.fix(raw, layout: layout)
         if settings.trimsTrailingSpace {
             text = text.split(separator: "\n", omittingEmptySubsequences: false)
@@ -306,6 +320,7 @@ final class SnapshotController {
                 .joined(separator: "\n")
         }
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        SnapshotLog.record("nettoyage → \(text.count) caractères")
 
         let confidences = regions.map(\.confidence)
         return Outcome(
@@ -314,6 +329,90 @@ final class SnapshotController {
             confidence: confidences.isEmpty ? nil : confidences.reduce(0, +) / Double(confidences.count),
             repairs: CharacterFixer.repairCount(raw, layout: layout)
         )
+    }
+
+    // MARK: - Autotest
+
+    /// Fait lire à Vision une image fabriquée en mémoire, dont on connaît le
+    /// texte.
+    ///
+    /// Écrit pour trancher une question que rien d'autre ne tranchait : le même
+    /// code, sur la même image, rendait 5 régions depuis un outil en ligne de
+    /// commande et 0 depuis l'application. Deux appels — un au démarrage, avant
+    /// tout `screencapture`, et un après une capture vide — disent si le moteur
+    /// est cassé depuis le début dans ce processus, ou s'il le devient.
+    /// Rejoue la chaîne **complète** — `screencapture`, décodage, moteur,
+    /// assemblage — sur un rectangle imposé de l'écran.
+    ///
+    /// Sans ça, la seule façon d'observer le tuyau dans l'application était de
+    /// demander une capture à la main, ce qui rendait chaque essai coûteux.
+    /// Le rectangle est volontairement minuscule et pris en haut à gauche.
+    func selfTestFullChain(_ rect: String = "0,0,900,120") {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard let image = try await capturer.captureFixedRegion(rect) else {
+                    SnapshotLog.record("autotest chaîne : aucune image rendue")
+                    return
+                }
+                SnapshotLog.record("autotest chaîne : image \(image.width)×\(image.height)")
+                let outcome = try await read(image: image, layout: .monospaced, language: settings.language)
+                SnapshotLog.record(
+                    "autotest chaîne : \(outcome.text.count) caractères « "
+                    + String(outcome.text.prefix(60)).replacingOccurrences(of: "\n", with: "⏎") + " »"
+                )
+            } catch {
+                SnapshotLog.record("autotest chaîne", error: error)
+            }
+        }
+    }
+
+    func selfTest(_ moment: String) {
+        guard let image = Self.renderProbe() else {
+            SnapshotLog.record("autotest \(moment) : impossible de fabriquer l'image")
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let regions = try await engine.recogniseCode(
+                    RecognisableImage(handle: image, pixelWidth: image.width, pixelHeight: image.height)
+                )
+                let text = regions.map(\.text).joined(separator: " ")
+                SnapshotLog.record("autotest \(moment) : \(regions.count) régions « \(text) »")
+            } catch {
+                SnapshotLog.record("autotest \(moment)", error: error)
+            }
+        }
+    }
+
+    /// Une image de test, noir sur blanc, avec un texte connu.
+    private static func renderProbe() -> CGImage? {
+        let size = CGSize(width: 420, height: 90)
+        guard let context = CGContext(
+            data: nil,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+        ) else { return nil }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: size).fill()
+        NSAttributedString(
+            string: "autotest 12345",
+            attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 34, weight: .regular),
+                .foregroundColor: NSColor.black,
+            ]
+        ).draw(at: NSPoint(x: 16, y: 24))
+        NSGraphicsContext.restoreGraphicsState()
+
+        return context.makeImage()
     }
 
     // MARK: - Relecture depuis l'historique

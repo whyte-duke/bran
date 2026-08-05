@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import os
 import Vision
 
 /// Le moteur de reconnaissance de macOS.
@@ -31,6 +32,13 @@ import Vision
 public struct VisionRecogniser: OCREngine {
 
     public init() {}
+
+    /// Journal du moteur lui-même.
+    ///
+    /// Séparé de `SnapshotLog`, qui vit dans l'application : ce module ne doit
+    /// dépendre de rien. Visible avec
+    /// `log stream --predicate 'subsystem == "com.opahventures.bran"'`.
+    private static let logger = Logger(subsystem: "com.opahventures.bran", category: "vision")
 
     public let identifier = "vision"
     public let displayName = "macOS (Vision)"
@@ -70,18 +78,7 @@ public struct VisionRecogniser: OCREngine {
         }
 
         let observations = try await request.perform(on: cgImage)
-        return observations.compactMap { observation in
-            guard let candidate = observation.topCandidates(1).first else { return nil }
-            let box = observation.boundingBox
-            return TextRegion(
-                x: box.origin.x,
-                y: box.origin.y,
-                width: box.width,
-                height: box.height,
-                text: candidate.string,
-                confidence: Double(candidate.confidence)
-            )
-        }
+        return Self.convert(observations, label: "prose")
     }
 
     /// La variante réglée pour du code.
@@ -103,7 +100,21 @@ public struct VisionRecogniser: OCREngine {
         request.recognitionLanguages = [Locale.Language(identifier: "en-US")]
 
         let observations = try await request.perform(on: cgImage)
-        return observations.compactMap { observation in
+        return Self.convert(observations, label: "code")
+    }
+
+    /// Transforme les observations en régions, **en disant ce qu'on a perdu**.
+    ///
+    /// Le décompte brut et le décompte final sont journalisés séparément parce
+    /// qu'ils ne veulent pas dire la même chose : zéro observation signifie que
+    /// le moteur n'a rien vu, alors que des observations sans candidat signifie
+    /// qu'il a vu du texte mais n'a pas su le lire. Les confondre en un seul
+    /// « 0 régions » a coûté une soirée de diagnostic.
+    private static func convert(
+        _ observations: [RecognizedTextObservation],
+        label: String
+    ) -> [TextRegion] {
+        let regions = observations.compactMap { observation -> TextRegion? in
             guard let candidate = observation.topCandidates(1).first else { return nil }
             let box = observation.boundingBox
             return TextRegion(
@@ -115,6 +126,10 @@ public struct VisionRecogniser: OCREngine {
                 confidence: Double(candidate.confidence)
             )
         }
+        logger.debug(
+            "\(label, privacy: .public) : \(observations.count, privacy: .public) observations → \(regions.count, privacy: .public) régions"
+        )
+        return regions
     }
 
     /// Les langues que ce Mac sait lire. Sert à n'offrir dans les réglages que

@@ -1,5 +1,7 @@
 import AppKit
 import BranVision
+import ImageIO
+import UniformTypeIdentifiers
 import Foundation
 import Observation
 
@@ -37,6 +39,7 @@ final class SnapshotStore {
     init(root: @escaping @MainActor () -> URL, retention: SnapshotRetention = .default) {
         self.root = root
         self.retention = retention
+        SnapshotLog.folder = folder
     }
 
     var folder: URL {
@@ -235,10 +238,14 @@ final class SnapshotStore {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
-        let rep = NSBitmapImageRep(cgImage: image)
-        guard let data = rep.representation(using: .png, properties: [:]) else {
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.png.identifier as CFString, 1, nil
+        ) else {
             throw CocoaError(.fileWriteUnknown)
         }
-        try data.write(to: url, options: .atomic)
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
     }
 }

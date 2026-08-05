@@ -8,6 +8,9 @@ protocol RegionCapturer: Sendable {
     /// Rend `nil` quand l'utilisateur a annulé. L'annulation n'est pas une
     /// erreur : c'est le geste le plus fréquent après la capture elle-même.
     func selectRegion() async throws -> CGImage?
+
+    /// Capture un rectangle imposé, sans viseur. Uniquement pour le diagnostic.
+    func captureFixedRegion(_ rect: String) async throws -> CGImage?
 }
 
 /// Le viseur de macOS, appelé tel quel.
@@ -43,10 +46,32 @@ struct SystemRegionCapturer: RegionCapturer {
     }
 
     func selectRegion() async throws -> CGImage? {
+        try await capture(interactive: true)
+    }
+
+    /// La même chaîne, mais sur un rectangle imposé et sans viseur.
+    ///
+    /// Sert au diagnostic : elle rejoue exactement ce que fait une vraie
+    /// capture — même processus, mêmes drapeaux, même décodage — sans demander
+    /// à l'utilisateur de tracer quoi que ce soit. C'est le seul moyen de
+    /// comparer « ce que l'application fait » à « ce que la ligne de commande
+    /// fait » sur un pied d'égalité.
+    func captureFixedRegion(_ rect: String) async throws -> CGImage? {
+        try await capture(interactive: false, rect: rect)
+    }
+
+    private func capture(interactive: Bool, rect: String = "0,0,10,10") async throws -> CGImage? {
         let destination = scratch
         defer { try? FileManager.default.removeItem(at: destination) }
 
-        let status = try await run(arguments: ["-i", "-x", "-o", "-r", "-t", "png", destination.path])
+        let arguments = interactive
+            ? ["-i", "-x", "-o", "-r", "-t", "png", destination.path]
+            : ["-x", "-r", "-R", rect, "-t", "png", destination.path]
+        SnapshotLog.record("viseur → screencapture \(arguments.joined(separator: " "))")
+        let status = try await run(arguments: arguments)
+
+        let size = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? Int) ?? nil
+        SnapshotLog.record("viseur ← code=\(status) fichier=\(size.map { "\($0) octets" } ?? "absent")")
 
         // Deux façons d'annuler, et il faut accepter les deux : selon la
         // version de macOS, `screencapture` sort avec 0 ou 1 quand on presse
@@ -61,16 +86,78 @@ struct SystemRegionCapturer: RegionCapturer {
         guard let source = CGImageSourceCreateWithURL(destination as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else {
+            SnapshotLog.record("✗ le PNG écrit par screencapture est indécodable")
             throw SnapshotFailure.selectionFailed("image illisible")
         }
+
+        SnapshotLog.record(
+            "image \(image.width)×\(image.height) bpc=\(image.bitsPerComponent) "
+            + "bpp=\(image.bitsPerPixel) alpha=\(image.alphaInfo.rawValue) "
+            + "espace=\(image.colorSpace?.name.map(String.init(describing:)) ?? "inconnu")"
+        )
 
         // Une sélection d'un pixel arrive quand on clique sans faire glisser.
         // La traiter comme une capture donnerait une entrée vide dans
         // l'historique et une encoche qui annonce « rien lu » — alors que
         // l'utilisateur a simplement raté son geste.
-        guard image.width > 4, image.height > 4 else { return nil }
+        guard image.width > 4, image.height > 4 else {
+            SnapshotLog.record("sélection ignorée : \(image.width)×\(image.height) px, trop petite")
+            return nil
+        }
 
-        return image
+        return Self.decoded(image) ?? image
+    }
+
+    /// Redessine l'image dans un bitmap que **nous** possédons.
+    ///
+    /// **C'est le correctif du bug le plus coûteux de cette fonctionnalité :**
+    /// la reconnaissance rendait zéro région dans l'application alors que le
+    /// même fichier, lu par un outil en ligne de commande, donnait 301
+    /// caractères. Deux causes se cumulaient, et cette seule opération les
+    /// supprime toutes les deux.
+    ///
+    /// **1. Le fichier disparaissait sous l'image.** `CGImageSourceCreateWithURL`
+    /// rend un `CGImage` *paresseux* : les pixels ne sont lus qu'au moment où on
+    /// les demande. Le `defer` effaçait le fichier temporaire au retour de la
+    /// fonction, donc avant que le moteur ne les demande. Les dimensions, elles,
+    /// venaient des métadonnées déjà lues — d'où une image « valide » de
+    /// 1800×240 sans un pixel derrière.
+    ///
+    /// **2. L'espace colorimétrique.** `screencapture` écrit en Display P3.
+    /// L'image fabriquée en mémoire par l'autotest, qui elle fonctionnait, était
+    /// en sRGB. Redessiner ramène tout en sRGB.
+    ///
+    /// Le diagnostic tenait à une ligne de journal : au démarrage, l'autotest
+    /// sur une image en mémoire donnait 1 région ; quarante millisecondes plus
+    /// tard, la même reconnaissance sur une capture donnait 0. Même processus,
+    /// même code, deux images.
+    private static func decoded(_ image: CGImage) -> CGImage? {
+        guard let context = CGContext(
+            data: nil,
+            width: image.width,
+            height: image.height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+        ) else {
+            SnapshotLog.record("✗ impossible de créer le contexte de décodage")
+            return nil
+        }
+
+        // Le fond blanc évite qu'une capture avec transparence — une fenêtre aux
+        // coins arrondis, un menu translucide — se retrouve sur du noir, où le
+        // texte sombre devient illisible.
+        context.setFillColor(gray: 1, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+
+        guard let decoded = context.makeImage() else {
+            SnapshotLog.record("✗ le décodage n'a rien rendu")
+            return nil
+        }
+        SnapshotLog.record("image décodée en sRGB, pixels détenus par bran")
+        return decoded
     }
 
     private func run(arguments: [String]) async throws -> Int32 {
@@ -78,8 +165,14 @@ struct SystemRegionCapturer: RegionCapturer {
             let process = Process()
             process.executableURL = URL(filePath: "/usr/sbin/screencapture")
             process.arguments = arguments
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
+            // `Pipe()` et non `FileHandle.nullDevice` : ce dernier est un objet
+            // **partagé** par tout le processus, et `Process` peut refermer le
+            // descripteur qu'on lui confie. Fermer un descripteur partagé libère
+            // son numéro, que le prochain fichier ouvert récupère — et à partir
+            // de là n'importe quelle lecture du processus peut atterrir au
+            // mauvais endroit, sans la moindre erreur.
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
 
             // `terminationHandler` plutôt que `waitUntilExit` : celui-ci
             // bloquerait le fil appelant pendant tout le temps où l'utilisateur

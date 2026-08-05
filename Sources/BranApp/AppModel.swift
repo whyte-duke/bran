@@ -188,6 +188,10 @@ public final class AppModel {
 
     private func startSnapshot() {
         snapshot.applySettings()
+        // Vision est vérifié au lancement sur une image fabriquée en mémoire.
+        // Cent millisecondes, aucune capture d'écran, et une ligne de journal qui
+        // dirait immédiatement si le moteur redevenait muet.
+        snapshot.selfTest("au démarrage")
 
         if snapshotSettings.isEnabled {
             enableSnapshot(true)
