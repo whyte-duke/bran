@@ -22,7 +22,7 @@ import Synchronization
 /// de la phrase.
 ///
 /// **Mesuré sur un MacBook Pro M2 Pro**, `swift run BranSpike speech` :
-/// 506 Mo sur le disque, 42 Mo d'empreinte mémoire du processus après
+/// 483 Mo sur le disque, 42 Mo d'empreinte mémoire du processus après
 /// chargement et transcription, et **67× le temps réel** — 10,5 s d'audio
 /// transcrits en 0,16 s, soit environ 3,6 s pour quatre minutes de parole.
 ///
@@ -35,31 +35,49 @@ import Synchronization
 @Observable
 final class SpeechModelHost {
 
+    /// Où en est le modèle.
+    ///
+    /// **Il n'y a délibérément pas d'état « en cours de vérification ».** Savoir
+    /// si le modèle est là est une lecture de dossier, immédiate : afficher
+    /// « Vérification… » ne décrivait rien de réel et faisait croire à une
+    /// attente. L'ancien `.unknown` servait en fait à dire « sur le disque mais
+    /// pas encore en mémoire », ce qui est exactement `.installed`.
     enum Availability: Equatable {
-        case unknown
         /// Les fichiers ne sont pas sur le disque.
         case absent
         case downloading(Double)
+        /// Sur le disque, pas encore en mémoire. **Utilisable** : le chargement
+        /// se fait tout seul au premier appui sur le raccourci.
+        case installed
         case loading
+        /// Chargé en mémoire : la première dictée n'attendra rien.
         case ready
         case failed(String)
 
+        /// Peut-on dicter maintenant ? Vrai dès que les fichiers sont là — le
+        /// chargement n'est pas une condition, juste une latence.
+        var isUsable: Bool { self == .installed || self == .ready }
+
+        /// Le modèle est-il déjà en mémoire ?
         var isReady: Bool { self == .ready }
 
         var description: String {
             switch self {
-            case .unknown: "Vérification…"
-            case .absent: "Modèle non installé"
+            case .absent: "Modèle à télécharger — 483 Mo, une seule fois"
             case .downloading(let fraction):
                 "Téléchargement \((fraction * 100).formatted(.number.precision(.fractionLength(0)))) %"
+            case .installed: "Modèle installé, prêt à l'emploi"
             case .loading: "Chargement du modèle…"
-            case .ready: "Modèle prêt"
+            case .ready: "Modèle chargé en mémoire"
             case .failed(let reason): reason
             }
         }
     }
 
-    private(set) var availability: Availability = .unknown
+    /// Renseigné dès la construction, pas après une vérification asynchrone :
+    /// c'est une lecture de dossier, et l'interface ne doit jamais afficher un
+    /// état d'attente pour quelque chose d'immédiat.
+    private(set) var availability: Availability = SpeechModelHost.isDownloaded ? .installed : .absent
     /// Dernier temps de chargement observé, affiché dans les réglages. Un
     /// chiffre mesuré vaut mieux qu'une promesse.
     private(set) var lastLoadDuration: TimeInterval?
@@ -91,7 +109,7 @@ final class SpeechModelHost {
         if manager != nil {
             availability = .ready
         } else {
-            availability = Self.isDownloaded ? .unknown : .absent
+            availability = Self.isDownloaded ? .installed : .absent
         }
     }
 
@@ -240,7 +258,7 @@ final class SpeechModelHost {
         guard let manager else { return }
         await manager.cleanup()
         self.manager = nil
-        availability = .unknown
+        availability = Self.isDownloaded ? .installed : .absent
     }
 
     /// Supprime les fichiers du modèle. Réversible : un prochain usage les

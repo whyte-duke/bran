@@ -52,7 +52,10 @@ final class SnapshotSettings {
     private let defaults = UserDefaults.standard
 
     init() {
-        isEnabled = defaults.object(forKey: Key.enabled) as? Bool ?? false
+        // Activée par défaut, comme la dictée, et pour la même raison. Elle ne
+        // demande aucune autorisation supplémentaire : celle de l'écran suffit,
+        // et elle est déjà nécessaire aux réunions.
+        isEnabled = defaults.object(forKey: Key.enabled) as? Bool ?? true
         trigger = Self.read(HotkeyBinding.self, forKey: Key.trigger) ?? .textCapture
         language = (defaults.string(forKey: Key.language)).flatMap(OCRLanguage.init) ?? .french
         defaultLayout = (defaults.string(forKey: Key.layout)).flatMap(LayoutMode.init) ?? .monospaced

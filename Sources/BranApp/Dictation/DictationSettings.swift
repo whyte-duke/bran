@@ -50,7 +50,11 @@ final class DictationSettings {
     private let defaults = UserDefaults.standard
 
     init() {
-        isEnabled = defaults.object(forKey: Key.enabled) as? Bool ?? false
+        // **Activée par défaut.** Une fonction qu'il faut aller cocher quelque
+        // part n'existe pas pour la plupart des gens. Le réglage exprime une
+        // intention, pas une autorisation : si l'Accessibilité manque,
+        // `setEnabled(true)` échoue, remet ceci à faux, et l'accueil le dit.
+        isEnabled = defaults.object(forKey: Key.enabled) as? Bool ?? true
         trigger = Self.read(HotkeyBinding.self, forKey: Key.trigger) ?? .rightCommand
         triggerMode = (defaults.string(forKey: Key.triggerMode)).flatMap(DictationMachine.Trigger.init) ?? .toggle
         cancelKey = Self.read(HotkeyBinding.self, forKey: Key.cancelKey) ?? .escape

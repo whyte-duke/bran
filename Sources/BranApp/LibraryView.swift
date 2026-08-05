@@ -70,6 +70,8 @@ struct LibraryView: View {
             // existait, une entrée de menu la révélait parfois, et le modèle de
             // dictée pouvait rester non téléchargé indéfiniment sans que rien
             // ne le signale.
+            model.permissions.refresh()
+            SnapshotLog.record("accueil — prêt=\(model.isFullyReady) \(model.readinessDescription)")
             if model.isFullyReady == false {
                 WindowPresenter.bringToFront("permissions", using: openWindow)
             }

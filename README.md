@@ -57,7 +57,7 @@ your Mac — no account, no API key, nothing leaves the machine.
 - **NVIDIA Parakeet TDT 0.6B v3**, running on the Neural Engine through
   [FluidAudio](https://github.com/FluidInference/FluidAudio) (Apache 2.0).
   25 European languages, and you can pin one so it stops half-translating you.
-- **Measured on a MacBook Pro M2 Pro:** 506 MB on disk, 42 MB of process
+- **Measured on a MacBook Pro M2 Pro:** 483 MB on disk, 42 MB of process
   footprint, **67× realtime** — 4 minutes of speech transcribed in ~3.6 s.
   Run `swift run BranSpike speech` to get the number on your own machine
   instead of taking ours.
@@ -169,7 +169,7 @@ Trois choses, entièrement sur ce Mac.
 
 🎙 Dicter dans n'importe quelle application         [Autoriser]
    ⌘ droite → vous parlez → le texte est collé.    [Télécharger le modèle]
-   ○ Modèle à télécharger — 506 Mo, une seule fois
+   ○ Modèle à télécharger — 483 Mo, une seule fois
 
 ⧉  Récupérer le texte affiché à l'écran
    ⌘⇧2 → un rectangle → dans le presse-papiers.

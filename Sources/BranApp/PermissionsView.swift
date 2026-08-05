@@ -140,12 +140,20 @@ struct PermissionsView: View {
             case .absent, .failed:
                 Button("Télécharger le modèle") { model.dictation.host.warmUp() }
             case .downloading(let fraction):
-                ProgressView(value: fraction)
-                    .progressViewStyle(.linear)
-                    .frame(width: 120)
+                // La progression réelle, pas un tourniquet : 483 Mo sans chiffre
+                // en face, c'est une attente qu'on ne sait pas mesurer.
+                VStack(alignment: .trailing, spacing: 3) {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .frame(width: 130)
+                    Text("\(Int(fraction * 100)) % de 483 Mo")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
             case .loading:
                 ProgressView().controlSize(.small)
-            case .ready, .unknown:
+            case .installed, .ready:
                 EmptyView()
             }
         }
@@ -155,18 +163,18 @@ struct PermissionsView: View {
         guard isAccessibilityTrusted else { return .todo("Demande l'Accessibilité") }
 
         switch model.dictation.host.availability {
-        case .ready:
-            return .ready("Parakeet TDT 0.6B v3 installé · français")
+        case .installed, .ready:
+            return .ready("Parakeet TDT 0.6B v3 · français")
         case .downloading(let fraction):
-            return .todo("Téléchargement du modèle — \(Int(fraction * 100)) %")
+            return .todo("Téléchargement — \(Int(fraction * 100)) % de 483 Mo")
         case .loading:
             return .todo("Chargement du modèle…")
         case .failed(let reason):
             return .todo(reason)
-        case .absent, .unknown:
-            // 506 Mo mesurés sur disque, une seule fois. Le dire évite la
-            // question qu'on se pose toujours avant de cliquer.
-            return .todo("Modèle à télécharger — 506 Mo, une seule fois")
+        case .absent:
+            // La taille annoncée avant le clic : c'est la question qu'on se pose
+            // toujours, et ne pas y répondre fait hésiter.
+            return .todo("Modèle à télécharger — 483 Mo, une seule fois")
         }
     }
 

@@ -192,7 +192,15 @@ public final class AppModel {
     var isFullyReady: Bool {
         permissions.canRecord
             && HotkeyMonitor.isTrusted
-            && dictation.host.availability.isReady
+            && dictation.host.availability.isUsable
+    }
+
+    /// Le détail, pour le journal. Un accueil qui ne s'ouvre pas se diagnostique
+    /// mal sans savoir laquelle des trois conditions était déjà remplie.
+    var readinessDescription: String {
+        "écran=\(permissions.screenRecording) micro=\(permissions.microphone) "
+        + "accessibilité=\(HotkeyMonitor.isTrusted) "
+        + "modèle=\(dictation.host.availability)"
     }
 
     // MARK: - Capture de texte
