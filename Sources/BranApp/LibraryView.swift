@@ -25,6 +25,8 @@ import SwiftUI
 struct LibraryView: View {
     @Bindable var model: AppModel
 
+    @Environment(\.openWindow) private var openWindow
+
     @State private var pane: LibraryPane = .meetings
     @State private var meetingsPath: [UUID] = []
     @State private var meetingsQuery = ""
@@ -63,6 +65,15 @@ struct LibraryView: View {
         }
         .animation(.snappy(duration: 0.25), value: model.hasOpenSession)
         .task {
+            // L'accueil s'ouvre de lui-même tant que les trois capacités ne
+            // sont pas en place. Sans ça il ne s'ouvrait jamais : la fenêtre
+            // existait, une entrée de menu la révélait parfois, et le modèle de
+            // dictée pouvait rester non téléchargé indéfiniment sans que rien
+            // ne le signale.
+            if model.isFullyReady == false {
+                WindowPresenter.bringToFront("permissions", using: openWindow)
+            }
+
             await model.store.reload()
             // Le CRM n'envoie aucune notification : c'est à bran de redemander
             // l'état des jobs laissés en plan par une fermeture de l'app.

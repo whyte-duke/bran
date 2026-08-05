@@ -22,11 +22,13 @@ struct BranApp: App {
         // n'a pas de premier lancement utilisable si cette icône est masquée.
         .defaultLaunchBehavior(.presented)
 
-        Window("bran — autorisations", id: "permissions") {
+        // « Bienvenue » et non « autorisations » : l'écran dit ce que bran sait
+        // faire, et les autorisations n'y sont qu'une conséquence.
+        Window("bran — bienvenue", id: "permissions") {
             PermissionsView(model: model)
         }
         .windowResizability(.contentSize)
-        .defaultSize(width: 460, height: 460)
+        .defaultSize(width: 520, height: 520)
         .defaultLaunchBehavior(.suppressed)
     }
 }

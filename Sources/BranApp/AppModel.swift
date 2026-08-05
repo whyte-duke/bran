@@ -184,6 +184,17 @@ public final class AppModel {
         }
     }
 
+    /// Tout est-il en place — les trois capacités, modèle compris ?
+    ///
+    /// Sert à deux endroits : l'intitulé de l'entrée de menu, et la décision
+    /// d'ouvrir l'accueil au lancement. Un accueil qui ne s'ouvre jamais
+    /// n'accueille personne, et c'est exactement ce qui se passait.
+    var isFullyReady: Bool {
+        permissions.canRecord
+            && HotkeyMonitor.isTrusted
+            && dictation.host.availability.isReady
+    }
+
     // MARK: - Capture de texte
 
     private func startSnapshot() {

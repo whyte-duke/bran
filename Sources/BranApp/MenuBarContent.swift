@@ -61,10 +61,12 @@ struct MenuBarContent: View {
 
         Divider()
 
-        if model.permissions.canRecord == false {
-            Button("Autorisations…") {
-                WindowPresenter.bringToFront("permissions", using: openWindow)
-            }
+        // Toujours présent. La version précédente ne le montrait que si
+        // l'enregistrement était impossible : quelqu'un dont l'enregistrement
+        // marchait n'avait donc aucun moyen de découvrir la dictée ni la
+        // capture de texte, ni de télécharger le modèle.
+        Button(model.isFullyReady ? "Bienvenue…" : "Bienvenue — il reste à faire…") {
+            WindowPresenter.bringToFront("permissions", using: openWindow)
         }
 
         Divider()
