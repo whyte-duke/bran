@@ -47,7 +47,9 @@ final class UploadService {
         // Un seul candidat ET rien de déjà déposé dessus : le seul cas où
         // décider tout seul est légitime. Sinon on demande — le dernier
         // compte-rendu généré gagne sur `bookings.notes`.
-        if near.count == 1, best.hasExistingTranscription == false {
+        // Un RDV sans entreprise ne peut pas être retenu automatiquement : il
+        // n'est pas envoyable, et le présenter comme évident serait trompeur.
+        if near.count == 1, best.hasExistingTranscription == false, best.company != nil {
             return .unique(best)
         }
         return .ambiguous(near)
@@ -55,13 +57,41 @@ final class UploadService {
 
     // MARK: - Envoi
 
-    func send(_ recording: Recording, to booking: CRMBooking, complement: String?) {
-        guard trackers[recording.id] == nil else { return }
+    /// Dernier verrou avant l'envoi.
+    ///
+    /// Le contrôle est ici et pas seulement dans l'interface : un envoi
+    /// automatique, une reprise après redémarrage ou un futur raccourci clavier
+    /// passeraient à côté d'une garde qui ne vivrait que dans une vue.
+    @discardableResult
+    func send(_ recording: Recording, to booking: CRMBooking, complement: String?) -> Bool {
+        let eligibility = UploadEligibility.evaluate(booking: booking, isConfigured: configuration.isConfigured)
+        guard eligibility.canSend else {
+            states[recording.id] = .failed(eligibility.blockingReason ?? "Envoi impossible.")
+            return false
+        }
+
+        guard trackers[recording.id] == nil else { return false }
 
         trackers[recording.id] = Task { [weak self] in
             await self?.perform(recording, booking: booking, complement: complement)
             self?.trackers[recording.id] = nil
         }
+        return true
+    }
+
+    /// Réévalue l'admissibilité en rafraîchissant la vue du CRM.
+    /// Sert après avoir rattaché le lead côté CRM.
+    func eligibility(for recording: Recording, in directory: MeetingDirectory) async -> UploadEligibility {
+        await directory.refresh()
+
+        let booking: CRMBooking?
+        if let bookingID = recording.metadata.bookingID {
+            booking = directory.bookings.first { $0.booking_id == bookingID }
+        } else {
+            booking = (try? await resolveBooking(for: recording))?.booking
+        }
+
+        return UploadEligibility.evaluate(booking: booking, isConfigured: configuration.isConfigured)
     }
 
     private func perform(_ recording: Recording, booking: CRMBooking, complement: String?) async {

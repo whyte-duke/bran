@@ -89,29 +89,40 @@ struct BookingPickerSheet: View {
         .padding(.vertical, 12)
     }
 
+    private var eligibility: UploadEligibility {
+        .evaluate(booking: selection, isConfigured: true)
+    }
+
     private var footer: some View {
-        HStack {
-            if let selection, selection.hasExistingTranscription {
-                Label("Ce RDV porte déjà une transcription — le nouveau compte-rendu remplacera l'ancien.", systemImage: "exclamationmark.circle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if let selection, selection.isOrphan {
-                Label("RDV non rattaché à un lead : le compte-rendu n'apparaîtra sur aucune fiche.", systemImage: "questionmark.circle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 3) {
+                if let reason = eligibility.blockingReason {
+                    Label(reason, systemImage: "xmark.octagon.fill")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.red)
+                    if let remedy = eligibility.remedy {
+                        Text(remedy)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let selection, selection.hasExistingTranscription {
+                    Label("Ce RDV porte déjà une transcription — le nouveau compte-rendu remplacera l'ancien.", systemImage: "exclamationmark.circle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
             }
+            .fixedSize(horizontal: false, vertical: true)
 
             Spacer(minLength: 12)
 
             Button("Annuler", role: .cancel) { onCancel() }
 
             Button("Envoyer") {
-                onSend(selection!, complement.isEmpty ? nil : complement)
+                guard let booking = eligibility.booking, eligibility.canSend else { return }
+                onSend(booking, complement.isEmpty ? nil : complement)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(selection == nil)
+            .disabled(eligibility.canSend == false)
             .keyboardShortcut(.defaultAction)
         }
         .padding(16)
@@ -151,9 +162,10 @@ private struct BookingRow: View {
                     .help("Une transcription a déjà été déposée sur ce RDV.")
             }
             if booking.isOrphan {
-                Image(systemName: "questionmark.circle")
-                    .foregroundStyle(.secondary)
-                    .help("Aucun lead rattaché — l'email du prospect n'a pas de domaine connu.")
+                Label("sans entreprise", systemImage: "xmark.octagon.fill")
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(.red)
+                    .help("Aucun lead rattaché : envoi impossible tant que le RDV n'est pas relié à une entreprise dans le CRM.")
             }
         }
         .padding(.vertical, 4)

@@ -55,6 +55,14 @@ enum UploadState: Equatable, Sendable {
 /// « Ne jamais deviner » est une règle du contrat, pas une précaution : un audio
 /// rattaché au mauvais lead écrase le compte-rendu de quelqu'un d'autre.
 enum BookingResolution: Sendable {
+    /// Le meilleur candidat, quel que soit le cas.
+    var booking: CRMBooking? {
+        switch self {
+        case .unique(let booking): booking
+        case .ambiguous(let candidates), .none(let candidates): candidates.first
+        }
+    }
+
     /// Un seul RDV dans la fenêtre de ±2 h, sans transcription déjà déposée.
     case unique(CRMBooking)
     /// Plusieurs candidats, ou un candidat qui porte déjà une transcription.

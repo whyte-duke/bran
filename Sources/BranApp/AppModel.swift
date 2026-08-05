@@ -431,6 +431,19 @@ public final class AppModel {
         // Rattachement certain par le code Meet : aucune ambiguïté à lever.
         if let bookingID = recording.metadata.bookingID,
            let booking = directory.bookings.first(where: { $0.booking_id == bookingID }) {
+            let eligibility = UploadEligibility.evaluate(
+                booking: booking,
+                isConfigured: uploads.configuration.isConfigured
+            )
+
+            guard eligibility.canSend else {
+                // Ni envoi, ni fenêtre de choix : il n'y a rien à choisir, il y
+                // a quelque chose à réparer dans le CRM. Le détail de
+                // l'enregistrement l'explique et propose de revérifier.
+                lastFailure = eligibility.blockingReason
+                return
+            }
+
             if uploads.configuration.autoUpload {
                 uploads.send(recording, to: booking, complement: nil)
             } else {
@@ -476,6 +489,12 @@ public final class AppModel {
     func confirmUpload(_ recording: Recording, booking: CRMBooking, complement: String?) {
         pendingUpload = nil
         uploads.send(recording, to: booking, complement: complement)
+    }
+
+    /// Admissibilité d'un enregistrement, réévaluée en interrogeant le CRM.
+    /// C'est le bouton « Revérifier » après avoir rattaché le lead.
+    func recheckEligibility(for recording: Recording) async -> UploadEligibility {
+        await uploads.eligibility(for: recording, in: directory)
     }
 
     private func startTicking() {

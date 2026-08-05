@@ -7,6 +7,8 @@ struct RecordingDetailView: View {
     private var store: RecordingStore { model.store }
 
     @State private var notes = ""
+    @State private var eligibility: UploadEligibility?
+    @State private var isChecking = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -80,16 +82,7 @@ struct RecordingDetailView: View {
         let upload = model.uploads.state(for: recording.id)
 
         if metadata.transcriptionID == nil, upload == nil {
-            HStack {
-                Label("Pas encore envoyé au CRM", systemImage: "arrow.up.doc")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Envoyer au CRM…") { model.requestUpload(for: recording) }
-                    .disabled(model.uploads.configuration.isConfigured == false)
-            }
-            .font(.callout)
-            .padding(12)
-            .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
+            notSentPanel
         } else {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
@@ -165,6 +158,81 @@ struct RecordingDetailView: View {
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
+        }
+    }
+
+    /// Enregistrement pas encore envoyé.
+    ///
+    /// Rien ne part tant que le rendez-vous n'est pas rattaché à une entreprise
+    /// dans le CRM : un compte-rendu produit sur un RDV orphelin est facturé,
+    /// puis n'apparaît sur aucune fiche. Le bouton reste donc désactivé, avec la
+    /// raison et la marche à suivre — pas un refus muet.
+    @ViewBuilder
+    private var notSentPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Pas encore envoyé au CRM", systemImage: "arrow.up.doc")
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                if isChecking {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Vérifier le rattachement") { check() }
+                        .disabled(model.uploads.configuration.isConfigured == false)
+                }
+
+                Button("Envoyer au CRM…") { model.requestUpload(for: recording) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(canSend == false)
+            }
+            .font(.callout)
+
+            if let eligibility, let reason = eligibility.blockingReason {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(reason, systemImage: "xmark.octagon.fill")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.red)
+
+                    if let remedy = eligibility.remedy {
+                        Text(remedy)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if let booking = eligibility.booking,
+                       let link = booking.meeting_url,
+                       let url = URL(string: link) {
+                        Link("Ouvrir la visio du rendez-vous", destination: url)
+                            .font(.caption)
+                    }
+                }
+            } else if let eligibility, let booking = eligibility.booking {
+                Label("Rattaché à « \(booking.displayName) »", systemImage: "checkmark.seal.fill")
+                    .font(.callout)
+                    .foregroundStyle(.green)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
+        .task { check() }
+    }
+
+    /// Tant que la vérification n'a pas eu lieu, on n'autorise rien : on ne sait
+    /// pas encore si l'envoi est légitime.
+    private var canSend: Bool {
+        model.uploads.configuration.isConfigured && eligibility?.canSend == true
+    }
+
+    private func check() {
+        guard model.uploads.configuration.isConfigured, isChecking == false else { return }
+        isChecking = true
+        Task {
+            eligibility = await model.recheckEligibility(for: recording)
+            isChecking = false
         }
     }
 
