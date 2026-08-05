@@ -1,11 +1,18 @@
 # bran
 
-**Automatic Google Meet recorder for macOS.** Free, open source, fully local.
-No account, no subscription, no upload.
+**Meeting recorder, dictation and on-screen text capture for macOS.** Free, open
+source, fully local. No account, no subscription, no upload.
 
-bran watches for Google Meet windows, offers to record when one appears, and
-captures your screen, the other participants' audio and your own microphone into
-a single `.mp4` file that stays on your Mac.
+Three things, all of them computed on your Mac:
+
+| | | |
+|---|---|---|
+| **Record** | a Meet window appears → bran offers → one `.mp4` | screen + mic |
+| **Dictate** | hold ⌘ right → speak → the text is pasted where your cursor was | Parakeet TDT 0.6B v3 |
+| **Read the screen** | ⌘⇧2 → drag a rectangle → the text is in your clipboard | macOS Vision |
+
+Nothing is uploaded. The dictation model runs on the Neural Engine; the text
+recognition ships with macOS. Neither one needs a network.
 
 > The interesting problem here was never *recording* — the system does that. It
 > was the **trigger** and the **library**: starting without being asked, and
@@ -77,6 +84,109 @@ trade-off of an unnotarised app; see [Permissions](#permissions).
 
 ---
 
+## On-screen text capture
+
+Press ⌘⇧2 (configurable). The **system crosshair** opens — the one from ⌘⇧4,
+with its magnifier, its live dimensions, space to move the selection, space
+again for window mode, escape to cancel. Drag a rectangle, and its text is in
+your clipboard.
+
+Using `screencapture -i` rather than drawing our own selection UI is deliberate.
+That crosshair is twenty years of muscle memory; a reimplementation missing the
+magnifier, or with a slightly different escape, is noticed immediately.
+
+**No new permission.** It reuses the Screen Recording grant already needed for
+meetings.
+
+### What it actually reads
+
+Measured on real screenshots taken on the author's Mac, macOS 26.5, M2 Pro:
+
+| | character error | latency |
+|---|---|---|
+| French prose | **0.7 %** | 349 ms |
+| Swift source | **0.7 %** | 188 ms |
+| terminal output (`ls -la`, permissions) | **4.5 %** | 256 ms |
+| full screen, 2880×2416, 60 lines | — | 973 ms |
+
+Zero download, zero resident memory, 30 languages.
+
+Two pieces carry most of that, and both live in `Sources/BranVision/` where they
+are tested without a screen:
+
+**`TextAssembler`** — Vision returns *regions*, not lines. On `ls -la` output
+every column is its own observation, and stacking them vertically produces text
+that was never on screen. Grouping by baseline then sorting by x took a real
+terminal capture from **34.6 % error to 3.7 %**. The same geometry restores code
+indentation exactly, from `boundingBox.origin.x ÷ median character width`.
+
+**`CharacterFixer`** — a bullet read in place of a period accounted for 70 % of
+the remaining errors on Swift. Nine substitutions, each for a character that has
+no business existing in code, take it from **2.4 % to 0.7 %**. Locked to
+monospaced mode: in prose, `—` and `'` are correct spelling.
+
+It deliberately does **not** fix `ls` → `1s` or `wc -l` → `wc -1`, which are the
+errors that remain. A correction that guesses wrong produces text that is wrong
+but plausible — and you would paste it without noticing. A visible error beats an
+invisible one, especially in code you are about to run.
+
+### Reading the same capture twice
+
+The image is kept for 7 days (configurable, 0 disables it). Re-reading in the
+*other* layout mode is the retry that matters: terminal output read as prose
+loses its columns, and that is one click to repair. Re-running the same mode on a
+deterministic engine would return the same text.
+
+Real captures of text regions measure 150–270 KB each, so ten a day for a month
+is about 75 MB.
+
+### Why not a local vision model
+
+Considered, and measured against. `MLXVLM` pulls **15 packages** — including a
+full networking stack — where bran currently has one dependency. The download
+path also failed silently in testing: 30 minutes, 2.6 GB received, 14 MB
+persisted, no error. If that fails on a fast connection in development, it fails
+for users.
+
+The engine sits behind an `OCREngine` protocol, so a local model can be added if
+a real case demands it. Handwriting, photographed text and languages outside the
+supported 30 are where it would win.
+
+---
+
+## First launch
+
+The welcome screen is organised by **what bran can do**, not by which system
+checkbox it wants — and each capability says what it still needs:
+
+```
+bran
+Trois choses, entièrement sur ce Mac.
+
+⏺  Enregistrer vos réunions                        [Autoriser l'écran]
+   bran repère une fenêtre Meet et propose.        [Autoriser le micro]
+   ○ Écran et micro requis
+
+🎙 Dicter dans n'importe quelle application         [Autoriser]
+   ⌘ droite → vous parlez → le texte est collé.    [Télécharger le modèle]
+   ○ Modèle à télécharger — 506 Mo, une seule fois
+
+⧉  Récupérer le texte affiché à l'écran
+   ⌘⇧2 → un rectangle → dans le presse-papiers.
+   ✓ Aucune autorisation supplémentaire
+```
+
+The dictation model is downloaded from here, with its size stated before you
+click and a progress bar in place. A feature whose engine is not installed does
+not exist for someone who just opened the app, and they will not go looking for
+it in a settings screen they do not know to open.
+
+The third card is the one that matters most: text capture reuses the Screen
+Recording grant already needed for meetings, so it is available the moment
+recording is.
+
+---
+
 ## Requirements
 
 | | |
@@ -123,10 +233,10 @@ On first launch bran asks for:
 
 | Permission | Required | Why |
 |---|---|---|
-| Screen Recording | yes | capture, and the window titles used for detection |
+| Screen Recording | yes | capture, on-screen text, and the window titles used for detection |
 | Microphone | yes | your own voice, and dictation |
 | Notifications | recommended | the "record this meeting?" prompt |
-| Accessibility | only for dictation | reading the global hotkey, and pasting |
+| Accessibility | dictation and text capture | reading the global hotkeys, and pasting |
 | Calendar | no | names the recording after the calendar event |
 
 macOS only applies the Screen Recording and Accessibility grants at the **next

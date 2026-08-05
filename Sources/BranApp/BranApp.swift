@@ -23,7 +23,7 @@ struct BranApp: App {
         .defaultLaunchBehavior(.presented)
 
         Window("bran — autorisations", id: "permissions") {
-            PermissionsView(permissions: model.permissions)
+            PermissionsView(model: model)
         }
         .windowResizability(.contentSize)
         .defaultSize(width: 460, height: 460)
