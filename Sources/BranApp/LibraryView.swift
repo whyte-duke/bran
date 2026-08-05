@@ -48,6 +48,7 @@ struct LibraryView: View {
             BookingPickerSheet(
                 recording: target.recording,
                 candidates: target.candidates,
+                model: model,
                 onSend: { booking, complement in
                     model.confirmUpload(target.recording, booking: booking, complement: complement)
                 },

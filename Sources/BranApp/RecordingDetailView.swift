@@ -202,11 +202,20 @@ struct RecordingDetailView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    if let booking = eligibility.booking,
-                       let link = booking.meeting_url,
-                       let url = URL(string: link) {
-                        Link("Ouvrir la visio du rendez-vous", destination: url)
-                            .font(.caption)
+                    HStack(spacing: 12) {
+                        // Un blocage doit toujours laisser une sortie : le RDV
+                        // rapproché n'est peut-être simplement pas le bon.
+                        Button("Choisir un autre rendez-vous…") {
+                            model.requestUpload(for: recording)
+                        }
+                        .font(.caption)
+
+                        if let booking = eligibility.booking,
+                           let link = booking.meeting_url,
+                           let url = URL(string: link) {
+                            Link("Ouvrir la visio", destination: url)
+                                .font(.caption)
+                        }
                     }
                 }
             } else if let eligibility, let booking = eligibility.booking {

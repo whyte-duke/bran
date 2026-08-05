@@ -473,14 +473,26 @@ public final class AppModel {
                 lastFailure = "Liaison CRM non configurée — voir les Réglages."
                 return
             }
+            let linked = recording.metadata.bookingID.flatMap { id in
+                directory.bookings.first { $0.booking_id == id }
+            }
+
             do {
-                switch try await uploads.resolveBooking(for: recording) {
-                case .unique(let booking):
-                    pendingUpload = (recording, [booking])
-                case .ambiguous(let candidates), .none(let candidates):
-                    pendingUpload = (recording, candidates)
+                let nearby: [CRMBooking] = switch try await uploads.resolveBooking(for: recording) {
+                case .unique(let booking): [booking]
+                case .ambiguous(let candidates), .none(let candidates): candidates
                 }
+
+                // Le RDV déjà rapproché passe en tête sans être dupliqué.
+                let candidates = linked.map { booking in
+                    [booking] + nearby.filter { $0.booking_id != booking.booking_id }
+                } ?? nearby
+
+                pendingUpload = (recording, candidates)
             } catch {
+                // Le CRM ne répond pas : la feuille reste utile, sa recherche
+                // retentera l'appel.
+                pendingUpload = (recording, linked.map { [$0] } ?? [])
                 lastFailure = "CRM injoignable : \(error.localizedDescription)"
             }
         }
@@ -489,6 +501,10 @@ public final class AppModel {
     func confirmUpload(_ recording: Recording, booking: CRMBooking, complement: String?) {
         pendingUpload = nil
         uploads.send(recording, to: booking, complement: complement)
+    }
+
+    func searchableBookings(forceRefresh: Bool = false) async -> UploadService.SearchResults {
+        await uploads.searchableBookings(forceRefresh: forceRefresh)
     }
 
     /// Admissibilité d'un enregistrement, réévaluée en interrogeant le CRM.

@@ -55,6 +55,40 @@ final class UploadService {
         return .ambiguous(near)
     }
 
+    /// Tous les rendez-vous consultables, pour une recherche manuelle.
+    ///
+    /// Fenêtre de 90 jours — le maximum que le contrat autorise — et 100 RDV
+    /// au plus. Au-delà, l'API tronque sans le dire : `wasTruncated` permet de
+    /// le signaler plutôt que de laisser croire à une liste exhaustive.
+    struct SearchResults: Sendable {
+        let bookings: [CRMBooking]
+        var wasTruncated: Bool { bookings.count >= 100 }
+    }
+
+    private var searchCache: (results: SearchResults, fetchedAt: Date)?
+
+    func searchableBookings(forceRefresh: Bool = false) async -> SearchResults {
+        if forceRefresh == false,
+           let cache = searchCache,
+           Date.now.timeIntervalSince(cache.fetchedAt) < 120 {
+            return cache.results
+        }
+
+        guard let client = client() else { return SearchResults(bookings: []) }
+
+        do {
+            let bookings = try await client.targets(
+                from: Date.now.addingTimeInterval(-45 * 24 * 3600),
+                to: Date.now.addingTimeInterval(45 * 24 * 3600)
+            )
+            let results = SearchResults(bookings: bookings.sorted { $0.start_at > $1.start_at })
+            searchCache = (results, .now)
+            return results
+        } catch {
+            return SearchResults(bookings: [])
+        }
+    }
+
     // MARK: - Envoi
 
     /// Dernier verrou avant l'envoi.
