@@ -51,6 +51,8 @@ struct SettingsPane: View {
 
                 DictationSettingsSection(model: model)
 
+                SnapshotSettingsSection(model: model)
+
                 CRMSettingsSection(configuration: model.uploads.configuration, uploads: model.uploads)
 
                 Section("Autorisations") {

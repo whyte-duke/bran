@@ -20,6 +20,12 @@ let package = Package(
         // Tout ce qui se teste sans micro et sans autorisation.
         .target(name: "BranSpeech"),
 
+        // Même contrat encore, pour la capture de texte à l'écran. Ne dépend
+        // pas de Vision : l'assemblage des lignes et la table de substitutions
+        // — là où se jouent presque toutes les erreurs — se testent sur des
+        // rectangles nus, sans image et sans autorisation.
+        .target(name: "BranVision"),
+
         // L'application. Assemblée en .app signé par Scripts/build-app.sh :
         // SwiftPM produit le binaire, le script produit le bundle. Ça évite un
         // .xcodeproj tout en gardant les #Preview (ouvrir Package.swift dans
@@ -29,6 +35,7 @@ let package = Package(
             dependencies: [
                 "BranCore",
                 "BranSpeech",
+                "BranVision",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ]
         ),
@@ -47,5 +54,6 @@ let package = Package(
 
         .testTarget(name: "BranCoreTests", dependencies: ["BranCore"]),
         .testTarget(name: "BranSpeechTests", dependencies: ["BranSpeech"]),
+        .testTarget(name: "BranVisionTests", dependencies: ["BranVision"]),
     ]
 )

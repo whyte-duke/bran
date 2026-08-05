@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 
-/// Le guet du raccourci global.
+/// Le guet des raccourcis globaux.
 ///
 /// Pourquoi un `CGEventTap` et pas Carbon `RegisterEventHotKey` : une touche
 /// modificatrice seule — Command droite — n'émet jamais de `keyDown`. Elle
@@ -16,18 +16,52 @@ import Foundation
 /// macOS désactive le tap et envoie `.tapDisabledByTimeout`. Sans réarmement, le
 /// raccourci est mort jusqu'au redémarrage de l'application, **sans aucun
 /// message**. C'est le seul défaut de cette fonctionnalité qui la rende
-/// définitivement muette en silence. D'où `re-enable` ci-dessous, et d'où un
+/// définitivement muette en silence. D'où `reenable` ci-dessous, et d'où un
 /// callback qui ne fait rien d'autre que poster sur la boucle principale.
+///
+/// **Un seul tap pour toutes les fonctions.** La dictée et la capture de texte
+/// partagent ce guet. Instancier un second `HotkeyMonitor` créerait un
+/// deuxième tap sur tout le clavier du système : deux fois le travail à chaque
+/// frappe, et surtout deux ports qui peuvent mourir indépendamment sur un
+/// dépassement de délai. Un seul port, plusieurs liaisons.
+///
+/// ```
+///   ┌─────────────────────┐
+///   │     CGEventTap      │  un seul, listenOnly
+///   └──────────┬──────────┘
+///        ┌─────┴──────┬────────────┐
+///        ▼            ▼            ▼
+///     dictée      capture      annulation
+///   (⌘ droite)   (⌘⇧2 …)         (Échap)
+/// ```
 @MainActor
 final class HotkeyMonitor {
 
+    /// Ce qu'un raccourci déclenche. L'ordre de `allCases` fixe la priorité
+    /// quand deux fonctions partagent la même touche — l'interface empêche ce
+    /// cas, mais un fichier de réglages écrit à la main peut le produire.
+    enum Action: String, CaseIterable, Sendable, Codable {
+        case dictation
+        case snapshot
+
+        var label: String {
+            switch self {
+            case .dictation: "Dictée"
+            case .snapshot: "Capture de texte"
+            }
+        }
+    }
+
     enum Signal: Sendable {
-        case triggerDown
-        case triggerUp
+        case triggerDown(Action)
+        case triggerUp(Action)
         case cancel
     }
 
-    var trigger: HotkeyBinding = .rightCommand
+    /// Les touches surveillées, par fonction. Une fonction absente n'est pas
+    /// surveillée du tout.
+    private(set) var bindings: [Action: HotkeyBinding] = [:]
+
     var cancelKey: HotkeyBinding = .escape
 
     /// Appelé sur la boucle principale. Doit rester bref.
@@ -38,9 +72,34 @@ final class HotkeyMonitor {
     /// Dernier masque de modificateurs connu, pour distinguer un appui d'un
     /// relâchement dans `flagsChanged`.
     private var lastFlags: CGEventFlags = []
-    private var isTriggerHeld = false
+    /// Les fonctions dont la touche est actuellement enfoncée. Un ensemble et
+    /// non un booléen : maintenir Command droite pour dicter pendant qu'un
+    /// autre raccourci va et vient doit rester cohérent.
+    private var held: Set<Action> = []
 
     private(set) var isInstalled = false
+
+    // MARK: - Liaisons
+
+    /// Associe une touche à une fonction. `nil` retire la surveillance.
+    func bind(_ action: Action, to binding: HotkeyBinding?) {
+        if let binding {
+            bindings[action] = binding
+        } else {
+            bindings.removeValue(forKey: action)
+            held.remove(action)
+        }
+    }
+
+    /// Les fonctions qui partagent la même touche qu'`action`. L'interface s'en
+    /// sert pour refuser un réglage avant qu'il ne casse quelque chose, plutôt
+    /// que de laisser deux fonctions se déclencher ensemble.
+    func conflicts(for binding: HotkeyBinding, excluding action: Action) -> [Action] {
+        bindings.compactMap { key, value in
+            guard key != action, value == binding else { return nil }
+            return key
+        }
+    }
 
     // MARK: - Autorisation
 
@@ -108,7 +167,7 @@ final class HotkeyMonitor {
         tap = nil
         source = nil
         isInstalled = false
-        isTriggerHeld = false
+        held.removeAll()
     }
 
     deinit {
@@ -123,7 +182,7 @@ final class HotkeyMonitor {
     /// et transmettre. Tout le reste attend la boucle principale.
     nonisolated private func receive(type: CGEventType, event: CGEvent) {
         // Le réarmement d'abord : c'est la seule branche dont dépend la survie
-        // du raccourci.
+        // des raccourcis.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             MainActor.assumeIsolated { self.reenable() }
             return
@@ -146,36 +205,52 @@ final class HotkeyMonitor {
         defer { lastFlags = flags }
 
         // — Annulation ————————————————————————————————————————————
-        if type == .keyDown, matches(cancelKey, keyCode: keyCode, flags: flags) {
+        //
+        // Testée en premier, et seulement si aucune fonction ne revendique la
+        // même touche : sinon régler la capture sur Échap rendrait l'annulation
+        // et le déclenchement indiscernables.
+        if type == .keyDown,
+           matches(cancelKey, keyCode: keyCode, flags: flags),
+           bindings.values.contains(cancelKey) == false {
             onSignal?(.cancel)
             return
         }
 
-        // — Déclencheur modificateur seul ————————————————————————
-        if trigger.isModifierOnly {
-            guard type == .flagsChanged, keyCode == trigger.keyCode else { return }
+        // — Fonctions ——————————————————————————————————————————————
+        //
+        // Ordre stable via `allCases` : deux fonctions sur la même touche ne
+        // doivent pas se déclencher dans un ordre qui change d'un lancement à
+        // l'autre.
+        for action in Action.allCases {
+            guard let binding = bindings[action] else { continue }
 
-            // Un `flagsChanged` ne dit pas s'il s'agit d'un appui ou d'un
-            // relâchement : il faut regarder si le bit correspondant vient
-            // d'apparaître ou de disparaître.
-            let bit = Self.deviceBit(for: trigger.keyCode)
-            let isDown = (flags.rawValue & bit) != 0
-            let wasDown = (lastFlags.rawValue & bit) != 0
-            guard isDown != wasDown else { return }
+            if binding.isModifierOnly {
+                guard type == .flagsChanged, keyCode == binding.keyCode else { continue }
 
-            isTriggerHeld = isDown
-            onSignal?(isDown ? .triggerDown : .triggerUp)
-            return
-        }
+                // Un `flagsChanged` ne dit pas s'il s'agit d'un appui ou d'un
+                // relâchement : il faut regarder si le bit correspondant vient
+                // d'apparaître ou de disparaître.
+                let bit = Self.deviceBit(for: binding.keyCode)
+                let isDown = (flags.rawValue & bit) != 0
+                let wasDown = (lastFlags.rawValue & bit) != 0
+                guard isDown != wasDown else { continue }
 
-        // — Déclencheur touche normale ——————————————————————————
-        guard keyCode == trigger.keyCode else { return }
-        if type == .keyDown, matches(trigger, keyCode: keyCode, flags: flags) {
-            isTriggerHeld = true
-            onSignal?(.triggerDown)
-        } else if type == .keyUp, isTriggerHeld {
-            isTriggerHeld = false
-            onSignal?(.triggerUp)
+                if isDown { held.insert(action) } else { held.remove(action) }
+                onSignal?(isDown ? .triggerDown(action) : .triggerUp(action))
+                return
+            }
+
+            guard keyCode == binding.keyCode else { continue }
+            if type == .keyDown, matches(binding, keyCode: keyCode, flags: flags) {
+                held.insert(action)
+                onSignal?(.triggerDown(action))
+                return
+            }
+            if type == .keyUp, held.contains(action) {
+                held.remove(action)
+                onSignal?(.triggerUp(action))
+                return
+            }
         }
     }
 

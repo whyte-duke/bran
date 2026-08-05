@@ -31,6 +31,17 @@ public final class AppModel {
     /// lieu de les téléverser.
     let dictationSettings = DictationSettings()
     let dictation: DictationController
+
+    /// La capture de texte à l'écran. Même autonomie que la dictée, et le même
+    /// unique lien : le dossier de destination.
+    let snapshotSettings = SnapshotSettings()
+    let snapshot: SnapshotController
+
+    /// Le guet du clavier, **partagé** par la dictée et la capture. Un seul
+    /// `CGEventTap` pour toute l'application : deux taps doubleraient le
+    /// travail à chaque frappe du système et pourraient mourir séparément.
+    private let shortcuts = ShortcutRouter()
+
     private var notchPresenter: NotchPresenter?
 
     /// Réunion détectée, en attente d'une décision de l'utilisateur.
@@ -110,7 +121,19 @@ public final class AppModel {
             root: { [storage] in storage.root },
             retention: settings.retention
         )
-        self.dictation = DictationController(settings: settings, store: dictationStore)
+        self.dictation = DictationController(
+            settings: settings,
+            store: dictationStore,
+            monitor: shortcuts.monitor
+        )
+
+        let snapshotSettings = self.snapshotSettings
+        let snapshotStore = SnapshotStore(
+            root: { [storage] in storage.root },
+            retention: snapshotSettings.retention
+        )
+        self.snapshot = SnapshotController(settings: snapshotSettings, store: snapshotStore)
+        shortcuts.attach(dictation: dictation, snapshot: snapshot)
 
         Task { [weak self, capture] in
             for await reason in capture.failures {
@@ -130,6 +153,7 @@ public final class AppModel {
 
         directory.start()
         startDictation()
+        startSnapshot()
 
         // La surveillance est permanente. Il n'y a pas de raison de la
         // suspendre : elle ne fait qu'observer des titres de fenêtres, et une
@@ -140,7 +164,7 @@ public final class AppModel {
     // MARK: - Dictée
 
     private func startDictation() {
-        notchPresenter = NotchPresenter(controller: dictation)
+        notchPresenter = NotchPresenter(dictation: dictation, snapshot: snapshot)
         dictation.applySettings()
         dictation.host.refreshAvailability()
 
@@ -158,6 +182,45 @@ public final class AppModel {
             // elle ne ferait que ralentir un affichage.
             await dictation.store.purgeExpiredAudio()
         }
+    }
+
+    // MARK: - Capture de texte
+
+    private func startSnapshot() {
+        snapshot.applySettings()
+
+        if snapshotSettings.isEnabled {
+            enableSnapshot(true)
+        }
+
+        Task { [snapshot] in
+            await snapshot.store.reload()
+            await snapshot.store.purgeExpiredImages()
+        }
+    }
+
+    /// Active la capture de texte, en signalant si l'Accessibilité manque.
+    ///
+    /// Le tap est partagé : l'installer ici profite aussi à la dictée, et
+    /// inversement. C'est pour ça que le réglage d'une fonction ne désinstalle
+    /// jamais le tap — il retire seulement sa propre liaison.
+    @discardableResult
+    func enableSnapshot(_ enabled: Bool) -> Bool {
+        guard enabled else {
+            shortcuts.monitor.bind(.snapshot, to: nil)
+            snapshotSettings.isEnabled = false
+            return true
+        }
+
+        shortcuts.monitor.bind(.snapshot, to: snapshotSettings.trigger)
+        guard shortcuts.monitor.install() else {
+            shortcuts.monitor.bind(.snapshot, to: nil)
+            snapshotSettings.isEnabled = false
+            return false
+        }
+
+        snapshotSettings.isEnabled = true
+        return true
     }
 
     /// Active la dictée, en signalant si l'Accessibilité manque.

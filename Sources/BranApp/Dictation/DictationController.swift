@@ -33,7 +33,9 @@ final class DictationController {
     private var machine = DictationMachine()
     private let mic = MicCapture()
     private let paster = Paster()
-    private let monitor = HotkeyMonitor()
+    /// Le guet du clavier est **partagé** avec la capture de texte : un seul
+    /// `CGEventTap` pour toute l'application. Voir `HotkeyMonitor`.
+    private let monitor: HotkeyMonitor
 
     private var capturedSamples: [Float] = []
     private var tickTask: Task<Void, Never>?
@@ -49,13 +51,10 @@ final class DictationController {
     /// a fait de travers.
     var onEmpty: (() -> Void)?
 
-    init(settings: DictationSettings, store: DictationStore) {
+    init(settings: DictationSettings, store: DictationStore, monitor: HotkeyMonitor) {
         self.settings = settings
         self.store = store
-
-        monitor.onSignal = { [weak self] signal in
-            self?.receive(signal)
-        }
+        self.monitor = monitor
     }
 
     // MARK: - Cycle de vie
@@ -68,12 +67,15 @@ final class DictationController {
     @discardableResult
     func setEnabled(_ enabled: Bool) -> Bool {
         guard enabled else {
-            monitor.uninstall()
+            // On retire la liaison, pas le tap : la capture de texte peut
+            // encore s'en servir. Désinstaller ici rendrait l'autre fonction
+            // muette sans que personne comprenne pourquoi.
+            monitor.bind(.dictation, to: nil)
             settings.isEnabled = false
             return true
         }
 
-        monitor.trigger = settings.trigger
+        monitor.bind(.dictation, to: settings.trigger)
         monitor.cancelKey = settings.cancelKey
         machine.trigger = settings.triggerMode
 
@@ -89,7 +91,7 @@ final class DictationController {
 
     /// Réapplique les réglages à chaud, sans redémarrer l'application.
     func applySettings() {
-        monitor.trigger = settings.trigger
+        if settings.isEnabled { monitor.bind(.dictation, to: settings.trigger) }
         monitor.cancelKey = settings.cancelKey
         machine.trigger = settings.triggerMode
         paster.restoresClipboard = settings.restoresClipboard
@@ -107,25 +109,22 @@ final class DictationController {
 
     // MARK: - Signaux du clavier
 
-    private func receive(_ signal: HotkeyMonitor.Signal) {
-        switch signal {
-        case .triggerDown:
-            // Le chargement démarre à l'appui, en parallèle de la capture. C'est
-            // ce qui permet de décharger le modèle sans jamais faire attendre.
-            host.warmUp()
-            paster.rememberTarget()
-            apply(machine.handle(.hotkeyDown))
-
-        case .triggerUp:
-            apply(machine.handle(.hotkeyUp))
-
-        case .cancel:
-            // N'annuler que si quelque chose est en cours : sinon Échap devient
-            // une touche qui « fait quelque chose » à chaque frappe.
-            guard machine.phase.isBusy else { return }
-            apply(machine.handle(.cancelRequested))
-        }
+    /// Appelés par `ShortcutRouter`, qui possède le tap partagé.
+    func hotkeyDown() {
+        // Le chargement démarre à l'appui, en parallèle de la capture. C'est
+        // ce qui permet de décharger le modèle sans jamais faire attendre.
+        host.warmUp()
+        paster.rememberTarget()
+        apply(machine.handle(.hotkeyDown))
     }
+
+    func hotkeyUp() {
+        apply(machine.handle(.hotkeyUp))
+    }
+
+    /// Vrai quand une dictée est en cours. Sert au routeur pour arbitrer entre
+    /// les deux fonctions.
+    var isBusy: Bool { machine.phase.isBusy }
 
     /// Point d'entrée depuis l'interface — le bouton « Dicter » de la fenêtre.
     func toggleFromUI() {

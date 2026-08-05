@@ -349,7 +349,12 @@ struct DictationSettingsSection: View {
 ///
 /// Écoute localement les `flagsChanged` et les `keyDown` : pas besoin de tap ni
 /// d'autorisation pour lire ce qui arrive à notre propre fenêtre.
-private struct HotkeyField: View {
+/// Le champ de saisie d'un raccourci global.
+///
+/// Partagé par la dictée et la capture de texte : deux implémentations
+/// divergeraient sur les touches refusées, et l'une des deux finirait par
+/// laisser passer Entrée.
+struct HotkeyField: View {
     @Binding var binding: HotkeyBinding
     @Binding var isCapturing: Bool
 

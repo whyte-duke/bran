@@ -29,6 +29,7 @@ struct LibraryView: View {
     @State private var meetingsPath: [UUID] = []
     @State private var meetingsQuery = ""
     @State private var dictationQuery = ""
+    @State private var snapshotQuery = ""
 
     /// `pendingUpload` du modèle, présenté comme un `Identifiable` pour `.sheet`.
     private var uploadTarget: Binding<UploadTarget?> {
@@ -109,6 +110,10 @@ struct LibraryView: View {
 
         case .dictation:
             DictationPane(model: model, query: $dictationQuery)
+                .transition(.opacity)
+
+        case .snapshots:
+            SnapshotPane(model: model, query: $snapshotQuery)
                 .transition(.opacity)
         }
     }

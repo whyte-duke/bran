@@ -94,13 +94,22 @@ struct NotchView: View {
                 .controlSize(.small)
                 .tint(.white)
                 .scaleEffect(0.8)
-        case .done:
+        case .done, .captured:
             Image(systemName: "checkmark")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.green)
                 .transition(.scale.combined(with: .opacity))
+        case .preparing:
+            Image(systemName: "cpu")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.75))
+                .symbolEffect(.pulse, options: .repeating)
+        case .reading:
+            Image(systemName: "text.viewfinder")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
         case .empty:
-            Image(systemName: "waveform.slash")
+            Image(systemName: content.source == .snapshot ? "text.badge.xmark" : "waveform.slash")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.5))
         case .cancelled:
@@ -128,6 +137,20 @@ struct NotchView: View {
                 }
             }
             .frame(width: hasNotch ? 92 : 130, height: 22)
+        } else if case .reading = content.mode {
+            TimelineView(.animation(minimumInterval: 1.0 / 40)) { timeline in
+                Canvas { context, size in
+                    ScanDrawing.draw(
+                        phase: timeline.date.timeIntervalSinceReferenceDate,
+                        in: context,
+                        size: size
+                    )
+                }
+            }
+            .frame(width: hasNotch ? 92 : 130, height: 22)
+        } else if case .preparing(let fraction) = content.mode {
+            LoadingBar(fraction: fraction)
+                .frame(width: hasNotch ? 92 : 130, height: 22)
         } else {
             Text(label)
                 .font(.system(size: 11.5, weight: .medium, design: .rounded))
@@ -148,6 +171,12 @@ struct NotchView: View {
                 .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.6))
                 .contentTransition(.numericText())
+        } else if case .preparing(let fraction) = content.mode, let fraction {
+            Text("\(Int(fraction * 100)) %")
+                .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.white.opacity(0.6))
+                .contentTransition(.numericText())
         }
     }
 
@@ -156,7 +185,10 @@ struct NotchView: View {
         case .listening: ""
         case .transcribing: "Transcription…"
         case .done(let text): text
-        case .empty: "Rien entendu"
+        case .preparing: ""
+        case .reading: ""
+        case .captured(let text): text
+        case .empty: content.source == .snapshot ? "Aucun texte trouvé" : "Rien entendu"
         case .cancelled: "Annulé"
         case .failed(let reason): reason
         }
@@ -280,6 +312,108 @@ enum WaveformDrawing {
             let breathing = Float(0.055 + 0.035 * sin(phase * 2.1 + Double(index) * 0.42))
             return max(value, breathing) * taper
         }
+    }
+}
+
+// MARK: - Le balayage de lecture
+
+/// Le tracé pendant la reconnaissance de texte.
+///
+/// L'équivalent de la vague pour la dictée, et construit sur le même principe :
+/// dessiné dans un `Canvas`, donc aucune reconstruction de l'arbre de vues.
+///
+/// Ce qu'il montre : quelques lignes de texte stylisées, et une bande claire qui
+/// les traverse de gauche à droite. C'est la métaphore du scanner, et elle dit
+/// deux choses d'un coup — « je lis une image » et « je travaille encore ».
+///
+/// ```
+///   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁         ← lignes ternes
+///   ▁▁▁▁▁▁▁███▁▁▁▁▁▁▁         ← la bande éclaire ce qu'elle traverse
+///   ▁▁▁▁▁▁▁███▁▁▁▁▁
+///   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+///           →→→
+/// ```
+///
+/// Une durée de cycle volontairement longue — 1,4 s — alors que la lecture
+/// prend 200 à 350 ms : le balayage n'est presque jamais vu en entier, et c'est
+/// voulu. Un cycle rapide donnerait une impression de fébrilité pour une
+/// opération qui, elle, est immédiate.
+enum ScanDrawing {
+
+    /// Largeurs relatives des lignes, pour que ça ressemble à du texte et non à
+    /// un code-barres.
+    private static let lineWidths: [Double] = [0.95, 0.72, 0.88, 0.55]
+
+    static func draw(phase: TimeInterval, in context: GraphicsContext, size: CGSize) {
+        let cycle = 1.4
+        let progress = (phase.truncatingRemainder(dividingBy: cycle)) / cycle
+        let sweepX = size.width * progress
+        let sweepWidth = size.width * 0.22
+
+        let lineHeight = 2.0
+        let spacing = (size.height - Double(lineWidths.count) * lineHeight) / Double(lineWidths.count + 1)
+
+        for (index, width) in lineWidths.enumerated() {
+            let y = spacing + Double(index) * (lineHeight + spacing)
+            let rect = CGRect(x: 0, y: y, width: size.width * width, height: lineHeight)
+            let line = Path(roundedRect: rect, cornerRadius: lineHeight / 2)
+
+            context.fill(line, with: .color(.white.opacity(0.20)))
+
+            // La portion éclairée : on découpe la bande dans le tracé de la
+            // ligne plutôt que de dessiner un rectangle par-dessus, sinon la
+            // lumière déborderait des lignes courtes.
+            var illuminated = context
+            illuminated.clip(to: line)
+            illuminated.fill(
+                Path(CGRect(x: sweepX - sweepWidth / 2, y: y - 1, width: sweepWidth, height: lineHeight + 2)),
+                with: .linearGradient(
+                    Gradient(colors: [.white.opacity(0), .white.opacity(0.95), .white.opacity(0)]),
+                    startPoint: CGPoint(x: sweepX - sweepWidth / 2, y: 0),
+                    endPoint: CGPoint(x: sweepX + sweepWidth / 2, y: 0)
+                )
+            )
+        }
+    }
+}
+
+/// La barre de chargement du moteur.
+///
+/// Deux comportements dans une seule vue, et la distinction compte : quand la
+/// progression est connue on la montre, quand elle ne l'est pas on montre une
+/// navette. Afficher une barre à zéro pendant qu'on ignore où on en est
+/// donnerait l'impression que rien ne se passe.
+private struct LoadingBar: View {
+    let fraction: Double?
+
+    @State private var shuttle = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(.white.opacity(0.18))
+
+                if let fraction {
+                    Capsule()
+                        .fill(.white.opacity(0.9))
+                        .frame(width: max(4, geometry.size.width * fraction))
+                        .animation(.smooth(duration: 0.3), value: fraction)
+                } else {
+                    Capsule()
+                        .fill(.white.opacity(0.9))
+                        .frame(width: geometry.size.width * 0.32)
+                        .offset(x: shuttle ? geometry.size.width * 0.68 : 0)
+                        .animation(
+                            .easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                            value: shuttle
+                        )
+                }
+            }
+            .frame(height: 4)
+            .frame(maxHeight: .infinity)
+        }
+        .onAppear { shuttle = true }
     }
 }
 

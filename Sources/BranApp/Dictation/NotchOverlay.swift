@@ -156,15 +156,38 @@ final class NotchOverlay {
 @Observable
 final class NotchContent {
     enum Mode: Equatable {
+        // Dictée
         case listening
         case transcribing
         case done(String)
+
+        // Capture de texte
+        /// Chargement du moteur. `nil` tant qu'aucune progression n'est connue :
+        /// une barre qui prétend savoir où elle en est alors qu'elle l'ignore
+        /// est pire qu'une barre indéterminée.
+        case preparing(Double?)
+        case reading
+        case captured(String)
+
+        // Communs
         case empty
         case cancelled
         case failed(String)
+
+    }
+
+    /// Quelle fonction pilote l'encoche.
+    ///
+    /// Nécessaire parce que `.empty`, `.cancelled` et `.failed` sont communs aux
+    /// deux : sans cette information, une capture sans texte annoncerait
+    /// « Rien entendu », ce qui enverrait chercher un problème de micro.
+    enum Source: Equatable {
+        case dictation
+        case snapshot
     }
 
     var mode: Mode = .listening
+    var source: Source = .dictation
     var levels: [Float] = []
     var elapsed: TimeInterval = 0
 

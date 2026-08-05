@@ -70,6 +70,7 @@ struct SectionSidebar: View {
         let count = switch item {
         case .meetings: model.store.recordings.count
         case .dictation: model.dictation.store.entries.count
+        case .snapshots: model.snapshot.store.entries.count
         }
         return count > 0 ? "\(count)" : nil
     }
@@ -205,6 +206,7 @@ private struct CompactStatusRow: View {
 enum LibraryPane: String, CaseIterable, Identifiable {
     case meetings
     case dictation
+    case snapshots
 
     var id: String { rawValue }
 
@@ -212,6 +214,7 @@ enum LibraryPane: String, CaseIterable, Identifiable {
         switch self {
         case .meetings: "Réunions"
         case .dictation: "Dictées"
+        case .snapshots: "Captures"
         }
     }
 
@@ -219,6 +222,7 @@ enum LibraryPane: String, CaseIterable, Identifiable {
         switch self {
         case .meetings: "film.stack"
         case .dictation: "waveform"
+        case .snapshots: "text.viewfinder"
         }
     }
 
@@ -228,6 +232,7 @@ enum LibraryPane: String, CaseIterable, Identifiable {
         switch self {
         case .meetings: "Vos enregistrements de réunions, stockés sur ce Mac."
         case .dictation: "Vos transcriptions, calculées et gardées sur ce Mac."
+        case .snapshots: "Le texte lu à l'écran, sans rien envoyer nulle part."
         }
     }
 }
