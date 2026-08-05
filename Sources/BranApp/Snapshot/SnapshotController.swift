@@ -117,6 +117,17 @@ final class SnapshotController {
     // MARK: - Les étapes
 
     private func beginSelection() {
+        // **Vérifier l'autorisation d'abord.** Sans elle, `screencapture` ne
+        // renvoie pas d'erreur : il renvoie le fond d'écran **sans aucune
+        // fenêtre**. Une image sans texte, donc un « Aucun texte trouvé » qui
+        // envoie chercher un problème de reconnaissance là où il n'y a qu'une
+        // case à cocher. Un refus doit se dire, pas se déguiser en zone vide.
+        guard CGPreflightScreenCaptureAccess() else {
+            CGRequestScreenCaptureAccess()
+            apply(machine.handle(.failed(.screenRecordingDenied)))
+            return
+        }
+
         let token = UUID()
         currentToken = token
 
@@ -190,6 +201,25 @@ final class SnapshotController {
                 guard currentToken == token else { return }
 
                 guard outcome.text.isEmpty == false else {
+                    // **On garde quand même l'image.** « Aucun texte trouvé »
+                    // sans rien d'autre laisse le doute entier : la zone
+                    // était-elle vide, mal cadrée, ou la capture a-t-elle été
+                    // bloquée ? Avec l'image conservée, un clic sur la carte
+                    // montre exactement ce qui a été pris.
+                    await store.save(
+                        SnippetEntry(
+                            createdAt: started,
+                            text: "",
+                            layout: pending.layout,
+                            engine: engine.identifier,
+                            processingTime: Date().timeIntervalSince(started),
+                            sourceApp: pending.sourceApp,
+                            pixelWidth: pending.image.width,
+                            pixelHeight: pending.image.height,
+                            failure: "Aucun texte lisible dans cette zone. L'image est conservée : ouvrez-la pour voir ce qui a été capturé."
+                        ),
+                        image: pending.image
+                    )
                     self.pending = nil
                     apply(machine.handle(.recognisedNothing))
                     return

@@ -346,28 +346,50 @@ private struct SnapshotCard: View {
 // MARK: - L'état, dans l'en-tête
 
 /// Dit en un coup d'œil si le raccourci est armé, et pourquoi il ne l'est pas.
+///
+/// **Volontairement identique à `DictationStatusChip`**, jusqu'à la police et au
+/// fond en capsule. La première version portait un bouton « Activer » : un
+/// bouton a une hauteur et une ligne de base différentes d'un simple texte, et
+/// l'en-tête aligne le grand titre sur `.firstTextBaseline` du contenu de
+/// droite. Résultat, le titre « Captures » ne tombait pas à la même hauteur que
+/// « Réunions » et « Dictées ». L'invitation à activer vit dans l'état vide,
+/// où il y a la place de l'expliquer.
 struct SnapshotStatusChip: View {
     @Bindable var model: AppModel
 
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(model.snapshotSettings.isEnabled ? .green : .secondary.opacity(0.5))
+                .fill(color)
                 .frame(width: 6, height: 6)
-
             Text(label)
-                .font(.callout)
+                .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(.quaternary.opacity(0.4), in: .capsule)
+        .accessibilityElement(children: .combine)
+    }
 
-            if model.snapshotSettings.isEnabled == false {
-                Button("Activer") { model.showsSettings = true }
-                    .controlSize(.small)
-            }
+    private var color: Color {
+        switch model.snapshot.phase {
+        case .selecting, .preparing, .recognising: .orange
+        case .failed: .orange
+        default: model.snapshotSettings.isEnabled ? .green : .secondary
         }
     }
 
     private var label: String {
-        guard model.snapshotSettings.isEnabled else { return "Capture désactivée" }
-        return "\(model.snapshotSettings.trigger.displayName) · prête"
+        switch model.snapshot.phase {
+        case .selecting: "sélection…"
+        case .preparing: "chargement du moteur…"
+        case .recognising: "lecture…"
+        case .failed(let reason): reason.summary
+        default:
+            model.snapshotSettings.isEnabled
+                ? "\(model.snapshotSettings.trigger.displayName) · prête"
+                : "capture désactivée"
+        }
     }
 }

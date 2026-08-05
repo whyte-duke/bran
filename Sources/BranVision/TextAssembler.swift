@@ -95,7 +95,7 @@ public enum TextAssembler {
 
     /// Range les régions en lignes, de haut en bas, chaque ligne triée de
     /// gauche à droite.
-    static func group(_ regions: [TextRegion]) -> [[TextRegion]] {
+    public static func group(_ regions: [TextRegion]) -> [[TextRegion]] {
         let tolerance = medianHeight(regions) / 2
         var rows: [[TextRegion]] = []
 
@@ -120,7 +120,7 @@ public enum TextAssembler {
     /// Médiane, pas moyenne : une seule région aberrante — une icône prise pour
     /// du texte, un titre deux fois plus grand — décalerait une moyenne et
     /// donc toutes les indentations.
-    static func medianHeight(_ regions: [TextRegion]) -> Double {
+    public static func medianHeight(_ regions: [TextRegion]) -> Double {
         median(regions.map(\.height)) ?? 0.01
     }
 
@@ -129,7 +129,7 @@ public enum TextAssembler {
     /// En chasse fixe, `largeur ÷ nombre de caractères` est constante. La
     /// médiane sur toutes les régions absorbe les fragments d'un seul caractère,
     /// où l'espacement latéral de la boîte fausse le rapport.
-    static func medianCharacterWidth(_ regions: [TextRegion]) -> Double {
+    public static func medianCharacterWidth(_ regions: [TextRegion]) -> Double {
         let widths = regions.compactMap { region -> Double? in
             let count = region.text.count
             guard count > 0, region.width > 0 else { return nil }

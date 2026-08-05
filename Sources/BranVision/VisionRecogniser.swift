@@ -1,4 +1,3 @@
-import BranVision
 import CoreGraphics
 import Foundation
 import Vision
@@ -29,21 +28,23 @@ import Vision
 /// Aucun agrandissement d'image ne les corrige — 24 combinaisons de facteur,
 /// netteté et hauteur minimale ont été essayées, le taux reste dans la même
 /// bande. C'est une limite du modèle, pas un réglage.
-struct VisionRecogniser: OCREngine {
+public struct VisionRecogniser: OCREngine {
 
-    let identifier = "vision"
-    let displayName = "macOS (Vision)"
+    public init() {}
+
+    public let identifier = "vision"
+    public let displayName = "macOS (Vision)"
 
     /// Toujours prêt : le moteur est dans le système, il n'y a rien à charger.
-    var isReady: Bool { get async { true } }
+    public var isReady: Bool { get async { true } }
 
-    func prepare(progress: @Sendable @escaping (Double) -> Void) async throws {
+    public func prepare(progress: @Sendable @escaping (Double) -> Void) async throws {
         progress(1)
     }
 
-    func release() async {}
+    public func release() async {}
 
-    func recognise(
+    public func recognise(
         _ image: RecognisableImage,
         language: OCRLanguage
     ) async throws -> [TextRegion] {
@@ -88,7 +89,7 @@ struct VisionRecogniser: OCREngine {
     /// Séparée de `recognise` parce que les deux réglages ne sont pas un goût
     /// mais une mesure : sur la même image, le correcteur allumé transforme
     /// `awk '{print` en `awk 'fprint`.
-    func recogniseCode(_ image: RecognisableImage) async throws -> [TextRegion] {
+    public func recogniseCode(_ image: RecognisableImage) async throws -> [TextRegion] {
         guard CFGetTypeID(image.handle) == CGImage.typeID else {
             throw SnapshotFailure.recognitionFailed("image inattendue")
         }
@@ -118,7 +119,7 @@ struct VisionRecogniser: OCREngine {
 
     /// Les langues que ce Mac sait lire. Sert à n'offrir dans les réglages que
     /// ce qui marchera vraiment.
-    static var supportedLanguages: [String] {
+    public static var supportedLanguages: [String] {
         var request = RecognizeTextRequest()
         request.recognitionLevel = .accurate
         return request.supportedRecognitionLanguages.map(\.maximalIdentifier)

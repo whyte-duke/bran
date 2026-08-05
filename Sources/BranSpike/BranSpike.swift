@@ -40,6 +40,9 @@ struct BranSpike {
                     language: SpeechLanguage(rawValue: code) ?? .french
                 ).run()
 
+            case "ocr":
+                await OCRSpike.run(Array(arguments))
+
             default:
                 printUsage()
                 exit(command == nil ? 1 : 2)

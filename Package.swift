@@ -48,6 +48,7 @@ let package = Package(
             dependencies: [
                 "BranCore",
                 "BranSpeech",
+                "BranVision",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ]
         ),
