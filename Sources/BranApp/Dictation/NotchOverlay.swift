@@ -26,6 +26,7 @@ final class NotchOverlay {
 
     private var panel: NSPanel?
     private var hosting: NSHostingView<NotchView>?
+    private var collapseTask: Task<Void, Never>?
     private let content: NotchContent
 
     init(content: NotchContent) {
@@ -61,13 +62,20 @@ final class NotchOverlay {
     func show() {
         guard let screen = Self.activeScreen else { return }
 
+        collapseTask?.cancel()
+        collapseTask = nil
+
         let notchHeight = Self.notchHeight(of: screen)
         let notchWidth = Self.notchWidth(of: screen)
         let hasNotch = notchHeight > 0 && notchWidth > 0
 
+        // La fenêtre est créée **à sa taille finale** et ne bouge plus. Toute
+        // l'ouverture est jouée par le tracé à l'intérieur : redimensionner un
+        // `NSPanel` à chaque image saccade, alors qu'un `Shape` animé est lissé
+        // par Core Animation.
         let size = CGSize(
-            width: hasNotch ? notchWidth + 2 * NotchView.earWidth : 260,
-            height: hasNotch ? notchHeight + NotchView.dropHeight : 44
+            width: hasNotch ? notchWidth + 2 * NotchView.earWidth : NotchView.pillSize.width,
+            height: hasNotch ? notchHeight + NotchView.dropHeight : NotchView.pillSize.height
         )
 
         let origin = CGPoint(
@@ -85,6 +93,7 @@ final class NotchOverlay {
             hosting.rootView = view
             panel.setFrame(NSRect(origin: origin, size: size), display: true)
             panel.orderFrontRegardless()
+            content.isExpanded = true
             return
         }
 
@@ -112,13 +121,29 @@ final class NotchOverlay {
 
         panel = newPanel
         hosting = hostingView
+        content.isExpanded = true
     }
 
+    /// Referme, puis retire la fenêtre.
+    ///
+    /// L'ordre compte : `orderOut` immédiat ferait disparaître le panneau d'un
+    /// coup, et toute l'animation de fermeture ne serait jamais vue. On laisse
+    /// donc le tracé se refermer, puis on retire la fenêtre une fois qu'elle est
+    /// déjà invisible.
     func hide() {
-        panel?.orderOut(nil)
+        content.isExpanded = false
+
+        collapseTask?.cancel()
+        collapseTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(380))
+            guard Task.isCancelled == false else { return }
+            self?.panel?.orderOut(nil)
+        }
     }
 
     func dismiss() {
+        collapseTask?.cancel()
+        collapseTask = nil
         panel?.orderOut(nil)
         panel = nil
         hosting = nil
@@ -142,4 +167,8 @@ final class NotchContent {
     var mode: Mode = .listening
     var levels: [Float] = []
     var elapsed: TimeInterval = 0
+
+    /// Ouvert ou fermé. C'est le seul déclencheur de l'animation d'entrée et de
+    /// sortie : la vue observe ce booléen, pas la présence de la fenêtre.
+    var isExpanded = false
 }

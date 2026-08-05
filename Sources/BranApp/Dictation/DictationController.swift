@@ -413,10 +413,31 @@ final class DictationController {
 
     // MARK: - Retours sonores
 
-    /// Deux sons système très courts. Avec un casque et l'encoche hors du champ
-    /// de vision, c'est souvent le seul retour réellement perçu.
-    private static func playStartCue() { NSSound(named: "Tink")?.play() }
-    private static func playStopCue() { NSSound(named: "Pop")?.play() }
+    /// Deux repères sonores, volontairement discrets.
+    ///
+    /// Avec un casque et l'encoche hors du champ de vision, c'est souvent le
+    /// seul retour réellement perçu — mais on dicte vingt fois par heure, et un
+    /// son à plein volume vingt fois par heure devient une agression. À 12 %,
+    /// on l'entend sans jamais y penser.
+    ///
+    /// Les instances sont conservées : `NSSound(named:)` relit le fichier depuis
+    /// le disque à chaque appel, ce qui ajoute un délai juste avant de parler.
+    private static let startCue = DictationController.cue("Tink")
+    private static let stopCue = DictationController.cue("Morse")
+
+    private static func cue(_ name: String) -> NSSound? {
+        let sound = NSSound(named: name)
+        sound?.volume = 0.12
+        return sound
+    }
+
+    private static func playStartCue() { startCue?.play() }
+
+    private static func playStopCue() {
+        // Rejouer un son déjà en cours ne fait rien : il faut le rembobiner.
+        stopCue?.stop()
+        stopCue?.play()
+    }
 
     /// macOS ne dit pas qui a activé la saisie sécurisée. On nomme le suspect le
     /// plus probable — l'application au premier plan — plutôt que rien.

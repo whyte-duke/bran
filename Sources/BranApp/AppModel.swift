@@ -58,6 +58,11 @@ public final class AppModel {
 
     public var lastFailure: String?
 
+    /// Porté par le modèle et non par la vue : les réglages s'ouvrent depuis la
+    /// colonne, depuis une section, et depuis un message d'erreur. Trois
+    /// endroits, un seul état.
+    public var showsSettings = false
+
     public var quality: QualityPreset {
         didSet {
             UserDefaults.standard.set(quality.rawValue, forKey: Self.qualityKey)

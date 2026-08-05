@@ -23,8 +23,6 @@ struct MenuBarContent: View {
 
         dictationItems
 
-        Divider()
-
         Text(model.statusSummary)
 
         if let failure = model.lastFailure {
@@ -77,30 +75,25 @@ struct MenuBarContent: View {
         .keyboardShortcut("q")
     }
 
-    /// La dictée dans le menu. Deux lignes seulement : l'état, et le geste.
-    /// C'est aussi le seul endroit où l'on peut la relancer si le raccourci
-    /// global ne répond pas — un filet de sécurité qui coûte trois lignes.
+    /// La dictée dans le menu : **rien** tant que tout va bien.
+    ///
+    /// Démarrer, arrêter et annuler se font à la touche, dans cent pour cent des
+    /// cas. Un menu qu'on n'ouvre jamais pour ces trois gestes n'a aucune raison
+    /// de les proposer, et chaque ligne inutile éloigne celles qui comptent.
+    ///
+    /// Il ne reste donc que les deux situations où la touche, justement, ne
+    /// répond pas : la dictée est désactivée, ou elle a échoué.
     @ViewBuilder
     private var dictationItems: some View {
-        if model.dictationSettings.isEnabled {
-            switch model.dictation.phase {
-            case .capturing:
-                Button("Arrêter la dictée") { model.dictation.toggleFromUI() }
-                Button("Annuler la dictée") { model.dictation.cancel() }
-            case .transcribing:
-                Text("Transcription en cours…")
-            case .failed(let reason):
-                Text("⚠︎ \(reason.summary)")
-                Button("Compris") { model.dictation.acknowledgeFailure() }
-            case .idle, .pasting:
-                Button("Dicter — \(model.dictationSettings.trigger.displayName)") {
-                    model.dictation.toggleFromUI()
-                }
-            }
-        } else {
+        if model.dictationSettings.isEnabled == false {
             Button("Activer la dictée…") {
                 WindowPresenter.bringToFront("library", using: openWindow)
             }
+            Divider()
+        } else if case .failed(let reason) = model.dictation.phase {
+            Text("⚠︎ \(reason.summary)")
+            Button("Compris") { model.dictation.acknowledgeFailure() }
+            Divider()
         }
     }
 }
