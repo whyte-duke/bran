@@ -168,7 +168,7 @@ struct DictationPane: View {
                 .padding(.horizontal, 26)
                 .padding(.vertical, 18)
             }
-            .animation(.snappy(duration: 0.25), value: controller.store.entries.count)
+            .branAnimation(Motion.enter, value: controller.store.entries.count)
         }
     }
 
@@ -364,8 +364,8 @@ private struct DictationCard: View {
         .geometryGroup()
         .onHover { isHovering = $0 }
         .branAnimation(Motion.state, value: isExpanded)
-        .animation(.smooth(duration: 0.3), value: isRetrying)
-        .animation(.smooth(duration: 0.3), value: entry.text)
+        .branAnimation(Motion.state, value: isRetrying)
+        .branAnimation(Motion.state, value: entry.text)
         .contextMenu { menu }
         .accessibilityElement(children: .contain)
         // Le dépliage sans souris ni Tab : VoiceOver l'annonce comme une action
@@ -576,20 +576,25 @@ struct CardAction: View {
     @State private var isHovering = false
     @State private var angle: Double = 0
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(Type.notch.weight(.medium))
                 .rotationEffect(.degrees(angle))
                 // À l'arrêt, durée nulle : sans ça l'icône déroule les 360°
                 // à l'envers pendant une demi-seconde, ce qui se lit comme une
                 // erreur plutôt que comme une fin.
-                .animation(
-                    isSpinning
-                        ? .linear(duration: 0.9).repeatForever(autoreverses: false)
-                        : .linear(duration: 0),
-                    value: angle
-                )
+                //
+                // **Et sous « Réduire les animations », elle ne tourne pas du
+                // tout.** C'était la quatrième boucle perpétuelle de
+                // l'application à ignorer le réglage. `nil`, pas une durée
+                // raccourcie : une rotation accélérée est un mouvement de plus,
+                // pas un de moins. Le bouton reste utilisable et l'état « en
+                // cours » se lit ailleurs — la carte affiche déjà le texte en
+                // train d'être remplacé.
+                .animation(spin, value: angle)
                 .frame(width: 24, height: 22)
                 .background {
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -609,6 +614,15 @@ struct CardAction: View {
         }
         .onAppear { if isSpinning { angle = 360 } }
     }
+
+    /// L'animation de la rotation. `nil` quand le mouvement est refusé, une
+    /// durée nulle à l'arrêt, la boucle sinon.
+    private var spin: Animation? {
+        guard isSpinning else { return .linear(duration: 0) }
+        guard reduceMotion == false else { return nil }
+        return .linear(duration: 0.9).repeatForever(autoreverses: false)
+    }
+
 }
 
 /// L'état de la dictée, en pastille, en haut à droite de la section.

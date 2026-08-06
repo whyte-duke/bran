@@ -143,7 +143,7 @@ struct SnapshotPane: View {
                 .padding(.horizontal, 26)
                 .padding(.vertical, 18)
             }
-            .animation(.snappy(duration: 0.25), value: controller.store.entries.count)
+            .branAnimation(Motion.enter, value: controller.store.entries.count)
         }
     }
 
@@ -243,8 +243,8 @@ private struct SnapshotCard: View {
         .geometryGroup()
         .onHover { isHovering = $0 }
         .branAnimation(Motion.state, value: isExpanded)
-        .animation(.smooth(duration: 0.3), value: isRereading)
-        .animation(.smooth(duration: 0.3), value: entry.text)
+        .branAnimation(Motion.state, value: isRereading)
+        .branAnimation(Motion.state, value: entry.text)
         .contextMenu { menu }
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: isExpanded ? "Replier" : "Déplier") {
