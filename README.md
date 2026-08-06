@@ -406,13 +406,48 @@ Findings from building it, each verified on a real machine:
   capture without going through `SCContentSharingPicker`. There is nothing you
   can do about it in-app.
 
+### What bran costs, and how you can check
+
+A background app that watches your screen owes you a number. bran shows one: a
+second menu bar item, separate from bran's own, reading `processor·memory` as
+percentages. Open it and it names whatever is currently running — the dictation
+model loading, the watcher sampling, a recording in progress — under the heading
+"En ce moment", because those are simultaneous states and not a measured cause.
+
+**Baseline, MacBook Pro M2 Pro (12 cores, 8P + 4E, 16 GB), bran idle**: watcher
+on, nothing recording, no dictation, Parakeet on disk but not in memory. Sampled
+every 2 s for 5 minutes with the same kernel counters the meter itself reads —
+`proc_pid_rusage` for CPU, `phys_footprint` for memory.
+
+| | reading | share of the machine |
+|---|---|---|
+| CPU | 0.01 % median, 0.05 % mean, 0.13 % peak | 0.001 % of 12 cores |
+| Memory | 68.7 MB | 0.40 % of 16 GB |
+
+So the menu bar item reads `<1·<1` at rest, and the meter's own loop — two
+system calls every 2 s, off the main thread — measured **0.0001 % of one core**,
+pushing one label update in 120 ticks. Idle really is idle. Constraint C10 says a
+CPU/energy ceiling is a success criterion rather than a detail; this is the first
+time it has had an instrument, and that table is its first entry.
+
+Two conventions to know before comparing against anything else:
+
+- **100 % = one core**, the Activity Monitor scale. On this machine the maximum
+  is 1200 %, and `104 %` means one core and change, not a saturated laptop. The
+  normalised reading sits right next to it in the dropdown so the big number is
+  never read alone.
+- **Memory is `phys_footprint`, not `resident_size`.** They are two different
+  columns of Activity Monitor — "Memory" and "Real Memory" — and they disagree:
+  68.7 MB against 74.4 MB for the same process at the same instant. The meter
+  shows the one you would be comparing against.
+
 ---
 
 ## Development
 
 ```bash
 swift build          # builds everything
-swift test           # 207 tests, runs in about a millisecond
+swift test           # 294 tests, runs in about a millisecond
 open Package.swift   # opens in Xcode, with SwiftUI previews
 ```
 
@@ -421,7 +456,7 @@ a permission or a display server:
 
 | Target | Contains |
 |---|---|
-| `BranCore` | pure logic — title matching, session resolution, state machine |
+| `BranCore` | pure logic — title matching, session resolution, state machine, the CPU/memory arithmetic |
 | `BranSpeech` | pure logic for dictation — state machine, retention, corrections |
 | `BranVision` | pure logic for on-screen text — line assembly, substitutions |
 | `BranWatch` | pure logic for the watcher — lane identity, states, resolver, sampling cadence, motion arithmetic |
