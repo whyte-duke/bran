@@ -131,6 +131,63 @@ enum Motion {
     /// L'ouverture de l'encoche. Franche, peu rebondissante : elle est vue vingt
     /// fois par heure. Valeur d'origine de `NotchView`, conservée telle quelle.
     static let notch = Animation.spring(response: 0.42, dampingFraction: 0.74)
+
+    /// Le contenu de l'encoche, qui entre **après** son contenant.
+    ///
+    /// Le délai n'est pas cosmétique : sans lui on voit le texte déborder du
+    /// cadre pendant deux images, le temps que le tracé finisse de s'ouvrir.
+    static let notchContent = Animation.smooth(duration: 0.3)
+    static let notchContentDelay: TimeInterval = 0.09
+
+    /// Le temps que met l'encoche à se refermer — **et donc le temps qu'il faut
+    /// attendre avant de retirer la fenêtre.**
+    ///
+    /// `NotchOverlay.hide()` posait 380 ms écrits en dur pendant que le ressort
+    /// qui les justifie vivait ici. Deux fichiers pour un seul mouvement : régler
+    /// le ressort sans toucher l'attente fait disparaître le panneau au milieu de
+    /// sa propre fermeture, et aucun test ne peut le voir.
+    static let notchCollapse: Duration = .milliseconds(380)
+
+    // MARK: Les boucles
+
+    /// Les animations qui ne s'arrêtent jamais : la pastille qui respire pendant
+    /// la dictée, la navette de la barre de chargement.
+    ///
+    /// **Elles sont supprimées par « Réduire les animations », pas ralenties.**
+    /// C'est la seule catégorie de cette énumération qui se coupe entièrement, et
+    /// c'est le sens même du réglage : ce qu'il vise en premier, ce sont les
+    /// mouvements perpétuels. Les trois de bran vivaient dans l'encoche, c'est-à-dire
+    /// dans la seule surface qu'on regarde vraiment, vingt fois par heure.
+    static let pulse = Animation.easeOut(duration: 1.25).repeatForever(autoreverses: false)
+    static let shuttle = Animation.easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+}
+
+// MARK: - L'encre de l'encoche
+
+/// Le vocabulaire propre à l'encoche : du blanc sur du noir, à des dosages qui
+/// n'ont pas d'équivalent dans `Palette`.
+///
+/// `Palette` est sémantique et s'adapte au thème ; l'encoche, elle, est noire
+/// dans les deux thèmes parce qu'elle imite un trou dans le matériel. Lui
+/// imposer les couleurs de l'application n'aurait pas de sens — mais laisser
+/// neuf opacités littérales semées dans la vue n'en avait pas non plus.
+enum NotchInk {
+    /// Le texte principal.
+    static let text = Color.white.opacity(0.93)
+    /// Une valeur secondaire : le chrono, le pourcentage.
+    static let value = Color.white.opacity(0.6)
+    /// Un symbole actif.
+    static let symbol = Color.white.opacity(0.9)
+    /// Un symbole en retrait : le chargement du moteur.
+    static let symbolFaint = Color.white.opacity(0.75)
+    /// Un symbole d'échec doux : rien entendu, annulé.
+    static let symbolMuted = Color.white.opacity(0.5)
+    /// Le liseré du contour, une fois ouvert.
+    static let edge = Color.white.opacity(0.10)
+    /// Le creux d'une barre de progression.
+    static let trough = Color.white.opacity(0.18)
+    /// Le plein d'une barre de progression.
+    static let fill = Color.white.opacity(0.9)
 }
 
 // MARK: - Application
@@ -145,6 +202,23 @@ extension View {
     /// rend les changements d'état illisibles, ce que le réglage ne demande pas.
     func branAnimation<V: Equatable>(_ animation: Animation, value: V) -> some View {
         modifier(ReducedMotion(animation: animation, value: value))
+    }
+
+    /// Une animation **perpétuelle**, et le seul modificateur qui la supprime
+    /// vraiment sous « Réduire les animations » au lieu de la raccourcir.
+    ///
+    /// La distinction avec `branAnimation` est le fond du sujet. Une transition
+    /// qu'on raccourcit reste lisible : l'état change, on le voit, c'est juste
+    /// plus bref. Une boucle qu'on raccourcit devient **pire** — elle bat plus
+    /// vite. La seule réponse correcte est de ne pas la jouer, et de laisser la
+    /// vue dans son état de repos.
+    ///
+    /// D'où le second effet : `isActive` rend `false` sous le réglage, pour que
+    /// l'appelant puisse aussi **ne pas lancer sa boucle** plutôt que de
+    /// l'animer dans le vide. `AnimatedStripe` s'en sert pour ne pas réveiller
+    /// une horloge à 40 Hz que personne ne veut voir bouger.
+    func branLoop<V: Equatable>(_ animation: Animation, value: V) -> some View {
+        modifier(LoopingMotion(animation: animation, value: value))
     }
 
     /// Le fond d'une carte de liste, avec son contour de survol visible dans les
@@ -178,3 +252,20 @@ private struct ReducedMotion<V: Equatable>: ViewModifier {
         content.animation(reduceMotion ? .easeOut(duration: 0.1) : animation, value: value)
     }
 }
+
+/// Une boucle : jouée, ou pas jouée du tout. Jamais raccourcie.
+private struct LoopingMotion<V: Equatable>: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let animation: Animation
+    let value: V
+
+    func body(content: Content) -> some View {
+        content.animation(reduceMotion ? nil : animation, value: value)
+    }
+}
+
+// **Couper l'animation ne suffit pas toujours.** Une horloge qui pousse une
+// phase à 40 Hz continue de faire travailler la machine même si plus rien ne
+// bouge à l'écran. Les vues concernées lisent donc `accessibilityReduceMotion`
+// directement pour **ne pas démarrer** leur boucle, en plus de ne pas l'animer.
+// `AnimatedStripe` dans `NotchView.swift` est le cas type.

@@ -186,12 +186,18 @@ final class NotchOverlay {
     /// coup, et toute l'animation de fermeture ne serait jamais vue. On laisse
     /// donc le tracé se refermer, puis on retire la fenêtre une fois qu'elle est
     /// déjà invisible.
+    ///
+    /// **L'attente vient de `Motion.notchCollapse`, pas d'un nombre écrit ici.**
+    /// Elle valait 380 ms en dur, pendant que le ressort qu'elle attend vit dans
+    /// `Design.swift`. Deux fichiers pour un seul mouvement : régler le ressort
+    /// sans y penser faisait disparaître le panneau au milieu de sa propre
+    /// fermeture, et rien n'aurait pu le signaler.
     func hide() {
         content.isExpanded = false
 
         collapseTask?.cancel()
         collapseTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(380))
+            try? await Task.sleep(for: Motion.notchCollapse)
             guard Task.isCancelled == false else { return }
             self?.panel?.orderOut(nil)
         }

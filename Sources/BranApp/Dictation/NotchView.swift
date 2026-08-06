@@ -42,6 +42,8 @@ struct NotchView: View {
     let notchWidth: CGFloat
     let notchHeight: CGFloat
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     /// La taille du **contenu**, qui n'est pas celle de la fenêtre.
     private var contentSize: CGSize {
         hasNotch
@@ -57,7 +59,7 @@ struct NotchView: View {
         ZStack {
             shape
                 .fill(.black)
-                .overlay(shape.stroke(.white.opacity(isOpen ? 0.10 : 0), lineWidth: 0.5))
+                .overlay(shape.stroke(isOpen ? NotchInk.edge : .clear, lineWidth: 0.5))
                 .shadow(color: .black.opacity(hasNotch ? 0 : 0.4), radius: 16, y: 6)
 
             HStack(spacing: 11) {
@@ -74,7 +76,10 @@ struct NotchView: View {
             .opacity(isOpen ? 1 : 0)
             .blur(radius: isOpen ? 0 : 3)
             .scaleEffect(isOpen ? 1 : 0.92)
-            .animation(.smooth(duration: 0.3).delay(isOpen ? 0.09 : 0), value: isOpen)
+            .branAnimation(
+                Motion.notchContent.delay(isOpen ? Motion.notchContentDelay : 0),
+                value: isOpen
+            )
         }
         // Le contenu a sa taille propre, calée en haut d'une fenêtre plus
         // grande et fixe. C'est ce découplage qui permet à la fenêtre de ne
@@ -85,16 +90,12 @@ struct NotchView: View {
         .offset(y: hasNotch ? 0 : (isOpen ? 0 : -14))
         .scaleEffect(hasNotch ? 1 : (isOpen ? 1 : 0.86), anchor: .top)
         .opacity(hasNotch ? 1 : (isOpen ? 1 : 0))
-        .animation(Self.opening, value: isOpen)
-        .animation(.smooth(duration: 0.32), value: content.mode)
+        .branAnimation(Motion.notch, value: isOpen)
+        .branAnimation(Motion.state, value: content.mode)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { isOpen = true }
         .onChange(of: content.isExpanded) { _, expanded in isOpen = expanded }
     }
-
-    /// Un ressort franc mais peu rebondissant : assez vivant pour se remarquer,
-    /// assez sobre pour être vu vingt fois par heure.
-    private static let opening = Animation.spring(response: 0.42, dampingFraction: 0.74)
 
     private var shape: some Shape {
         hasNotch
@@ -124,30 +125,34 @@ struct NotchView: View {
                 .scaleEffect(0.8)
         case .done, .captured:
             Image(systemName: "checkmark")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.green)
+                .font(Type.notch.weight(.bold))
+                .foregroundStyle(Palette.done)
                 .transition(.scale.combined(with: .opacity))
         case .preparing:
             Image(systemName: "cpu")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.75))
-                .symbolEffect(.pulse, options: .repeating)
+                .font(Type.notch.weight(.semibold))
+                .foregroundStyle(NotchInk.symbolFaint)
+                // `.symbolEffect(.pulse, options: .repeating)` est une boucle
+                // perpétuelle de plus, et celle-là est jouée par SwiftUI, pas
+                // par nous : `branLoop` ne l'atteint pas. On la conditionne donc
+                // à la main, comme les deux autres.
+                .symbolEffect(.pulse, options: .repeating, isActive: reduceMotion == false)
         case .reading:
             Image(systemName: "text.viewfinder")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
+                .font(Type.notch.weight(.semibold))
+                .foregroundStyle(NotchInk.symbol)
         case .empty:
             Image(systemName: content.source == .snapshot ? "text.badge.xmark" : "waveform.slash")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.5))
+                .font(Type.notch.weight(.semibold))
+                .foregroundStyle(NotchInk.symbolMuted)
         case .cancelled:
             Image(systemName: "xmark")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.white.opacity(0.5))
+                .font(Type.notch.weight(.bold))
+                .foregroundStyle(NotchInk.symbolMuted)
         case .failed:
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.orange)
+                .font(Type.notch.weight(.bold))
+                .foregroundStyle(Palette.attention)
         }
     }
 
@@ -166,8 +171,8 @@ struct NotchView: View {
                 .frame(width: hasNotch ? 92 : 130, height: 22)
         } else {
             Text(label)
-                .font(.system(size: 11.5, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.93))
+                .font(Type.notch)
+                .foregroundStyle(NotchInk.text)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: hasNotch ? 120 : 180, alignment: .leading)
@@ -180,15 +185,15 @@ struct NotchView: View {
     private var trailing: some View {
         if case .listening = content.mode {
             Text(Self.clock(content.elapsed))
-                .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                .font(Type.notch)
                 .monospacedDigit()
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(NotchInk.value)
                 .contentTransition(.numericText())
         } else if case .preparing(let fraction) = content.mode, let fraction {
             Text("\(Int(fraction * 100)) %")
-                .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                .font(Type.notch)
                 .monospacedDigit()
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(NotchInk.value)
                 .contentTransition(.numericText())
         }
     }
@@ -374,7 +379,16 @@ private struct AnimatedStripe: View {
     /// où en est son cycle.
     @State private var phase: TimeInterval = 0
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private static let interval: Duration = .milliseconds(25)
+
+    /// La phase figée du balayage, sous « Réduire les animations ».
+    ///
+    /// La moitié d'un cycle, pas zéro. À zéro la bande claire est collée au bord
+    /// gauche et la vue se lit « bloqué au début » ; au milieu, elle se lit comme
+    /// une illustration voulue.
+    private static let stillScanPhase: TimeInterval = 0.7
 
     var body: some View {
         Canvas { context, size in
@@ -382,12 +396,31 @@ private struct AnimatedStripe: View {
             case .waveform:
                 WaveformDrawing.draw(levels, phase: phase, in: context, size: size)
             case .scan:
-                ScanDrawing.draw(phase: phase, in: context, size: size)
+                ScanDrawing.draw(
+                    phase: reduceMotion ? Self.stillScanPhase : phase,
+                    in: context,
+                    size: size
+                )
             }
         }
+        // **L'horloge ne démarre pas du tout sous « Réduire les animations ».**
+        // Couper l'animation n'aurait rien coûté de moins : cette boucle pousse
+        // une phase quarante fois par seconde, et le `Canvas` se redessine à
+        // chaque fois. Le réglage demande d'arrêter le mouvement, or ici le
+        // mouvement *est* la boucle — la supprimer rend les deux, l'immobilité
+        // et le processeur.
+        //
+        // La vague continue de suivre `levels`, et c'est voulu : elle répond à
+        // ce que dit l'utilisateur, ce n'est pas de la décoration. Ce que la
+        // phase pilote — la respiration au silence, le balayage — l'est.
+        //
         // `.task` s'annule tout seul quand la vue disparaît : l'horloge ne
         // survit pas à l'encoche qu'elle anime.
-        .task {
+        .task(id: reduceMotion) {
+            guard reduceMotion == false else {
+                phase = 0
+                return
+            }
             let started = ContinuousClock.now
             while Task.isCancelled == false {
                 try? await Task.sleep(for: Self.interval)
@@ -482,32 +515,40 @@ private struct LoadingBar: View {
 
     @State private var shuttle = false
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(.white.opacity(0.18))
+                    .fill(NotchInk.trough)
 
                 if let fraction {
                     Capsule()
-                        .fill(.white.opacity(0.9))
+                        .fill(NotchInk.fill)
                         .frame(width: max(4, geometry.size.width * fraction))
-                        .animation(.smooth(duration: 0.3), value: fraction)
+                        .branAnimation(Motion.state, value: fraction)
+                } else if reduceMotion {
+                    // **Rien ne bouge, et il faut quand même dire qu'on
+                    // travaille.** Une navette figée à gauche se lit comme une
+                    // barre bloquée à 30 %, c'est-à-dire comme un plantage. Une
+                    // barre pleine et atténuée dit « en cours, durée inconnue »
+                    // sans prétendre connaître une progression.
+                    Capsule()
+                        .fill(NotchInk.trough)
+                        .overlay(Capsule().fill(NotchInk.fill).opacity(0.45))
                 } else {
                     Capsule()
-                        .fill(.white.opacity(0.9))
+                        .fill(NotchInk.fill)
                         .frame(width: geometry.size.width * 0.32)
                         .offset(x: shuttle ? geometry.size.width * 0.68 : 0)
-                        .animation(
-                            .easeInOut(duration: 0.9).repeatForever(autoreverses: true),
-                            value: shuttle
-                        )
+                        .branLoop(Motion.shuttle, value: shuttle)
                 }
             }
             .frame(height: 4)
             .frame(maxHeight: .infinity)
         }
-        .onAppear { shuttle = true }
+        .onAppear { shuttle = reduceMotion == false }
     }
 }
 
@@ -574,23 +615,35 @@ private struct NotchShape: Shape {
 ///
 /// Portée par la vue elle-même plutôt que pilotée depuis le contrôleur : une
 /// animation en boucle n'a aucune raison de traverser trois couches.
+///
+/// **Sous « Réduire les animations », le halo ne part pas.** Il reste posé,
+/// discret, et la pastille pleine suffit à dire « ça écoute ». C'est la
+/// différence entre supprimer un mouvement et supprimer une information : ici
+/// l'information est la couleur rouge, pas la pulsation.
 private struct PulsingDot: View {
     @State private var isPulsing = false
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
             Circle()
-                .fill(.red.opacity(0.35))
+                .fill(Palette.live.opacity(0.35))
                 .frame(width: 16, height: 16)
-                .scaleEffect(isPulsing ? 1 : 0.45)
-                .opacity(isPulsing ? 0 : 0.9)
+                .scaleEffect(pulses && isPulsing ? 1 : 0.45)
+                .opacity(pulses ? (isPulsing ? 0 : 0.9) : 0.35)
 
             Circle()
-                .fill(.red)
+                .fill(Palette.live)
                 .frame(width: 7, height: 7)
         }
-        .animation(.easeOut(duration: 1.25).repeatForever(autoreverses: false), value: isPulsing)
-        .onAppear { isPulsing = true }
+        .branLoop(Motion.pulse, value: isPulsing)
+        // La boucle n'est pas seulement non animée : elle n'est pas armée. Poser
+        // `isPulsing` sans animation ferait sauter le halo d'un état à l'autre
+        // à la première image, ce qui est un mouvement de plus, pas un de moins.
+        .onAppear { isPulsing = pulses }
         .frame(width: 16, height: 16)
     }
+
+    private var pulses: Bool { reduceMotion == false }
 }
