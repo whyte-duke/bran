@@ -145,26 +145,13 @@ final class NotchOverlay {
 
         geometry = next
         let hostingView = NSHostingView(rootView: view(for: next))
-        let newPanel = NSPanel(
-            contentRect: next.frame,
-            // `.nonactivatingPanel` : afficher l'état de la dictée ne doit pas
-            // voler le focus à l'application où l'on est en train d'écrire.
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
+        let newPanel = OverlayPanel.make(
+            frame: next.frame,
+            content: hostingView,
+            // L'encoche n'a aucun contrôle : elle affiche un état. Intercepter un
+            // clic destiné à la fenêtre du dessous serait un défaut pur.
+            acceptsMouse: false
         )
-
-        newPanel.contentView = hostingView
-        newPanel.isOpaque = false
-        newPanel.backgroundColor = .clear
-        newPanel.hasShadow = false
-        // Au-dessus de la barre de menus, sinon le panneau passe dessous sur un
-        // écran à encoche et devient invisible.
-        newPanel.level = .init(Int(CGShieldingWindowLevel()))
-        newPanel.ignoresMouseEvents = true
-        newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        newPanel.hidesOnDeactivate = false
-        newPanel.orderFrontRegardless()
 
         panel = newPanel
         hosting = hostingView

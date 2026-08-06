@@ -114,33 +114,14 @@ final class AttentionOverlay {
         hostingView.onHoverChange = { [content] hovering in content.isHovering = hovering }
         hostingView.onClick = { [weak self] in self?.activate() }
 
-        let newPanel = NSPanel(
-            contentRect: NSRect(origin: origin, size: size),
-            // `.nonactivatingPanel` : signaler qu'une machine attend ne doit pas
-            // voler le focus à l'application où l'on est en train d'écrire. Le
-            // clic, lui, active explicitement l'application visée — ce n'est pas
-            // le panneau qui prend le focus, c'est la voie qu'on reprend.
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
+        let newPanel = OverlayPanel.make(
+            frame: NSRect(origin: origin, size: size),
+            content: hostingView,
+            // Le clic **est** le produit ici : c'est le geste de retour. Le tri
+            // de ce qui est cliquable se fait dans le `hitTest` de la vue, le
+            // panneau étant bien plus grand que la capsule qu'il porte.
+            acceptsMouse: true
         )
-
-        newPanel.contentView = hostingView
-        newPanel.isOpaque = false
-        newPanel.backgroundColor = .clear
-        newPanel.hasShadow = false
-        // Au-dessus de la barre de menus, sinon le panneau passe dessous sur un
-        // écran à encoche et devient invisible.
-        newPanel.level = .init(Int(CGShieldingWindowLevel()))
-        // **Le panneau accepte la souris, la vue décide où.** Tout refuser
-        // rendait le retour impossible ; tout accepter avalerait les clics
-        // destinés à ce qu'il y a dessous, puisque la pilule est bien plus
-        // petite que les 260 × 34 du panneau. Le tri se fait dans `hitTest`.
-        newPanel.ignoresMouseEvents = false
-        newPanel.acceptsMouseMovedEvents = true
-        newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        newPanel.hidesOnDeactivate = false
-        newPanel.orderFrontRegardless()
 
         panel = newPanel
         hosting = hostingView
