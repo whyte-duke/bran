@@ -73,10 +73,7 @@ enum LaneReturn {
         guard let winner = WindowChoice.best(among: candidates.map(\.candidate), for: identity),
               let match = candidates.first(where: { $0.candidate == winner })
         else {
-            return activateFirst(
-                apps,
-                reason: "\(nameOf(apps[0])) est au premier plan, mais bran n'a pas retrouvé la fenêtre de « \(identity.displayName) » : son titre a dû changer depuis la dernière observation."
-            )
+            return giveUp(target: target, apps: apps, identity: identity)
         }
 
         match.app.activate()
@@ -177,13 +174,44 @@ enum LaneReturn {
             return .appOnly(reason: reason)
         }
 
-        return activateFirst(apps, reason: reason)
+        return giveUp(target: LaneTarget(key: identity.key), apps: apps, identity: identity, prefix: reason)
     }
 
-    private static func activateFirst(_ apps: [NSRunningApplication], reason: String) -> Outcome {
-        guard let app = apps.first else { return .notFound(reason: reason) }
+    /// **Ce qu'on fait quand on n'a pas trouvé la fenêtre — et surtout ce qu'on
+    /// ne fait pas.**
+    ///
+    /// La version précédente activait `apps.first` dans tous les cas. Pour une
+    /// voie de fenêtre c'est correct : `apps` a été filtré sur le propriétaire,
+    /// donc la première entrée est la bonne application, seulement pas la bonne
+    /// fenêtre. Pour une voie Claude Code, `apps` est **toutes** les applications
+    /// de premier plan de la machine, dans l'ordre non spécifié que rend
+    /// `NSWorkspace.shared.runningApplications`.
+    ///
+    /// Le cas concret, et c'est le plus fréquent : une voie `cc:…/castral/crm`
+    /// dont le terminal affiche `user@kvm4: ~`, sans jamais nommer le dossier.
+    /// Aucun titre ne correspond, et l'utilisateur qui clique « revenir sur
+    /// crm » atterrissait dans Mail. `WindowChoice` le dit dans son propre
+    /// en-tête : déplacer quelqu'un là où il n'a rien demandé lui fait perdre sa
+    /// place **et** sa confiance, ce qui est pire que de ne rien faire.
+    ///
+    /// Donc : on n'active que si `apps` a été restreint à un propriétaire connu.
+    private static func giveUp(
+        target: LaneTarget?,
+        apps: [NSRunningApplication],
+        identity: LaneIdentity,
+        prefix: String? = nil
+    ) -> Outcome {
+        let lost = "bran n'a pas retrouvé la fenêtre de « \(identity.displayName) » : son titre a dû changer depuis la dernière observation."
+
+        guard case .window = target, let app = apps.first else {
+            // Aucun propriétaire connu : on ne bouge personne. Le message dit
+            // quoi faire plutôt que de laisser l'utilisateur chercher.
+            let advice = "Aucune fenêtre ouverte ne nomme « \(identity.displayName) ». Le titre du terminal peut ne nommer que la machine — voir « Naming the work behind an SSH session » dans le README."
+            return .notFound(reason: [prefix, advice].compactMap { $0 }.joined(separator: " "))
+        }
+
         app.activate()
-        return .appOnly(reason: reason)
+        return .appOnly(reason: [prefix, "\(nameOf(app)) est au premier plan, mais \(lost)"].compactMap { $0 }.joined(separator: " "))
     }
 
     // MARK: - Accessibilité

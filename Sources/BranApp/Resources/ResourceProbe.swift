@@ -8,7 +8,10 @@ import Foundation
 ///
 /// ```
 ///   task_info(TASK_VM_INFO).phys_footprint ──▶ octets
-///   proc_pid_rusage(ri_user_time + ri_system_time) ──▶ nanosecondes cumulées
+///   proc_pid_rusage(ri_user_time + ri_system_time)
+///                       ──▶ unités mach cumulées
+///                       ──▶ × timebase (125/3 sur Apple Silicon)
+///                       ──▶ nanosecondes
 /// ```
 ///
 /// **Pourquoi `phys_footprint` et pas `resident_size`.** Ce sont deux colonnes
@@ -33,7 +36,9 @@ enum ResourceProbe {
     /// Un relevé brut. Des nombres, pas des pourcentages : la dérivée est faite
     /// ailleurs, par `ResourceTracker`.
     struct Sample: Sendable {
-        /// `ri_user_time + ri_system_time`, cumulés depuis le lancement.
+        /// `ri_user_time + ri_system_time`, cumulés depuis le lancement et
+        /// **déjà convertis** en nanosecondes. Les champs bruts n'en sont pas,
+        /// malgré leur nom : voir `cpuNanoseconds()`.
         var cpuNanoseconds: UInt64
         /// `phys_footprint`, instantané.
         var footprintBytes: UInt64

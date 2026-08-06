@@ -123,9 +123,15 @@ enum Palette {
     /// Un panneau encastré : tuile de fait, éditeur de notes, bandeau.
     static let well = AnyShapeStyle(.quinary)
 
-    /// La sélection dans la colonne. `.selection` porte déjà la vibrance, le
-    /// contraste, et l'état « fenêtre non active » que le blanc codé en dur
-    /// ignorait.
+    /// **N'est plus utilisée pour la colonne, et le commentaire d'origine était
+    /// faux.** Il promettait que `.selection` « porte déjà le contraste ». Elle
+    /// rend l'accent système saturé : avec `.primary` par-dessus, c'est du noir
+    /// sur du bleu foncé en thème clair — la configuration macOS par défaut.
+    /// Voir `SidebarItem.background`, qui n'emploie aucune couleur d'accent en
+    /// fond et met l'accent sur le symbole.
+    ///
+    /// Conservée parce qu'elle reste juste dans un conteneur sélectionnable, où
+    /// AppKit règle lui-même la couleur du texte. Ne pas l'employer ailleurs.
     static let selection = AnyShapeStyle(.selection)
 
     /// Les états. **Les seules couleurs littérales autorisées**, et elles sont
@@ -176,6 +182,11 @@ enum Motion {
     /// le ressort sans toucher l'attente fait disparaître le panneau au milieu de
     /// sa propre fermeture, et aucun test ne peut le voir.
     static let notchCollapse: Duration = .milliseconds(380)
+
+    /// Le repli de la pilule d'attention, et le retrait de sa fenêtre.
+    /// Même raisonnement que `notchCollapse`, sur une animation plus courte
+    /// (`Motion.enter`) : retirer la fenêtre trop tôt supprime la sortie.
+    static let pillCollapse: Duration = .milliseconds(300)
 
     // MARK: Les boucles
 

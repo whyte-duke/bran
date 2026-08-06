@@ -10,6 +10,11 @@ import SwiftUI
 struct GeneralSettingsSection: View {
     @Bindable var model: AppModel
 
+    /// La même clé que `DockPresence`, mais observée : `@AppStorage` se réabonne
+    /// aux changements de `UserDefaults`, y compris ceux qui viennent du
+    /// rattrapage d'échec.
+    @AppStorage(DockPresence.defaultsKey) private var showsDockIcon = true
+
     var body: some View {
         Section("Démarrage") {
             Toggle("Lancer bran à l'ouverture de session", isOn: Binding(
@@ -20,9 +25,15 @@ struct GeneralSettingsSection: View {
                 .font(Type.meta)
                 .foregroundStyle(.secondary)
 
+            // **`@AppStorage` et pas une lecture directe.** Le `Binding`
+            // précédent lisait `UserDefaults` à chaque rendu, sans rien observer :
+            // quand `DockPresence.apply()` remet la préférence sur la réalité
+            // parce que le système a refusé le changement, rien n'invalidait la
+            // vue et l'interrupteur restait sur la position demandée. Il mentait
+            // exactement dans le cas que le rattrapage existe pour couvrir.
             Toggle("Afficher bran dans le Dock", isOn: Binding(
-                get: { DockPresence.isEnabled },
-                set: { DockPresence.isEnabled = $0 }
+                get: { showsDockIcon },
+                set: { showsDockIcon = $0; DockPresence.apply() }
             ))
             Text(DockPresence.explanation)
                 .font(Type.meta)

@@ -402,3 +402,67 @@ struct ResourceTimebaseTests {
         #expect(abs((percent ?? 0) - 100) < 1)
     }
 }
+
+// MARK: - L'invariant que la première série de tests avait oublié
+
+/// **`ResourceTracker.forget()` n'était couvert par aucun test.**
+///
+/// Seul `SlidingMedian.forget()` l'était. C'est-à-dire que la fonction dont le
+/// rôle *est* d'empêcher une dérivée d'enjamber une pause n'avait aucune
+/// couverture — et c'est précisément là que vivaient deux défauts trouvés en
+/// revue : un point de référence réarmé par une tâche détachée qui survit à
+/// l'annulation, et un instant de référence qui avançait sans son relevé.
+@Suite("Le point de référence après une pause")
+struct ResourceTrackerForgetTests {
+
+    @Test("Éteindre puis rallumer le moniteur ne fabrique pas un pic")
+    func forgetDropsTheReference() {
+        var tracker = ResourceTracker()
+
+        // Deux tics normaux : 20 ms de processeur sur 2 s, soit 1 %.
+        _ = tracker.accept(
+            cpuNanoseconds: 1_000_000_000, footprintBytes: 100, totalMemoryBytes: 1000,
+            elapsed: 2, clockJumped: false
+        )
+        let normal = tracker.accept(
+            cpuNanoseconds: 1_020_000_000, footprintBytes: 100, totalMemoryBytes: 1000,
+            elapsed: 2, clockJumped: false
+        )
+        #expect(normal.cpuPercent != nil)
+        #expect(abs((normal.cpuPercent ?? 0) - 1) < 0.01)
+
+        // On éteint. Dix minutes passent, pendant lesquelles le compteur du
+        // noyau continue d'avancer sans que personne ne l'observe.
+        tracker.forget()
+
+        // On rallume : le premier relevé n'a plus de point de comparaison.
+        let first = tracker.accept(
+            cpuNanoseconds: 30_000_000_000, footprintBytes: 100, totalMemoryBytes: 1000,
+            elapsed: 2, clockJumped: false
+        )
+        // **Inconnu, pas 1 450 %.** Sans `forget`, la dérivée diviserait
+        // vingt-neuf secondes de processeur par deux secondes de mur.
+        #expect(first.cpuPercent == nil)
+
+        // Et le tic suivant repart juste.
+        let second = tracker.accept(
+            cpuNanoseconds: 30_020_000_000, footprintBytes: 100, totalMemoryBytes: 1000,
+            elapsed: 2, clockJumped: false
+        )
+        #expect(abs((second.cpuPercent ?? 0) - 1) < 0.01)
+    }
+
+    @Test("La mémoire reste lisible juste après un oubli")
+    func forgetKeepsMemoryReadable() {
+        var tracker = ResourceTracker()
+        tracker.forget()
+        let reading = tracker.accept(
+            cpuNanoseconds: 5_000_000_000, footprintBytes: 512, totalMemoryBytes: 1024,
+            elapsed: 2, clockJumped: false
+        )
+        // Le processeur est une dérivée et ne peut rien dire ; la mémoire est un
+        // niveau et n'a besoin d'aucun passé.
+        #expect(reading.cpuPercent == nil)
+        #expect(reading.memoryPercent == 50)
+    }
+}

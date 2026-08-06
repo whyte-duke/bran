@@ -387,8 +387,21 @@ public enum ResourceFormat {
 
     /// La lecture normalisée, celle du menu déroulant : une décimale, et pas de
     /// `,0` inutile. « 0,2 % des 12 cœurs » et « 2 % des 16 Go ».
+    /// La part de la machine entière. **Même doctrine que `percent` : jamais
+    /// « 0 ».**
+    ///
+    /// bran au repos occupe 4 % d'un cœur, soit 0,33 % de douze cœurs. Arrondi à
+    /// une décimale ça passe encore, mais un dixième de moins et la ligne du menu
+    /// devenait « Processeur <1 % · 0 % des 12 cœurs » : la colonne de gauche dit
+    /// « trop petit pour être dit », celle de droite dit « rien ». Or c'est
+    /// précisément la ligne qu'on lit pour décider si on garde l'application.
     public static func share(_ value: Double?) -> String {
         guard let value, value.isFinite else { return unknown }
+        // Même doctrine que `percent`, et elle manquait ici : un arrondi qui
+        // rend « 0 » dit « rien », alors que la mesure dit « trop petit pour
+        // être écrit ». Sur la même ligne du menu, la colonne de gauche disait
+        // déjà « <1 » — deux réponses contradictoires à la même question.
+        if value > 0, value < 0.05 { return "<0,1\u{202F}%" }
         let text = max(0, value).formatted(
             .number.precision(.fractionLength(0...1)).locale(locale)
         )

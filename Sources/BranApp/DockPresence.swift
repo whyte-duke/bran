@@ -30,7 +30,10 @@ import Foundation
 @MainActor
 enum DockPresence {
 
-    private static let key = "bran.showsDockIcon"
+    /// Exposée : les réglages l'observent via `@AppStorage`, parce qu'une
+    /// lecture directe de `UserDefaults` ne se réabonne à rien.
+    static let defaultsKey = "bran.showsDockIcon"
+    private static var key: String { defaultsKey }
 
     /// Le défaut est `true` : c'est ce que `LSUIElement = false` promet, et un
     /// réglage qui contredirait le `Info.plist` au premier lancement ferait

@@ -159,12 +159,31 @@ final class ResourceMeter {
     private func tick() async {
         let clock = WatchClock(tickInterval: Self.interval)
         let step = clock.step(from: previousInstant)
-        previousInstant = .now
 
         // Les deux appels système, hors du MainActor.
-        guard let sample = await Task.detached(priority: .utility, operation: {
+        let sample = await Task.detached(priority: .utility, operation: {
             ResourceProbe.sample()
-        }).value else { return }
+        }).value
+
+        // **La boucle a pu être arrêtée pendant qu'on attendait.** Une tâche
+        // détachée n'hérite pas de l'annulation de son appelant : elle va au bout
+        // et `tick()` reprend ici, après que `setRunning(false)` a appelé
+        // `tracker.forget()`. Sans ce garde, on réinstallerait le compteur que
+        // `forget` vient de jeter, et au rallumage — dix minutes plus tard — la
+        // dérivée diviserait dix minutes de temps processeur par un intervalle
+        // neuf. Un pourcentage à six chiffres, poussé dans la médiane, visible
+        // deux ou trois tics. C'est exactement ce que `forget` existe pour
+        // empêcher.
+        guard Task.isCancelled == false else { return }
+
+        // **L'instant de référence n'avance qu'avec un relevé réussi.** Il
+        // avançait avant le `guard`, donc un relevé manqué jetait l'intervalle
+        // côté temps tout en le conservant côté compteur : le tic suivant
+        // divisait quatre secondes de processeur par deux secondes de mur, et
+        // affichait le double. Un chiffre faux dont rien ne dit qu'il l'est est
+        // pire qu'un « — » franc.
+        guard let sample else { return }
+        previousInstant = .now
 
         let fresh = tracker.accept(
             cpuNanoseconds: sample.cpuNanoseconds,

@@ -35,6 +35,10 @@ import SwiftUI
 final class AttentionOverlay {
 
     private var panel: NSPanel?
+    /// Le repli en cours. Annulé dès qu'on réaffiche : sans ça, une pilule qui
+    /// réapparaît juste après avoir été cachée se ferait retirer par la tâche
+    /// de la fois d'avant.
+    private var collapseTask: Task<Void, Never>?
     private var hosting: PillHostingView?
     private let content = AttentionContent()
 
@@ -134,15 +138,32 @@ final class AttentionOverlay {
         onReturn?(shown)
     }
 
+    /// **On laisse la pilule se refermer avant de retirer la fenêtre.**
+    ///
+    /// `orderOut` est synchrone : posé dans le même tour de boucle que
+    /// `isVisible = false`, il faisait disparaître le panneau avant la première
+    /// image de l'animation de sortie. L'entrée était animée, la sortie était un
+    /// clic sec — une asymétrie que la vue déclarait pourtant explicitement.
+    ///
+    /// Même ordre et même raison que `NotchOverlay.hide()`, dont l'attente vient
+    /// aussi de `Design.swift` plutôt que d'un nombre écrit sur place.
     func hide() {
         guard content.isVisible else { return }
         content.isVisible = false
         content.isHovering = false
         hosting?.releaseCursor()
-        panel?.orderOut(nil)
+
+        collapseTask?.cancel()
+        collapseTask = Task { [weak self] in
+            try? await Task.sleep(for: Motion.pillCollapse)
+            guard Task.isCancelled == false else { return }
+            self?.panel?.orderOut(nil)
+        }
     }
 
     func dismiss() {
+        collapseTask?.cancel()
+        collapseTask = nil
         content.isHovering = false
         hosting?.releaseCursor()
         panel?.orderOut(nil)
