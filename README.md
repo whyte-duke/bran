@@ -447,7 +447,7 @@ Two conventions to know before comparing against anything else:
 
 ```bash
 swift build          # builds everything
-swift test           # 294 tests, runs in about a millisecond
+swift test           # 322 tests, runs in about a millisecond
 open Package.swift   # opens in Xcode, with SwiftUI previews
 ```
 
