@@ -154,6 +154,99 @@ supported 30 are where it would win.
 
 ---
 
+## Naming the work behind an SSH session
+
+The watcher tracks each parallel session as a **lane**. A Claude Code session
+declares its own identity — the transcript carries the working directory and the
+git branch — so that lane is exact and needs nothing from you. A terminal does
+not: all bran has is the window title.
+
+And a terminal title names the **machine**, never the work:
+
+```
+bran - root@kvm4: ~ - ssh castral-azure - 244x67
+```
+
+Everything in that line is about where you are, nothing about what you are
+doing. Run three unrelated tasks on the same VM and they collapse into one lane,
+which is exactly the situation the watcher exists to untangle.
+
+bran does not guess its way out of this. Guessing produces lanes that merge and
+split on their own, which is worse than one honest lane. The fix is to ask the
+remote shell to write the truth, and that is opt-in.
+
+### The snippet
+
+Paste this into `~/.zshrc` **on the remote machine**, then open a new shell:
+
+```zsh
+# --- bran: name the work, not the machine ---------------------------------
+# Writes "<folder> · <branch>" into the terminal title. Optional, reversible,
+# and it never overwrites a title that something else already owns.
+bran_title() {
+  # tmux drives the title itself. Fighting it makes the lane flicker between
+  # two identities, which is worse than the imprecise title we started from.
+  [[ -n "$TMUX" ]] && return
+  # The conventional opt-out. Anyone who sets terminal titles on purpose —
+  # oh-my-zsh users especially — already sets this, and means it.
+  [[ "$DISABLE_AUTO_TITLE" == true ]] && return
+  # A per-shell escape hatch that needs no edit to this file.
+  [[ -n "$BRAN_NO_TITLE" ]] && return
+
+  local folder=${PWD:t}
+  local branch
+  branch=$(command git symbolic-ref --quiet --short HEAD 2>/dev/null)
+
+  if [[ -n "$branch" ]]; then
+    print -n "\e]0;${folder} · ${branch}\a"
+  else
+    print -n "\e]0;${folder}\a"
+  fi
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd bran_title
+# --- end bran -------------------------------------------------------------
+```
+
+It writes one escape sequence per prompt and nothing else. No file is created,
+no package installed, no daemon left running. On a detached HEAD, or outside a
+git repository, the title falls back to the folder alone.
+
+For bash, the same escape sequence from `PROMPT_COMMAND` does the same job — the
+guards matter more than the shell.
+
+### Turning it off
+
+Three ways, in increasing permanence:
+
+| | |
+|---|---|
+| This shell only | `add-zsh-hook -d precmd bran_title` |
+| Every new shell | `export BRAN_NO_TITLE=1` in `~/.zshrc` |
+| For good | delete the block between the two comment markers |
+
+Nothing else needs undoing.
+
+### What it actually changes
+
+| | Without | With |
+|---|---|---|
+| Lane name | `root@kvm4` | `scanner · feat/ocr` |
+| Lane precision | `.fragile` | `.stable` |
+| Three tasks on one VM | one lane | three lanes |
+| Switching branch | same lane | a new lane, correctly |
+| Clicking the lane | brings up *a* terminal window | brings up the right one |
+
+**You do not need this to survive a resize.** The `- 244x67` suffix is the
+window size in columns by rows, and it used to fabricate a fresh lane every time
+you dragged a corner or changed the font. bran now strips it on its own, along
+with tmux's `[0]` index and activity flags, iTerm2's window number, and the
+`— Edited` marker of document apps. The snippet buys precision, not stability —
+see `Sources/BranWatch/TitleNoise.swift`, where each rule names the emulator it
+targets and says why that part moves on its own.
+
+---
+
 ## First launch
 
 The welcome screen is organised by **what bran can do**, not by which system
