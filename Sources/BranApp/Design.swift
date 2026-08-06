@@ -58,6 +58,11 @@ enum Radius {
 /// la chasse fixe, où la géométrie est contrainte par le matériel ou par le
 /// contenu.
 enum Type {
+    /// La marque, en tête de la colonne. Un rôle à elle seule : ni un titre de
+    /// section, ni un titre de carte. Elle n'apparaît qu'une fois dans toute
+    /// l'application, et c'est la première chose qu'on lit en l'ouvrant.
+    static let appMark = Font.system(.title3, design: .default, weight: .semibold)
+
     static let paneTitle = Font.system(.largeTitle, design: .default, weight: .semibold)
     static let paneLead = Font.callout
     static let cardTitle = Font.body.weight(.medium)
@@ -160,6 +165,20 @@ enum Motion {
     /// dans la seule surface qu'on regarde vraiment, vingt fois par heure.
     static let pulse = Animation.easeOut(duration: 1.25).repeatForever(autoreverses: false)
     static let shuttle = Animation.easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+
+    /// La même courbe, pour `withAnimation` **au point de mutation**.
+    ///
+    /// `branAnimation` est un modificateur : il ne peut pas atteindre un
+    /// `withAnimation { … }` posé dans le gestionnaire d'un bouton. C'est le
+    /// dernier endroit par lequel une animation échappait au réglage — le
+    /// changement de section de la colonne, précisément le mouvement le plus
+    /// ample de l'application.
+    ///
+    /// L'appelant fournit `reduceMotion` parce qu'il est une vue et qu'il peut
+    /// le lire ; cette énumération, elle, n'a pas d'environnement.
+    static func honouring(_ animation: Animation, reduceMotion: Bool) -> Animation {
+        reduceMotion ? .easeOut(duration: 0.1) : animation
+    }
 }
 
 // MARK: - L'encre de l'encoche

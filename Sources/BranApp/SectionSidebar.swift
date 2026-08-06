@@ -25,22 +25,28 @@ struct SectionSidebar: View {
     @Binding var pane: LibraryPane
     @Binding var showsSettings: Bool
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            VStack(spacing: 2) {
+            VStack(spacing: Space.hair) {
                 ForEach(LibraryPane.allCases) { item in
                     SidebarItem(pane: item, isSelected: pane == item, badge: badge(for: item)) {
-                        // Un ressort court : on veut que le changement se
-                        // remarque sans avoir à l'attendre.
-                        withAnimation(.snappy(duration: 0.22)) { pane = item }
+                        // Le seul mouvement ample de l'application, et le
+                        // dernier qui échappait à « Réduire les animations » :
+                        // un `withAnimation` posé au point de mutation ne peut
+                        // pas être atteint par un modificateur.
+                        withAnimation(Motion.honouring(Motion.pane, reduceMotion: reduceMotion)) {
+                            pane = item
+                        }
                     }
                 }
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, Space.small)
 
-            Spacer(minLength: 12)
+            Spacer(minLength: Space.inset)
 
             footer
         }
@@ -49,18 +55,26 @@ struct SectionSidebar: View {
 
     // MARK: - Haut
 
+    /// **Le rembourrage horizontal de la colonne, et il n'y en a qu'un.**
+    ///
+    /// Il valait 18 en tête, 8 + 10 sur les sections, et 16 sur « Réglages » :
+    /// la roue dentée était donc désalignée de deux points avec tout ce qui la
+    /// surplombe. Personne ne l'aurait nommé en regardant, mais c'est exactement
+    /// ce qui fait qu'une colonne paraît bâclée sans qu'on sache dire pourquoi.
+    private static let inset = Space.stack
+
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.small) {
             Image(systemName: "bird.fill")
-                .font(.system(size: 15, weight: .semibold))
+                .font(Type.appMark)
                 .foregroundStyle(.tint)
             Text("bran")
-                .font(.title3.weight(.semibold))
+                .font(Type.appMark)
             Spacer()
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 6)
-        .padding(.bottom, 18)
+        .padding(.horizontal, Self.inset)
+        .padding(.top, Space.tight)
+        .padding(.bottom, Space.stack)
         .accessibilityAddTraits(.isHeader)
     }
 
@@ -86,35 +100,42 @@ struct SectionSidebar: View {
     // MARK: - Bas
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.small) {
             Divider()
-                .padding(.horizontal, 12)
+                .padding(.horizontal, Space.inset)
 
             if model.hasOpenSession == false {
                 CompactStatusRow(model: model)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, Self.inset)
             }
 
             Button {
                 showsSettings = true
             } label: {
-                HStack(spacing: 9) {
+                HStack(spacing: SidebarItem.gap) {
                     Image(systemName: "gearshape")
-                        .frame(width: 17)
+                        .frame(width: SidebarItem.iconWidth)
                     Text("Réglages")
                     Spacer()
                 }
                 .contentShape(.rect)
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 16)
-            .padding(.bottom, 14)
+            .padding(.horizontal, Self.inset)
+            .padding(.bottom, Space.card)
         }
     }
 }
 
 /// Une ligne de navigation.
 private struct SidebarItem: View {
+    /// Entre le symbole et son libellé. Partagé avec « Réglages » en pied de
+    /// colonne, qui doit s'aligner sur les sections au pixel près.
+    static let gap = Space.small
+    /// La gouttière du symbole. Fixe, pour que les libellés s'alignent quelle
+    /// que soit la largeur du glyphe.
+    static let iconWidth: CGFloat = 17
+
     let pane: LibraryPane
     let isSelected: Bool
     let badge: String?
@@ -124,35 +145,43 @@ private struct SidebarItem: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 9) {
+            HStack(spacing: Self.gap) {
                 Image(systemName: pane.symbol)
-                    .font(.system(size: 13))
-                    .frame(width: 17)
+                    .frame(width: Self.iconWidth)
                 Text(pane.label)
-                    .font(.body)
-                Spacer(minLength: 4)
+                Spacer(minLength: Space.tight)
                 if let badge {
                     Text(badge)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(isSelected ? .white.opacity(0.75) : .secondary)
+                        .font(Type.meta.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
             }
-            .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.horizontal, Space.small)
+            .padding(.vertical, Space.tight + 3)
             .background {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
                     .fill(background)
             }
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.15), value: isHovering)
+        .branAnimation(Motion.hover, value: isHovering)
     }
 
+    /// **Ni blanc sur `.tint`, ni couleur imposée au texte.**
+    ///
+    /// La sélection était peinte en `.tint` avec du texte blanc dessus. Mesuré :
+    /// dès que l'accent système est jaune ou vert — deux des huit choix qu'offre
+    /// macOS — le contraste tombe à ~1,4:1, très en dessous du seuil lisible de
+    /// 4,5:1. La ligne sélectionnée devenait la moins lisible de la colonne.
+    ///
+    /// `.selection` porte déjà la bonne couleur de fond, le bon contraste de
+    /// texte, et l'état « fenêtre au second plan » que le blanc en dur ignorait
+    /// complètement. Le texte n'a donc plus besoin qu'on lui impose quoi que ce
+    /// soit : il reste en `.primary` dans les trois états.
     private var background: AnyShapeStyle {
-        if isSelected { return AnyShapeStyle(.tint) }
+        if isSelected { return Palette.selection }
         if isHovering { return AnyShapeStyle(.quaternary.opacity(0.5)) }
         return AnyShapeStyle(.clear)
     }
@@ -167,17 +196,17 @@ private struct CompactStatusRow: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.small) {
             Circle()
                 .fill(color)
                 .frame(width: 7, height: 7)
 
             VStack(alignment: .leading, spacing: 0) {
                 Text(headline)
-                    .font(.caption.weight(.medium))
+                    .font(Type.meta.weight(.medium))
                     .monospacedDigit()
                 Text(subline)
-                    .font(.caption2)
+                    .font(Type.metaFaint)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -189,11 +218,11 @@ private struct CompactStatusRow: View {
 
     private var color: Color {
         switch model.dictation.phase {
-        case .capturing: return .red
-        case .transcribing: return .orange
+        case .capturing: return Palette.live
+        case .transcribing: return Palette.held
         default: break
         }
-        return model.pendingMeeting != nil ? .orange : .green
+        return model.pendingMeeting != nil ? Palette.attention : Palette.done
     }
 
     private var headline: String {
