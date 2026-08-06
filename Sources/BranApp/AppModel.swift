@@ -205,6 +205,13 @@ public final class AppModel {
         // fonction : il ne doit pas dépendre de l'ordre de construction.
         FeatureLog.folder = storage.root.appending(path: "Journal", directoryHint: .isDirectory)
 
+        // **Avant les fonctions, parce que ça décide de ce que macOS affiche.**
+        // `Info.plist` déclare `LSUIElement = false`, donc l'application démarre
+        // toujours avec une icône dans le Dock. Celui qui l'a retirée dans les
+        // réglages doit la voir disparaître au lancement suivant, pas seulement
+        // le jour où il rouvre les réglages.
+        DockPresence.apply()
+
         directory.start()
         startDictation()
         startSnapshot()

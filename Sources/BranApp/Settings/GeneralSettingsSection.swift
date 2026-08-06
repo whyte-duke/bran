@@ -16,9 +16,18 @@ struct GeneralSettingsSection: View {
                 get: { model.loginItem.isEnabled },
                 set: { model.setLaunchAtLogin($0) }
             ))
-            Text("bran démarre sans fenêtre ni icône du Dock, et se contente d'observer.")
+            Text("bran ouvre sa fenêtre au démarrage, puis se contente d'observer.")
                 .font(Type.meta)
                 .foregroundStyle(.secondary)
+
+            Toggle("Afficher bran dans le Dock", isOn: Binding(
+                get: { DockPresence.isEnabled },
+                set: { DockPresence.isEnabled = $0 }
+            ))
+            Text(DockPresence.explanation)
+                .font(Type.meta)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
 
         Section("Consommation") {

@@ -59,16 +59,29 @@ enum DockPresence {
     ///    reste et le menu de l'application ne se pose pas.
     /// 3. Rien de tout ça n'est fait hors du fil principal : la politique
     ///    d'activation touche au serveur de fenêtres.
-    static func apply() {
+    /// 4. `setActivationPolicy` **rend un booléen**, et l'ignorer laisserait
+    ///    l'interrupteur mentir : le réglage dirait « pas d'icône » pendant que
+    ///    l'icône est là. En cas d'échec on remet la préférence sur ce que le
+    ///    système fait réellement, plutôt que sur ce qu'on lui avait demandé.
+    @discardableResult
+    static func apply() -> Bool {
         let wanted: NSApplication.ActivationPolicy = isEnabled ? .regular : .accessory
         let application = NSApplication.shared
 
-        guard application.activationPolicy() != wanted else { return }
-        application.setActivationPolicy(wanted)
+        guard application.activationPolicy() != wanted else { return true }
+
+        guard application.setActivationPolicy(wanted) else {
+            UserDefaults.standard.set(
+                application.activationPolicy() == .regular,
+                forKey: key
+            )
+            return false
+        }
 
         if wanted == .regular {
             application.activate()
         }
+        return true
     }
 
     /// Ce que les réglages affichent sous l'interrupteur.
