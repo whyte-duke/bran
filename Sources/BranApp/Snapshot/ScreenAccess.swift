@@ -1,3 +1,4 @@
+import BranWindows
 import CoreGraphics
 import Foundation
 
@@ -27,19 +28,10 @@ enum ScreenAccess {
     /// propres titres, autorisation ou non, et s'en contenter rendrait la sonde
     /// systématiquement positive.
     static var canSeeOtherWindows: Bool {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let entries = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return false
-        }
-
         let mine = ProcessInfo.processInfo.processIdentifier
-        return entries.contains { entry in
-            guard let owner = entry[kCGWindowOwnerPID as String] as? Int32, owner != mine else {
-                return false
-            }
-            guard let title = entry[kCGWindowName as String] as? String else { return false }
-            return title.isEmpty == false
-        }
+        // `WindowList.onScreen()` écarte déjà les fenêtres sans titre : il ne
+        // reste qu'à vérifier qu'au moins une appartient à quelqu'un d'autre.
+        return WindowList.onScreen().contains { $0.processID != mine }
     }
 
     /// Ce que le système déclare, qui peut être faux dans le sens permissif.

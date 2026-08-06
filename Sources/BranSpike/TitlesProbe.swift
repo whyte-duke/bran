@@ -1,5 +1,5 @@
-import AppKit
 import BranCore
+import BranWindows
 import CoreGraphics
 import Foundation
 
@@ -39,9 +39,9 @@ struct TitlesProbe {
         var lastVerdict: Bool?
 
         while true {
-            let windows = currentWindows()
+            let windows = WindowList.onScreen()
             let signals = windows.compactMap {
-                MeetTitleMatcher.signal(from: $0.title, owningApplication: $0.owner)
+                MeetTitleMatcher.signal(from: $0.title, owningApplication: $0.ownerName)
             }
             let isMeeting = signals.isEmpty == false
 
@@ -49,7 +49,7 @@ struct TitlesProbe {
             // matchées : c'est le corpus qui servira à corriger le matcher.
             for window in windows where Self.browserBundleIdentifiers.contains(window.bundleIdentifier ?? "") {
                 let verdict = MeetTitleMatcher.isMeeting(window.title) ? "MEET" : "----"
-                log.append("\(verdict)  [\(window.owner)] \(window.title)")
+                log.append("\(verdict)  [\(window.ownerName ?? "?")] \(window.title)")
             }
 
             if lastVerdict != isMeeting {
@@ -62,31 +62,6 @@ struct TitlesProbe {
             }
 
             try await Task.sleep(for: interval)
-        }
-    }
-
-    private struct WindowInfo {
-        let title: String
-        let owner: String
-        let bundleIdentifier: String?
-    }
-
-    private func currentWindows() -> [WindowInfo] {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return []
-        }
-
-        return raw.compactMap { entry -> WindowInfo? in
-            guard let title = entry[kCGWindowName as String] as? String, title.isEmpty == false else {
-                return nil
-            }
-            let owner = entry[kCGWindowOwnerName as String] as? String ?? "?"
-            let pid = entry[kCGWindowOwnerPID as String] as? pid_t
-            let bundleIdentifier = pid.flatMap { pid in
-                NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
-            }
-            return WindowInfo(title: title, owner: owner, bundleIdentifier: bundleIdentifier)
         }
     }
 

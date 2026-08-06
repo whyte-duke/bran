@@ -1,6 +1,5 @@
-import AppKit
 import BranCore
-import CoreGraphics
+import BranWindows
 
 /// Énumère les fenêtres à l'écran et filtre celles qui ressemblent à une
 /// réunion Meet. **Rapporte, ne décide jamais.**
@@ -20,30 +19,20 @@ struct WindowTitleDetector: Sendable {
     ]
 
     func currentSignals() -> [MeetWindowSignal] {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let entries = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return []
-        }
-
-        return entries.compactMap { entry -> MeetWindowSignal? in
-            guard let title = entry[kCGWindowName as String] as? String, title.isEmpty == false else {
-                return nil
-            }
-            guard isBrowser(entry) else { return nil }
-
-            let owner = entry[kCGWindowOwnerName as String] as? String
-            return MeetTitleMatcher.signal(from: title, owningApplication: owner)
+        WindowList.onScreen().compactMap { window -> MeetWindowSignal? in
+            guard isBrowser(window) else { return nil }
+            return MeetTitleMatcher.signal(
+                from: window.title,
+                owningApplication: window.ownerName
+            )
         }
     }
 
     /// Restreindre aux navigateurs élimine d'un coup toute une classe de faux
     /// positifs — un canal Slack nommé « meeting », un document ouvert dont le
     /// titre contient le code d'une réunion.
-    private func isBrowser(_ entry: [String: Any]) -> Bool {
-        guard let pid = entry[kCGWindowOwnerPID as String] as? pid_t,
-              let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
-        else { return false }
-
+    private func isBrowser(_ window: ListedWindow) -> Bool {
+        guard let bundleID = window.bundleIdentifier else { return false }
         return Self.browsers.contains(bundleID)
     }
 }

@@ -26,6 +26,19 @@ let package = Package(
         // rectangles nus, sans image et sans autorisation.
         .target(name: "BranVision"),
 
+        // **L'exception assumée, et la seule.** AppKit et CoreGraphics sont
+        // autorisés ici : cette cible n'est pas de la logique pure et ne
+        // prétend pas l'être — elle énumère les fenêtres du système et réduit
+        // une image en niveaux de gris. Il n'y a rien à y tester, puisque tout
+        // son résultat dépend d'une autorisation et d'un serveur de fenêtres.
+        //
+        // Elle existe parce que `BranApp` et `BranSpike` sont deux exécutables
+        // distincts : le même appel à `CGWindowListCopyWindowInfo` y existait
+        // en cinq exemplaires, et un `internal` ne pouvait pas les réunir. Ce
+        // qu'elle offre n'est pas de la testabilité, c'est un seul endroit à
+        // corriger le jour où Apple change ces API.
+        .target(name: "BranWindows"),
+
         // L'application. Assemblée en .app signé par Scripts/build-app.sh :
         // SwiftPM produit le binaire, le script produit le bundle. Ça évite un
         // .xcodeproj tout en gardant les #Preview (ouvrir Package.swift dans
@@ -36,6 +49,7 @@ let package = Package(
                 "BranCore",
                 "BranSpeech",
                 "BranVision",
+                "BranWindows",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ]
         ),
@@ -49,6 +63,7 @@ let package = Package(
                 "BranCore",
                 "BranSpeech",
                 "BranVision",
+                "BranWindows",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ]
         ),
