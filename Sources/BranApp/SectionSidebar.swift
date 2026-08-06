@@ -68,9 +68,17 @@ struct SectionSidebar: View {
     /// qu'il s'est passé quelque chose pendant qu'on regardait ailleurs.
     private func badge(for item: LibraryPane) -> String? {
         let count = switch item {
+        // Aucun compteur : le journal de bord n'a pas de « nouveautés à voir »,
+        // il a un contenu qui change tout le temps. Un chiffre qui bouge sans
+        // arrêt est du bruit, pas une information.
+        case .week: 0
         case .meetings: model.store.recordings.count
         case .dictation: model.dictation.store.entries.count
         case .snapshots: model.snapshot.store.entries.count
+        // Pas le nombre de voies suivies mais celui des voies qui **attendent** :
+        // un compteur qui affiche « 7 » en permanence ne dit plus rien, alors
+        // qu'un « 2 » qui apparaît est exactement l'information de la section.
+        case .watch: model.watch.verdict.lanes.filter(\.state.deservesAttention).count
         }
         return count > 0 ? "\(count)" : nil
     }
@@ -204,25 +212,36 @@ private struct CompactStatusRow: View {
 
 /// Les sections de la fenêtre. D'autres viendront s'ajouter ici.
 enum LibraryPane: String, CaseIterable, Identifiable {
+    /// **En premier, et c'est la vue par défaut.** Les quatre autres sections
+    /// répondent chacune à « qu'est-ce que j'ai dans cette boîte ». Celle-ci
+    /// répond à « qu'est-ce que j'ai fait », qui est la question qu'on se pose
+    /// en ouvrant la fenêtre — et à laquelle il fallait jusqu'ici répondre en
+    /// visitant les quatre autres.
+    case week
     case meetings
     case dictation
     case snapshots
+    case watch
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .week: "Semaine"
         case .meetings: "Réunions"
         case .dictation: "Dictées"
         case .snapshots: "Captures"
+        case .watch: "Veille"
         }
     }
 
     var symbol: String {
         switch self {
+        case .week: "chart.bar.xaxis"
         case .meetings: "film.stack"
         case .dictation: "waveform"
         case .snapshots: "text.viewfinder"
+        case .watch: "binoculars"
         }
     }
 
@@ -230,9 +249,11 @@ enum LibraryPane: String, CaseIterable, Identifiable {
 
     var subtitle: String {
         switch self {
+        case .week: "Ce que vous avez fait ces sept derniers jours, les quatre sources réunies."
         case .meetings: "Vos enregistrements de réunions, stockés sur ce Mac."
         case .dictation: "Vos transcriptions, calculées et gardées sur ce Mac."
         case .snapshots: "Le texte lu à l'écran, sans rien envoyer nulle part."
+        case .watch: "Laquelle de vos sessions parallèles vous attend, et depuis quand."
         }
     }
 }

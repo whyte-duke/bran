@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// L'accueil.
@@ -31,18 +32,22 @@ import SwiftUI
 /// cherchée en une fonction déjà disponible.
 struct PermissionsView: View {
     @Bindable var model: AppModel
+    @Environment(\.dismiss) private var dismiss
 
     private var permissions: PermissionsService { model.permissions }
 
-    /// Relu à chaque apparition : l'Accessibilité se donne dans les Réglages
-    /// système, sans que l'application en soit informée.
+    /// Relu à chaque apparition **et à chaque retour dans l'application** :
+    /// l'Accessibilité se donne dans les Réglages système, sans que
+    /// l'application en soit informée. Sans la seconde relecture, l'utilisateur
+    /// cochait la case, revenait, et l'écran continuait à lui demander de la
+    /// cocher.
     @State private var isAccessibilityTrusted = HotkeyMonitor.isTrusted
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: Space.gutter) {
             header
 
-            VStack(spacing: 10) {
+            VStack(spacing: Space.small) {
                 meetings
                 dictation
                 textCapture
@@ -53,24 +58,50 @@ struct PermissionsView: View {
                     "L'autorisation d'enregistrement d'écran n'est prise en compte qu'au prochain démarrage. Quittez et relancez bran après l'avoir accordée.",
                     systemImage: "arrow.clockwise"
                 )
-                .font(.callout)
+                .font(Type.cardBody)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer(minLength: 0)
 
+            footer
+        }
+        .padding(Space.gutter)
+        .frame(minWidth: 470)
+        .onAppear(perform: refresh)
+        // Les autorisations se donnent ailleurs. Le seul instant où l'on peut
+        // être sûr d'une réponse fraîche, c'est le retour dans l'application.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refresh()
+        }
+    }
+
+    /// La sortie.
+    ///
+    /// Une fois tout en place, l'écran ne le disait pas et ne se refermait pas :
+    /// il restait ouvert à répéter que tout allait bien, sans porte.
+    @ViewBuilder
+    private var footer: some View {
+        if model.isFullyReady {
+            HStack {
+                Label("Tout est prêt", systemImage: "checkmark.circle.fill")
+                    .font(Type.cardTitle)
+                    .foregroundStyle(Palette.done)
+                Spacer()
+                Button("Commencer") { dismiss() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+            }
+        } else {
             HStack {
                 Text("Rien ne quitte cette machine. Aucun compte, aucun envoi.")
-                    .font(.callout)
+                    .font(Type.cardBody)
                     .foregroundStyle(.tertiary)
                 Spacer()
                 Button("Revérifier") { refresh() }
             }
         }
-        .padding(26)
-        .frame(minWidth: 470)
-        .onAppear(perform: refresh)
     }
 
     private func refresh() {
@@ -82,10 +113,10 @@ struct PermissionsView: View {
     // MARK: - Haut
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 9) {
+        VStack(alignment: .leading, spacing: Space.small) {
+            HStack(spacing: Space.small) {
                 Image(systemName: "bird.fill")
-                    .font(.system(size: 19, weight: .semibold))
+                    .font(.title2.weight(.semibold))
                     .foregroundStyle(.tint)
                 Text("bran")
                     .font(.title.weight(.semibold))
@@ -100,6 +131,7 @@ struct PermissionsView: View {
 
     private var meetings: some View {
         CapabilityCard(
+            index: 0,
             symbol: "record.circle",
             title: "Enregistrer vos réunions",
             gesture: "bran repère une fenêtre Meet et propose — il ne démarre jamais tout seul.",
@@ -127,6 +159,7 @@ struct PermissionsView: View {
     /// dans un écran qu'il ne sait pas devoir ouvrir.
     private var dictation: some View {
         CapabilityCard(
+            index: 1,
             symbol: "waveform",
             title: "Dicter dans n'importe quelle application",
             gesture: "⌘ droite → vous parlez → le texte est collé là où était le curseur.",
@@ -180,6 +213,7 @@ struct PermissionsView: View {
 
     private var textCapture: some View {
         CapabilityCard(
+            index: 2,
             symbol: "text.viewfinder",
             title: "Récupérer le texte affiché à l'écran",
             gesture: "⌘⇧2 → vous tracez un rectangle → le texte part dans le presse-papiers.",
@@ -197,70 +231,6 @@ struct PermissionsView: View {
             return .todo("Écran et micro requis")
         }
         return .ready(permissions.calendar == .granted ? "Écran · Micro · Calendrier" : "Écran · Micro")
-    }
-}
-
-/// Une capacité : ce qu'on fait, par quel geste, et si c'est prêt.
-private enum CapabilityState {
-    case ready(String)
-    case todo(String)
-
-    var isReady: Bool { if case .ready = self { true } else { false } }
-    var label: String {
-        switch self {
-        case .ready(let text), .todo(let text): text
-        }
-    }
-}
-
-private struct CapabilityCard<Actions: View>: View {
-
-    let symbol: String
-    let title: String
-    /// Le geste, écrit comme une phrase. C'est la ligne qui fait comprendre la
-    /// fonction sans avoir à la lire deux fois.
-    let gesture: String
-    let state: CapabilityState
-    @ViewBuilder var actions: () -> Actions
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 13) {
-            Image(systemName: symbol)
-                .font(.system(size: 17))
-                .foregroundStyle(state.isReady ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                .frame(width: 22)
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.headline)
-
-                Text(gesture)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack(spacing: 5) {
-                    Image(systemName: state.isReady ? "checkmark.circle.fill" : "circle.dashed")
-                        .font(.caption)
-                        .foregroundStyle(state.isReady ? .green : .secondary)
-                    Text(state.label)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.top, 1)
-            }
-
-            Spacer(minLength: 8)
-
-            VStack(alignment: .trailing, spacing: 5) { actions() }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            state.isReady ? AnyShapeStyle(.quaternary.opacity(0.22)) : AnyShapeStyle(.quaternary.opacity(0.4)),
-            in: .rect(cornerRadius: 11)
-        )
-        .accessibilityElement(children: .contain)
     }
 }
 

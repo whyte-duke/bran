@@ -10,9 +10,9 @@ struct RecordingRow: View {
     var upload: UploadState?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: Space.tight) {
             Text(recording.displayTitle)
-                .font(.body.weight(.medium))
+                .font(Type.cardTitle)
                 .lineLimit(1)
 
             if let progress {
@@ -22,7 +22,7 @@ struct RecordingRow: View {
                     Text(progress, format: .percent.precision(.fractionLength(0)))
                 }
                 .progressViewStyle(.linear)
-                .font(.caption)
+                .font(Type.meta)
                 .tint(.accentColor)
             } else if let upload, upload.isFinished == false {
                 uploadRow(upload)
@@ -42,19 +42,19 @@ struct RecordingRow: View {
                 Text(upload.description)
             }
             .progressViewStyle(.linear)
-            .font(.caption)
+            .font(Type.meta)
         } else {
-            HStack(spacing: 5) {
+            HStack(spacing: Space.tight) {
                 ProgressView().controlSize(.small)
                 Text(upload.description)
             }
-            .font(.caption)
+            .font(Type.meta)
             .foregroundStyle(.secondary)
         }
     }
 
     private var facts: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.small) {
             Text(recording.metadata.startedAt, format: .dateTime.hour().minute())
             Text("·")
             Text(recording.durationDescription)
@@ -64,7 +64,7 @@ struct RecordingRow: View {
             if let saving = recording.savingDescription {
                 Text("·")
                 Text(saving)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Palette.done)
                     .help("Poids avant compression : \(recording.originalSizeDescription ?? "—")")
             }
 
@@ -81,12 +81,12 @@ struct RecordingRow: View {
                 // même si bran meurt — mais le signaler évite de croire à tort
                 // que tout s'est bien passé.
                 Label("interrompue", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Palette.attention)
                     .labelStyle(.iconOnly)
                     .help("Session jamais close proprement.")
             }
         }
-        .font(.caption)
+        .font(Type.meta)
         .foregroundStyle(.secondary)
     }
 

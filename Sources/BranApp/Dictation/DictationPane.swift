@@ -12,6 +12,11 @@ struct DictationPane: View {
 
     private var controller: DictationController { model.dictation }
 
+    /// L'état de la saisie sécurisée, **recopié dans un état de vue**.
+    /// Voir `watchesSecureInput(_:)` pour pourquoi il ne peut pas être lu
+    /// directement dans le `body`.
+    @State private var isSecureInputActive = false
+
     var body: some View {
         VStack(spacing: 0) {
             PaneHeader(
@@ -30,7 +35,7 @@ struct DictationPane: View {
             content
         }
         .task { await controller.store.reload() }
-        .animation(.snappy(duration: 0.25), value: controller.pasteFallbackNotice)
+        .watchesSecureInput($isSecureInputActive)
     }
 
     /// Les deux avertissements qu'on ne peut pas se permettre de perdre.
@@ -50,12 +55,19 @@ struct DictationPane: View {
                 )
             }
 
-            if controller.settings.isEnabled, HotkeyMonitor.isSecureInputActive {
+            if controller.settings.isEnabled, isSecureInputActive {
                 NoticeRow(
                     text: "Saisie sécurisée active : macOS bloque tout raccourci global tant qu'un champ de mot de passe a le focus. Fermez-le, ou décochez « Saisie sécurisée du clavier » dans le menu Terminal.",
                     symbol: "lock.fill",
                     tint: .orange
                 )
+            }
+
+            // Un disque plein ou un dossier illisible se disait déjà côté
+            // captures et **restait muet ici** : la dictée semblait marcher,
+            // puis l'historique était vide au redémarrage sans un mot.
+            if let problem = controller.store.problem {
+                NoticeRow(text: problem, symbol: "externaldrive.badge.xmark", tint: .orange)
             }
 
             if case .failed(let reason) = controller.phase {
@@ -79,6 +91,27 @@ struct DictationPane: View {
                 }
             }
         }
+        // **`.clipped()` avant l'animation.** Un bandeau qui entre par le haut
+        // passe sinon par-dessus l'en-tête pendant toute la transition.
+        .clipped()
+        // Une seule animation qui couvre les **quatre** bandeaux. La précédente
+        // ne surveillait que le collage manqué : les `.transition` déclarées par
+        // `NoticeRow` ne se déclenchaient jamais pour les trois autres, et un
+        // échec de dictée faisait sauter toute la liste d'un cran.
+        .branAnimation(Motion.enter, value: noticeSignature)
+    }
+
+    /// Ce qui doit relancer l'animation des bandeaux.
+    ///
+    /// Une chaîne plutôt que quatre `.animation` : SwiftUI n'anime une insertion
+    /// que si la valeur surveillée change **au même instant** que l'insertion.
+    private var noticeSignature: String {
+        var parts: [String] = []
+        if let notice = controller.pasteFallbackNotice { parts.append(notice) }
+        if controller.settings.isEnabled, isSecureInputActive { parts.append("saisie sécurisée") }
+        if let problem = controller.store.problem { parts.append(problem) }
+        if case .failed(let reason) = controller.phase { parts.append(reason.summary) }
+        return parts.joined(separator: "|")
     }
 
     /// Ce qu'on peut réellement faire pour réparer, selon l'échec.
@@ -217,6 +250,69 @@ struct NoticeRow<Action: View>: View {
     }
 }
 
+// MARK: - Saisie sécurisée
+
+extension View {
+
+    /// Tient `isActive` à jour avec l'état de la saisie sécurisée du système.
+    ///
+    /// **Pourquoi ce détour.** `HotkeyMonitor.isSecureInputActive` appelle
+    /// `IsSecureEventInputEnabled()`, une fonction C : rien ne la publie, donc
+    /// une vue qui la lit dans son `body` garde éternellement la valeur du
+    /// premier rendu. Le bandeau qui en dépend apparaissait ou disparaissait au
+    /// hasard des redessins provoqués par autre chose — un affichage dont la
+    /// valeur pouvait être fausse, ce qui est pire que pas d'affichage du tout.
+    func watchesSecureInput(_ isActive: Binding<Bool>) -> some View {
+        modifier(SecureInputWatch(isActive: isActive))
+    }
+}
+
+private struct SecureInputWatch: ViewModifier {
+    @Binding var isActive: Bool
+
+    func body(content: Content) -> some View {
+        content.task {
+            // Le sondage meurt avec la vue : `.task` s'annule à la disparition.
+            // Deux secondes suffisent — un champ de mot de passe n'apparaît pas
+            // à l'insu de l'utilisateur, il faut juste que le bandeau le suive.
+            while Task.isCancelled == false {
+                let now = HotkeyMonitor.isSecureInputActive
+                if now != isActive { isActive = now }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+}
+
+// MARK: - Dépliage
+
+/// Le chevron qui plie et déplie une carte.
+///
+/// **Il remplace un `onTapGesture` posé sur la carte entière.** Le texte des
+/// cartes est sélectionnable : cliquer pour y poser un curseur repliait la
+/// carte, donc sélectionner une portion de transcription était impossible. Et
+/// un geste n'a aucun équivalent clavier. Un bouton, si.
+struct DisclosureChevron: View {
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        Button {
+            isExpanded.toggle()
+        } label: {
+            Image(systemName: "chevron.down")
+                .font(Type.metaFaint.weight(.semibold))
+                .rotationEffect(.degrees(isExpanded ? 0 : -90))
+                .frame(width: 14, height: 14)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.tertiary)
+        .branAnimation(Motion.state, value: isExpanded)
+        .help(isExpanded ? "Replier" : "Déplier")
+        .accessibilityLabel(isExpanded ? "Replier" : "Déplier")
+    }
+}
+
 /// Une transcription, avec tout ce qu'on peut en faire.
 private struct DictationCard: View {
     let entry: TranscriptEntry
@@ -225,6 +321,13 @@ private struct DictationCard: View {
     @State private var isHovering = false
     @State private var isExpanded = false
     @State private var justCopied = false
+    /// Un jeton qui change à **chaque** copie.
+    ///
+    /// Un simple booléen ne suffit pas : deux copies rapprochées partageaient le
+    /// même minuteur, et celui de la première éteignait la coche de la seconde
+    /// au bout du temps qu'il lui restait. Le jeton relance `.task(id:)`, qui
+    /// annule le minuteur précédent.
+    @State private var copyTicket = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -249,19 +352,33 @@ private struct DictationCard: View {
             }
 
             HStack(spacing: 7) {
+                DisclosureChevron(isExpanded: $isExpanded)
                 metadata
                 Spacer(minLength: 8)
                 actions
             }
         }
         .cardBackground(isHovering: isHovering)
+        // Sans ça, le texte déborde du cadre pendant que la carte se
+        // redimensionne au dépliage.
+        .geometryGroup()
         .onHover { isHovering = $0 }
-        .onTapGesture {
-            withAnimation(.snappy(duration: 0.28)) { isExpanded.toggle() }
-        }
+        .branAnimation(Motion.state, value: isExpanded)
         .animation(.smooth(duration: 0.3), value: isRetrying)
         .animation(.smooth(duration: 0.3), value: entry.text)
+        .contextMenu { menu }
         .accessibilityElement(children: .contain)
+        // Le dépliage sans souris ni Tab : VoiceOver l'annonce comme une action
+        // de la carte elle-même.
+        .accessibilityAction(named: isExpanded ? "Replier" : "Déplier") {
+            isExpanded.toggle()
+        }
+        .task(id: copyTicket) {
+            guard copyTicket > 0 else { return }
+            try? await Task.sleep(for: .seconds(1.4))
+            guard Task.isCancelled == false else { return }
+            justCopied = false
+        }
     }
 
     // MARK: -
@@ -352,32 +469,29 @@ private struct DictationCard: View {
         .lineLimit(1)
     }
 
-    /// Les actions n'apparaissent qu'au survol.
+    /// Les actions s'estompent hors survol — mais restent dans l'arbre.
     ///
     /// Une liste de cinquante cartes portant chacune quatre boutons devient un
     /// mur d'icônes où plus rien ne ressort. Au survol, seule la carte visée les
     /// montre — et le premier bouton, « copier », reste toujours visible parce
     /// que c'est celui qu'on cherche neuf fois sur dix.
+    ///
+    /// **Ce qui a changé : `.opacity(0)` et non plus un `if`.** Insérées sous
+    /// condition, ces actions n'existaient tout simplement pas pour le clavier
+    /// ni pour VoiceOver. Relancer une transcription — la raison d'être de la
+    /// carte — était impossible sans souris. Le menu contextuel les redonne une
+    /// seconde fois, avec des libellés en toutes lettres.
     private var actions: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: Space.hair) {
             CardAction(
                 symbol: justCopied ? "checkmark" : "doc.on.doc",
                 help: "Copier le texte",
-                tint: justCopied ? .green : nil
-            ) {
-                controller.copy(entry)
-                justCopied = true
-                Task {
-                    try? await Task.sleep(for: .seconds(1.4))
-                    justCopied = false
-                }
-            }
+                tint: justCopied ? .green : nil,
+                action: copy
+            )
             .disabled(entry.text.isEmpty)
 
-            // La flèche reste visible pendant la relance, même si le curseur
-            // est parti ailleurs : c'est le seul repère qui dit quelle carte
-            // travaille quand on en a relancé plusieurs.
-            if isHovering || isRetrying {
+            Group {
                 CardAction(
                     symbol: "arrow.clockwise",
                     help: retryHelp,
@@ -388,23 +502,58 @@ private struct DictationCard: View {
                 }
                 .disabled(entry.canRetry == false || isRetrying)
 
-                CardAction(symbol: "folder", help: "Afficher l'audio dans le Finder") {
-                    guard let url = controller.store.audioURL(for: entry) else { return }
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                }
-                .disabled(entry.canRetry == false)
+                CardAction(symbol: "folder", help: "Afficher l'audio dans le Finder", action: reveal)
+                    .disabled(entry.canRetry == false)
 
                 CardAction(symbol: "character.book.closed", help: "Réappliquer le dictionnaire de corrections") {
                     controller.reapplyVocabulary(to: entry)
                 }
 
-                CardAction(symbol: "trash", help: "Supprimer", tint: .red) {
-                    Task { await controller.store.delete(entry) }
-                }
+                CardAction(symbol: "trash", help: "Supprimer", tint: .red, action: delete)
             }
+            // La flèche reste visible pendant la relance, même si le curseur est
+            // parti ailleurs : c'est le seul repère qui dit quelle carte
+            // travaille quand on en a relancé plusieurs.
+            .opacity(isHovering || isRetrying ? 1 : 0)
         }
-        .transition(.opacity)
-        .animation(.easeOut(duration: 0.14), value: isHovering)
+        .branAnimation(Motion.hover, value: isHovering || isRetrying)
+    }
+
+    /// Les mêmes actions, nommées, au clic droit.
+    ///
+    /// Il n'y avait aucun menu contextuel dans l'application. C'est pourtant le
+    /// seul endroit où une action de carte porte un nom plutôt qu'un
+    /// pictogramme, et le seul qui reste atteignable quand on ne survole pas.
+    @ViewBuilder
+    private var menu: some View {
+        Button("Copier le texte", action: copy)
+            .disabled(entry.text.isEmpty)
+        Button(isExpanded ? "Replier" : "Déplier") { isExpanded.toggle() }
+        Divider()
+        Button("Relancer la transcription") { controller.retry(entry) }
+            .disabled(entry.canRetry == false || isRetrying)
+        Button("Réappliquer le dictionnaire de corrections") {
+            controller.reapplyVocabulary(to: entry)
+        }
+        Button("Afficher l'audio dans le Finder", action: reveal)
+            .disabled(entry.canRetry == false)
+        Divider()
+        Button("Supprimer", role: .destructive, action: delete)
+    }
+
+    private func copy() {
+        controller.copy(entry)
+        justCopied = true
+        copyTicket += 1
+    }
+
+    private func reveal() {
+        guard let url = controller.store.audioURL(for: entry) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func delete() {
+        Task { await controller.store.delete(entry) }
     }
 
     private var retryHelp: String {

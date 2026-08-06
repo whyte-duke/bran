@@ -60,6 +60,12 @@ final class MicCapture: @unchecked Sendable {
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
 
+        FeatureLog.record(String(
+            format: "micro : format d'entrée %.0f Hz, %d canal/aux, périphérique imposé=%@",
+            inputFormat.sampleRate, inputFormat.channelCount,
+            deviceID == nil ? "non (système)" : "oui"
+        ))
+
         guard inputFormat.sampleRate > 0 else {
             // Arrive quand le périphérique choisi vient d'être débranché.
             throw CaptureFailure.noInput
@@ -87,6 +93,29 @@ final class MicCapture: @unchecked Sendable {
         engine.prepare()
         try engine.start()
         isRunning = true
+        FeatureLog.record("micro : moteur démarré, engine.isRunning=\(engine.isRunning)")
+    }
+
+    /// Reprend sur le périphérique système après un premier essai muet.
+    ///
+    /// **Pourquoi ce repli existe.** Imposer un périphérique précis à
+    /// `AVAudioEngine` via `kAudioOutputUnitProperty_CurrentDevice` réussit sans
+    /// erreur, démarre le moteur sans erreur, et peut malgré tout ne jamais
+    /// appeler le tap : zéro échantillon, aucun signal. Constaté sur ce Mac avec
+    /// le micro intégré explicitement choisi, alors que le même moteur laissé sur
+    /// le périphérique système fonctionne.
+    ///
+    /// Plutôt que de deviner quel réglage CoreAudio en est responsable, on
+    /// constate le silence et on repart sur le défaut système — qui est le
+    /// chemin le mieux testé de macOS.
+    func restartOnSystemDefault() throws {
+        guard isRunning else { return }
+        FeatureLog.record("micro : aucun son sur le périphérique imposé → reprise sur le système")
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        isRunning = false
+        converter = nil
+        try start(deviceID: nil)
     }
 
     /// Arrête le moteur et rend les échantillons capturés.

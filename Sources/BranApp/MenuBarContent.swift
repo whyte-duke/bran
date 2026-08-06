@@ -6,7 +6,10 @@ struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        if let next = model.directory.next, model.hasOpenSession == false {
+        // Affiché **aussi** pendant un enregistrement, c'est-à-dire pendant la
+        // réunion : le lien de la visio disparaissait exactement au moment où
+        // on en a besoin — pour rejoindre à nouveau après une déconnexion.
+        if let next = model.directory.next {
             Text("Prochain RDV — \(next.displayName)")
             if let link = next.meeting_url, let url = URL(string: link) {
                 Link("Rejoindre la visio", destination: url)

@@ -27,11 +27,17 @@ struct LibraryView: View {
 
     @Environment(\.openWindow) private var openWindow
 
-    @State private var pane: LibraryPane = .meetings
+    /// **Le journal de bord, et pas les réunions.** Ouvrir sur une liste de
+    /// fichiers oblige à visiter les quatre sections pour reconstituer sa
+    /// semaine ; ouvrir sur le journal donne la réponse avant le premier clic,
+    /// et les listes restent à une touche de distance.
+    @State private var pane: LibraryPane = .week
     @State private var meetingsPath: [UUID] = []
+    @State private var weekQuery = ""
     @State private var meetingsQuery = ""
     @State private var dictationQuery = ""
     @State private var snapshotQuery = ""
+    @State private var watchQuery = ""
 
     /// `pendingUpload` du modèle, présenté comme un `Identifiable` pour `.sheet`.
     private var uploadTarget: Binding<UploadTarget?> {
@@ -71,7 +77,7 @@ struct LibraryView: View {
             // dictée pouvait rester non téléchargé indéfiniment sans que rien
             // ne le signale.
             model.permissions.refresh()
-            SnapshotLog.record("accueil — prêt=\(model.isFullyReady) \(model.readinessDescription)")
+            FeatureLog.record("accueil — prêt=\(model.isFullyReady) \(model.readinessDescription)")
             if model.isFullyReady == false {
                 WindowPresenter.bringToFront("permissions", using: openWindow)
             }
@@ -101,6 +107,10 @@ struct LibraryView: View {
     @ViewBuilder
     private var detail: some View {
         switch pane {
+        case .week:
+            WeekPane(model: model, query: $weekQuery)
+                .transition(.opacity)
+
         case .meetings:
             NavigationStack(path: $meetingsPath) {
                 MeetingsPane(model: model, query: $meetingsQuery)
@@ -127,6 +137,10 @@ struct LibraryView: View {
 
         case .snapshots:
             SnapshotPane(model: model, query: $snapshotQuery)
+                .transition(.opacity)
+
+        case .watch:
+            WatchPane(model: model, query: $watchQuery)
                 .transition(.opacity)
         }
     }

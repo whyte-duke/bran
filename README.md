@@ -259,8 +259,8 @@ bran detects this and names the likely culprit instead of looking broken.
 
 ```
 ┌─────────── detectors (report facts, never decide) ────────────┐
-│  WindowTitleDetector          CalendarWatcher                 │
-│  CGWindowListCopyWindowInfo   EventKit                        │
+│  WindowTitleDetector                                          │
+│  CGWindowListCopyWindowInfo                                   │
 └───────────────────┬───────────────────────────────────────────┘
                     ▼
           ┌───────────────────┐
@@ -319,7 +319,7 @@ Findings from building it, each verified on a real machine:
 
 ```bash
 swift build          # builds everything
-swift test           # ~35 tests, runs in about a millisecond
+swift test           # 207 tests, runs in about a millisecond
 open Package.swift   # opens in Xcode, with SwiftUI previews
 ```
 
@@ -329,6 +329,10 @@ a permission or a display server:
 | Target | Contains |
 |---|---|
 | `BranCore` | pure logic — title matching, session resolution, state machine |
+| `BranSpeech` | pure logic for dictation — state machine, retention, corrections |
+| `BranVision` | pure logic for on-screen text — line assembly, substitutions |
+| `BranWatch` | pure logic for the watcher — lane identity, states, resolver, sampling cadence, motion arithmetic |
+| `BranWindows` | the one deliberate exception — window enumeration and grayscale thumbnails, shared by both executables |
 | `BranApp` | the app — capture, storage, SwiftUI |
 | `BranSpike` | command-line tools used to de-risk the capture engine |
 

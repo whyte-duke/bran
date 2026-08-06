@@ -109,9 +109,18 @@ final class SnapshotController {
         publish()
     }
 
+    /// **Ne notifie que les vrais changements.**
+    ///
+    /// `apply()` publie avant *et* après chaque effet : sans cette garde — que
+    /// `DictationController.publish()` a, elle — chaque effet annonçait deux
+    /// fois la même phase. `NotchPresenter` reprogrammait alors deux fois ses
+    /// minuteurs, et le second passage sur `.idle` remplaçait les 0,9 s
+    /// d'« Annulé » par 1,2 s. La durée affichée n'était pas celle écrite ici.
     private func publish() {
-        phase = machine.phase
-        onPhaseChange?(machine.phase)
+        let next = machine.phase
+        guard next != phase else { return }
+        phase = next
+        onPhaseChange?(next)
     }
 
     // MARK: - Les étapes
@@ -122,7 +131,7 @@ final class SnapshotController {
         // fenêtre**. Une image sans texte, donc un « Aucun texte trouvé » qui
         // envoie chercher un problème de reconnaissance là où il n'y a qu'une
         // case à cocher. Un refus doit se dire, pas se déguiser en zone vide.
-        SnapshotLog.record(
+        FeatureLog.record(
             "déclenchement — autorisation déclarée=\(ScreenAccess.isDeclaredGranted) "
             + "titres de fenêtres lisibles=\(ScreenAccess.canSeeOtherWindows)"
         )
@@ -302,9 +311,9 @@ final class SnapshotController {
         case .monospaced: try await engine.recogniseCode(handle)
         case .prose: try await engine.recognise(handle, language: language)
         }
-        SnapshotLog.record("moteur → \(regions.count) régions (\(layout.rawValue))")
+        FeatureLog.record("moteur → \(regions.count) régions (\(layout.rawValue))")
         for region in regions.prefix(3) {
-            SnapshotLog.record(String(
+            FeatureLog.record(String(
                 format: "   x=%.4f y=%.4f l=%.4f h=%.4f conf=%.2f « %@ »",
                 region.x, region.y, region.width, region.height, region.confidence,
                 String(region.text.prefix(40))
@@ -312,7 +321,7 @@ final class SnapshotController {
         }
 
         let raw = TextAssembler.assemble(regions, layout: layout)
-        SnapshotLog.record("assemblage → \(raw.count) caractères")
+        FeatureLog.record("assemblage → \(raw.count) caractères")
         var text = CharacterFixer.fix(raw, layout: layout)
         if settings.trimsTrailingSpace {
             text = text.split(separator: "\n", omittingEmptySubsequences: false)
@@ -320,7 +329,7 @@ final class SnapshotController {
                 .joined(separator: "\n")
         }
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        SnapshotLog.record("nettoyage → \(text.count) caractères")
+        FeatureLog.record("nettoyage → \(text.count) caractères")
 
         let confidences = regions.map(\.confidence)
         return Outcome(
@@ -352,24 +361,24 @@ final class SnapshotController {
             guard let self else { return }
             do {
                 guard let image = try await capturer.captureFixedRegion(rect) else {
-                    SnapshotLog.record("autotest chaîne : aucune image rendue")
+                    FeatureLog.record("autotest chaîne : aucune image rendue")
                     return
                 }
-                SnapshotLog.record("autotest chaîne : image \(image.width)×\(image.height)")
+                FeatureLog.record("autotest chaîne : image \(image.width)×\(image.height)")
                 let outcome = try await read(image: image, layout: .monospaced, language: settings.language)
-                SnapshotLog.record(
+                FeatureLog.record(
                     "autotest chaîne : \(outcome.text.count) caractères « "
                     + String(outcome.text.prefix(60)).replacingOccurrences(of: "\n", with: "⏎") + " »"
                 )
             } catch {
-                SnapshotLog.record("autotest chaîne", error: error)
+                FeatureLog.record("autotest chaîne", error: error)
             }
         }
     }
 
     func selfTest(_ moment: String) {
         guard let image = Self.renderProbe() else {
-            SnapshotLog.record("autotest \(moment) : impossible de fabriquer l'image")
+            FeatureLog.record("autotest \(moment) : impossible de fabriquer l'image")
             return
         }
         Task { [weak self] in
@@ -379,9 +388,9 @@ final class SnapshotController {
                     RecognisableImage(handle: image, pixelWidth: image.width, pixelHeight: image.height)
                 )
                 let text = regions.map(\.text).joined(separator: " ")
-                SnapshotLog.record("autotest \(moment) : \(regions.count) régions « \(text) »")
+                FeatureLog.record("autotest \(moment) : \(regions.count) régions « \(text) »")
             } catch {
-                SnapshotLog.record("autotest \(moment)", error: error)
+                FeatureLog.record("autotest \(moment)", error: error)
             }
         }
     }

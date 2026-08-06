@@ -26,9 +26,28 @@ struct NotchView: View {
 
     static let pillSize = CGSize(width: 320, height: 54)
 
+    /// La largeur de la **fenêtre**, la même pour tous les écrans et tous les
+    /// contenus. Voir `NotchOverlay.geometry(of:)` : c'est ce qui permet de ne
+    /// plus jamais redimensionner le panneau, donc de ne plus jamais remplacer
+    /// sa `rootView`. Large de quoi loger l'encoche la plus large d'un MacBook
+    /// avec ses deux oreilles, et n'importe quel contenu à venir.
+    static let maximumWidth: CGFloat = 460
+
+    /// De la place sous le contenu, pour que l'ombre de la pilule ne soit pas
+    /// coupée par le bord de la fenêtre.
+    static let verticalSlack: CGFloat = 24
+
     @Bindable var content: NotchContent
     let hasNotch: Bool
     let notchWidth: CGFloat
+    let notchHeight: CGFloat
+
+    /// La taille du **contenu**, qui n'est pas celle de la fenêtre.
+    private var contentSize: CGSize {
+        hasNotch
+            ? CGSize(width: notchWidth + 2 * Self.earWidth, height: notchHeight + Self.dropHeight)
+            : Self.pillSize
+    }
 
     /// Pilote toute l'animation d'entrée. Passé à `true` juste après
     /// l'apparition, pour que le premier rendu soit l'état fermé.
@@ -57,6 +76,10 @@ struct NotchView: View {
             .scaleEffect(isOpen ? 1 : 0.92)
             .animation(.smooth(duration: 0.3).delay(isOpen ? 0.09 : 0), value: isOpen)
         }
+        // Le contenu a sa taille propre, calée en haut d'une fenêtre plus
+        // grande et fixe. C'est ce découplage qui permet à la fenêtre de ne
+        // jamais bouger pendant qu'un contenu plus large s'anime dedans.
+        .frame(width: contentSize.width, height: contentSize.height)
         // Sans encoche, la pilule descend de la barre de menus au lieu
         // d'apparaître au milieu de nulle part.
         .offset(y: hasNotch ? 0 : (isOpen ? 0 : -14))
@@ -64,6 +87,7 @@ struct NotchView: View {
         .opacity(hasNotch ? 1 : (isOpen ? 1 : 0))
         .animation(Self.opening, value: isOpen)
         .animation(.smooth(duration: 0.32), value: content.mode)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { isOpen = true }
         .onChange(of: content.isExpanded) { _, expanded in isOpen = expanded }
     }
@@ -87,6 +111,10 @@ struct NotchView: View {
     @ViewBuilder
     private var indicator: some View {
         switch content.mode {
+        case .idle:
+            // Rien : le panneau ne devrait pas être visible dans cet état, et
+            // s'il l'est, mieux vaut un panneau muet qu'une dictée inventée.
+            EmptyView()
         case .listening:
             PulsingDot()
         case .transcribing:
@@ -126,28 +154,13 @@ struct NotchView: View {
     @ViewBuilder
     private var middle: some View {
         if case .listening = content.mode {
-            TimelineView(.animation(minimumInterval: 1.0 / 40)) { timeline in
-                Canvas { context, size in
-                    WaveformDrawing.draw(
-                        content.levels,
-                        phase: timeline.date.timeIntervalSinceReferenceDate,
-                        in: context,
-                        size: size
-                    )
-                }
-            }
-            .frame(width: hasNotch ? 92 : 130, height: 22)
+            // `content.levels` est lu **ici**, dans le corps de la vue, et passé
+            // comme simple tableau. Voir `AnimatedStripe` pour pourquoi.
+            AnimatedStripe(levels: content.levels, kind: .waveform)
+                .frame(width: hasNotch ? 92 : 130, height: 22)
         } else if case .reading = content.mode {
-            TimelineView(.animation(minimumInterval: 1.0 / 40)) { timeline in
-                Canvas { context, size in
-                    ScanDrawing.draw(
-                        phase: timeline.date.timeIntervalSinceReferenceDate,
-                        in: context,
-                        size: size
-                    )
-                }
-            }
-            .frame(width: hasNotch ? 92 : 130, height: 22)
+            AnimatedStripe(levels: [], kind: .scan)
+                .frame(width: hasNotch ? 92 : 130, height: 22)
         } else if case .preparing(let fraction) = content.mode {
             LoadingBar(fraction: fraction)
                 .frame(width: hasNotch ? 92 : 130, height: 22)
@@ -182,6 +195,7 @@ struct NotchView: View {
 
     private var label: String {
         switch content.mode {
+        case .idle: ""
         case .listening: ""
         case .transcribing: "Transcription…"
         case .done(let text): text
@@ -312,6 +326,86 @@ enum WaveformDrawing {
             let breathing = Float(0.055 + 0.035 * sin(phase * 2.1 + Double(index) * 0.42))
             return max(value, breathing) * taper
         }
+    }
+}
+
+/// La bande animée de l'encoche : la vague de la dictée, ou le balayage de
+/// lecture.
+///
+/// **Pourquoi l'horloge est ici et pas dans un `TimelineView`.** C'est la
+/// correction d'un plantage systématique, pas une préférence de style. La
+/// version précédente dessinait dans un `TimelineView(.animation)`, ce qui est
+/// pourtant la façon recommandée. Elle tombait à chaque appui sur le raccourci
+/// de dictée :
+///
+/// ```
+///   libswiftCore          swift_getObjectType          ← EXC_BAD_ACCESS
+///   libswift_Concurrency  swift_task_isMainExecutorImpl
+///   libswift_Concurrency  swift_task_isCurrentExecutorWithFlags
+///   bran                  closure #1 in AnimatedStripe.body.getter
+///   SwiftUI               TimelineView.init(_:content:)
+/// ```
+///
+/// La closure de contenu d'un `TimelineView` est déclarée `@MainActor
+/// @preconcurrency` : le compilateur pose une **vérification d'isolation à
+/// l'exécution** à son entrée, exécutée à chaque image. Quand l'encoche était
+/// posée depuis le callback du `CGEventTap` — donc hors de toute tâche — cette
+/// vérification prenait le chemin lent du runtime et déréférençait un exécuteur
+/// invalide.
+///
+/// **La vraie correction est dans `HotkeyMonitor.receive`**, qui ne pose plus
+/// l'encoche depuis le callback. Ce qui est fait ici est une ceinture, pas la
+/// bretelle : la closure de `Canvas` porte exactement la même vérification —
+/// vérifié dans le binaire — et n'a donc pas disparu. Ce qui disparaît, c'est
+/// le chemin précis où le processus est tombé quatre fois de suite,
+/// `Attribute.syncMainIfReferences` → `TimelineView`, distinct de celui du
+/// rendu.
+///
+/// Ce qu'on y perd : `TimelineView` se cale sur le rafraîchissement de l'écran,
+/// pas nous. À 40 Hz sur une bande de 92 points, la différence ne se voit pas.
+private struct AnimatedStripe: View {
+    enum Kind { case waveform, scan }
+
+    let levels: [Float]
+    let kind: Kind
+
+    /// L'âge de l'animation, en secondes. Les deux tracés s'en servent comme
+    /// d'une phase : la vague pour respirer au silence, le balayage pour savoir
+    /// où en est son cycle.
+    @State private var phase: TimeInterval = 0
+
+    private static let interval: Duration = .milliseconds(25)
+
+    var body: some View {
+        Canvas { context, size in
+            switch kind {
+            case .waveform:
+                WaveformDrawing.draw(levels, phase: phase, in: context, size: size)
+            case .scan:
+                ScanDrawing.draw(phase: phase, in: context, size: size)
+            }
+        }
+        // `.task` s'annule tout seul quand la vue disparaît : l'horloge ne
+        // survit pas à l'encoche qu'elle anime.
+        .task {
+            let started = ContinuousClock.now
+            while Task.isCancelled == false {
+                try? await Task.sleep(for: Self.interval)
+                guard Task.isCancelled == false else { return }
+                // Mesuré, pas accumulé : `Task.sleep` garantit un minimum, pas
+                // une période. Additionner 25 ms à chaque tour ferait dériver
+                // le balayage dès que la machine est chargée.
+                phase = (ContinuousClock.now - started).seconds
+            }
+        }
+    }
+}
+
+private extension Duration {
+    /// La durée en secondes flottantes. `components` donne des entiers et des
+    /// attosecondes ; on veut juste un nombre à mettre dans un sinus.
+    var seconds: Double {
+        Double(components.seconds) + Double(components.attoseconds) * 1e-18
     }
 }
 

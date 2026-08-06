@@ -35,37 +35,51 @@ struct MeetingsPane: View {
             // ce que la colonne indique déjà.
             if model.pendingMeeting != nil || model.lastFailure != nil {
                 StatusBanner(model: model)
-                    .padding(.horizontal, 26)
-                    .padding(.vertical, 12)
-                    .background(.quaternary.opacity(0.25))
+                    .padding(.horizontal, Space.gutter)
+                    .padding(.vertical, Space.inset)
+                    .background(Palette.well)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             content
         }
-        .animation(.snappy(duration: 0.25), value: model.pendingMeeting?.id)
+        .branAnimation(Motion.enter, value: model.pendingMeeting?.id)
     }
 
+    /// La liste, et les trois façons dont elle peut ne pas en être une.
+    ///
+    /// L'ordre compte : le balayage du dossier passe **avant** l'état vide.
+    /// Pendant `reload()`, `recordings` est vide sans que la bibliothèque le
+    /// soit, et l'écran « Aucun enregistrement » clignotait donc à chaque
+    /// lancement sur une bibliothèque pleine.
     @ViewBuilder
     private var content: some View {
-        if model.store.recordings.isEmpty {
-            ContentUnavailableView(
-                "Aucun enregistrement",
-                systemImage: "film.stack",
-                description: Text("Rejoignez une réunion Meet : bran vous proposera de l'enregistrer, sans jamais démarrer tout seul.")
-            )
-        } else if visible.isEmpty {
-            ContentUnavailableView.search(text: query)
-        } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    if model.uploads.configuration.isConfigured, model.directory.upcoming.isEmpty == false {
-                        UpcomingMeetingsPanel(directory: model.directory)
-                            .padding(14)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.quaternary.opacity(0.32), in: .rect(cornerRadius: 10))
-                    }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: Space.stack) {
+                // Hors des branches : les prochains rendez-vous disparaissaient
+                // quand la recherche ne renvoyait rien et au premier lancement —
+                // c'est-à-dire exactement quand ils servent le plus. Leur code
+                // d'erreur CRM était inatteignable pour la même raison.
+                if model.uploads.configuration.isConfigured {
+                    UpcomingMeetingsPanel(directory: model.directory)
+                }
 
+                if isLoadingLibrary {
+                    skeleton
+                } else if model.store.recordings.isEmpty {
+                    ContentUnavailableView(
+                        "Aucun enregistrement",
+                        systemImage: "film.stack",
+                        description: Text("Rejoignez une réunion Meet : bran vous proposera de l'enregistrer, sans jamais démarrer tout seul.")
+                    )
+                    // Le vide est désormais dans le défilement, avec le panneau
+                    // des prochains RDV au-dessus : sans hauteur imposée il se
+                    // tasserait contre lui.
+                    .frame(maxWidth: .infinity, minHeight: 320)
+                } else if visible.isEmpty {
+                    ContentUnavailableView.search(text: query)
+                        .frame(maxWidth: .infinity, minHeight: 320)
+                } else {
                     ForEach(grouped, id: \.day) { group in
                         Section {
                             ForEach(group.recordings) { recording in
@@ -74,17 +88,36 @@ struct MeetingsPane: View {
                             }
                         } header: {
                             Text(group.title)
-                                .font(.subheadline.weight(.medium))
+                                .font(Type.groupHead)
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.top, 4)
+                                .padding(.top, Space.tight)
                         }
                     }
                 }
-                .padding(.horizontal, 26)
-                .padding(.vertical, 18)
+            }
+            .padding(.horizontal, Space.gutter)
+            .padding(.vertical, Space.stack)
+        }
+    }
+
+    /// Le dossier est en cours de lecture et n'a encore rien rendu.
+    private var isLoadingLibrary: Bool {
+        model.store.isScanning && model.store.recordings.isEmpty
+    }
+
+    /// Trois cartes en attente. Elles disent « ça arrive » à l'endroit exact où
+    /// le contenu apparaîtra, là où un état vide disait le contraire.
+    private var skeleton: some View {
+        VStack(alignment: .leading, spacing: Space.stack) {
+            ForEach(0..<3, id: \.self) { _ in
+                RecordingRow(recording: .preview)
+                    .branCard(isHovering: false)
             }
         }
+        .redacted(reason: .placeholder)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Lecture du dossier des enregistrements…")
     }
 
     // MARK: - Filtrage
@@ -135,45 +168,79 @@ private struct RecordingCard: View {
     @Bindable var model: AppModel
 
     @State private var isHovering = false
+    @State private var isConfirmingDeletion = false
 
     var body: some View {
         NavigationLink(value: recording.id) {
-            HStack(alignment: .top, spacing: 12) {
+            HStack(alignment: .top, spacing: Space.inset) {
                 RecordingRow(
                     recording: recording,
                     progress: model.processingProgress[recording.id],
                     upload: model.uploads.state(for: recording.id)
                 )
 
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.small)
 
-                if isHovering {
-                    HStack(spacing: 2) {
-                        CardAction(symbol: "arrow.up.doc", help: "Envoyer au CRM…") {
-                            model.requestUpload(for: recording)
-                        }
-                        .disabled(recording.existsOnDisk == false)
-
-                        CardAction(symbol: "folder", help: "Afficher dans le Finder") {
-                            NSWorkspace.shared.activateFileViewerSelecting([recording.url])
-                        }
-
-                        CardAction(symbol: "trash", help: "Supprimer", tint: .red) {
-                            Task { await model.store.delete(recording) }
-                        }
+                // Toujours dans l'arbre, seulement peintes au survol.
+                // Insérées sous condition, ces trois actions n'existaient ni
+                // pour le clavier ni pour VoiceOver : une vue à opacité nulle
+                // reste focalisable et lisible, une vue absente non.
+                HStack(spacing: Space.hair) {
+                    CardAction(symbol: "arrow.up.doc", help: "Envoyer au CRM…") {
+                        model.requestUpload(for: recording)
                     }
-                    .transition(.opacity)
+                    .disabled(recording.existsOnDisk == false)
+
+                    CardAction(symbol: "folder", help: "Afficher dans le Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([recording.url])
+                    }
+
+                    CardAction(symbol: "trash", help: "Mettre à la corbeille", tint: Palette.broken) {
+                        isConfirmingDeletion = true
+                    }
                 }
+                .opacity(isHovering ? 1 : 0)
 
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(Type.metaFaint.weight(.semibold))
                     .foregroundStyle(.tertiary)
                     .padding(.top, 3)
             }
-            .cardBackground(isHovering: isHovering)
+            .branCard(isHovering: isHovering)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.14), value: isHovering)
+        .branAnimation(Motion.hover, value: isHovering)
+        // Les mêmes gestes sans souris et sans viser : le projet n'avait aucun
+        // menu contextuel, alors que c'est le premier endroit où on clique
+        // droit sur une liste de fichiers.
+        .contextMenu {
+            Button("Envoyer au CRM…", systemImage: "arrow.up.doc") {
+                model.requestUpload(for: recording)
+            }
+            .disabled(recording.existsOnDisk == false)
+
+            Button("Afficher dans le Finder", systemImage: "folder") {
+                NSWorkspace.shared.activateFileViewerSelecting([recording.url])
+            }
+
+            Divider()
+
+            Button("Mettre à la corbeille", systemImage: "trash", role: .destructive) {
+                isConfirmingDeletion = true
+            }
+        }
+        .confirmationDialog(
+            "Mettre « \(recording.displayTitle) » à la corbeille ?",
+            isPresented: $isConfirmingDeletion,
+            titleVisibility: .visible
+        ) {
+            Button("Mettre à la corbeille", role: .destructive) {
+                Task { await model.store.delete(recording) }
+            }
+            Button("Annuler", role: .cancel) {}
+        } message: {
+            Text("La vidéo et ses métadonnées partent à la corbeille. Vous pouvez les en ressortir tant qu'elle n'est pas vidée.")
+        }
     }
 }

@@ -1,3 +1,4 @@
+import BranSpeech
 import BranVision
 import SwiftUI
 
@@ -11,6 +12,8 @@ struct SnapshotSettingsSection: View {
     private var settings: SnapshotSettings { model.snapshotSettings }
 
     @State private var isCapturingHotkey = false
+    /// Le raccourci qu'on vient de refuser parce qu'il est déjà pris.
+    @State private var refused: HotkeyBinding?
 
     var body: some View {
         Section("Capture de texte") {
@@ -35,16 +38,34 @@ struct SnapshotSettingsSection: View {
                     HotkeyField(
                         binding: Binding(
                             get: { settings.trigger },
-                            set: { newValue in
-                                settings.trigger = newValue
-                                if settings.isEnabled { enable(true) }
-                            }
+                            set: { assign($0) }
                         ),
                         isCapturing: $isCapturingHotkey
                     )
                 }
 
-                if let conflict = conflictLabel {
+                // **Le conflit est refusé, pas seulement signalé.** L'ancienne
+                // version affichait l'avertissement et enregistrait quand même :
+                // les deux fonctions se retrouvaient sur la même touche, et
+                // `ShortcutRouter` en arbitrait une en silence. L'utilisateur
+                // voyait la dictée « ne plus marcher » sans rien pour l'expliquer.
+                if let refused {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(
+                            "\(refused.displayName) est déjà le raccourci de la dictée. Les deux fonctions ne peuvent pas le partager : le système n'en préviendrait qu'une seule, toujours la même.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        HStack {
+                            Button("Échanger avec la dictée") { exchange(with: refused) }
+                            Button("Garder \(settings.trigger.displayName)") { self.refused = nil }
+                        }
+                        .controlSize(.small)
+                    }
+                } else if let conflict = conflictLabel {
                     Label(conflict, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -127,6 +148,33 @@ struct SnapshotSettingsSection: View {
         HotkeyMonitor.requestTrust()
     }
 
+    /// Enregistre le raccourci, ou le refuse s'il est déjà pris.
+    private func assign(_ newValue: HotkeyBinding) {
+        guard newValue != model.dictationSettings.trigger else {
+            refused = newValue
+            return
+        }
+        refused = nil
+        settings.trigger = newValue
+        if settings.isEnabled { enable(true) }
+    }
+
+    /// L'échange, parce que c'est presque toujours ce qu'on voulait.
+    ///
+    /// Vouloir ⌘⇧2 pour la capture alors que la dictée l'occupe veut dire qu'on
+    /// préfère l'autre touche pour la dictée — pas qu'on renonce.
+    private func exchange(with wanted: HotkeyBinding) {
+        let previous = settings.trigger
+        model.dictationSettings.trigger = previous
+        settings.trigger = wanted
+        refused = nil
+        model.dictation.applySettings()
+        if settings.isEnabled { enable(true) }
+    }
+
+    /// Le conflit qui n'est pas passé par cet écran : les deux réglages sont
+    /// persistés séparément, et une ancienne installation peut les avoir déjà
+    /// alignés sur la même touche.
     private var conflictLabel: String? {
         guard settings.trigger == model.dictationSettings.trigger else { return nil }
         return "Cette touche est déjà celle de la dictée. Les deux fonctions ne peuvent pas partager un raccourci."

@@ -28,6 +28,9 @@ final class NotchOverlay {
     private var hosting: NSHostingView<NotchView>?
     private var collapseTask: Task<Void, Never>?
     private let content: NotchContent
+    /// La géométrie actuellement posée sur le panneau. Elle ne dépend que de
+    /// l'écran : tant qu'elle ne change pas, la fenêtre ne bouge plus.
+    private var geometry: Geometry?
 
     init(content: NotchContent) {
         self.content = content
@@ -37,9 +40,64 @@ final class NotchOverlay {
 
     /// L'écran qui a le focus clavier. C'est là qu'on tape, donc là qu'il faut
     /// afficher — pas forcément sur l'écran intégré.
+    ///
+    /// **La souris n'est qu'un repli.** La version précédente ne lisait que
+    /// `NSEvent.mouseLocation`, ce que son propre commentaire contredisait :
+    /// dicter dans une fenêtre de l'écran interne en ayant laissé le curseur sur
+    /// l'écran externe affichait l'encoche sur le mauvais écran.
     private static var activeScreen: NSScreen? {
-        NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
+        NSApp.keyWindow?.screen
+            ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
             ?? NSScreen.main
+    }
+
+    /// Tout ce que le panneau doit savoir — et **rien du contenu**.
+    private struct Geometry: Equatable {
+        var hasNotch: Bool
+        var notchWidth: CGFloat
+        var notchHeight: CGFloat
+        var frame: NSRect
+    }
+
+    /// **Le panneau est dimensionné une fois pour toutes, à la plus grande
+    /// géométrie.**
+    ///
+    /// Le calcul précédent partait du contenu, donc la fenêtre changeait de
+    /// taille dès que le contenu changeait — et il fallait alors remplacer la
+    /// `rootView`, ce que le commentaire de `show()` identifiait lui-même comme
+    /// dangereux. Tant qu'il n'y avait que deux fonctions et deux tailles
+    /// constantes par écran, le cas ne se présentait jamais ; il serait devenu
+    /// le cas normal à la troisième.
+    ///
+    /// La fenêtre est transparente et ignore la souris : la faire plus large
+    /// qu'il ne faut ne coûte rien, et le contenu qui grandit à l'intérieur est
+    /// animé par SwiftUI au lieu d'être redimensionné image par image.
+    private static func geometry(of screen: NSScreen) -> Geometry {
+        let notchHeight = notchHeight(of: screen)
+        let notchWidth = notchWidth(of: screen)
+        let hasNotch = notchHeight > 0 && notchWidth > 0
+
+        let contentHeight = hasNotch ? notchHeight + NotchView.dropHeight : NotchView.pillSize.height
+        let size = CGSize(
+            width: NotchView.maximumWidth,
+            height: contentHeight + NotchView.verticalSlack
+        )
+
+        // Le haut du **contenu**, pas celui de la fenêtre : le contenu est calé
+        // en haut d'un panneau plus grand que lui.
+        let contentTop = hasNotch ? screen.frame.maxY : screen.visibleFrame.maxY - 8
+
+        return Geometry(
+            hasNotch: hasNotch,
+            notchWidth: notchWidth,
+            notchHeight: notchHeight,
+            frame: NSRect(
+                x: screen.frame.midX - size.width / 2,
+                y: contentTop - size.height,
+                width: size.width,
+                height: size.height
+            )
+        )
     }
 
     /// Hauteur du trou physique, ou zéro. `safeAreaInsets.top` ne vaut plus de
@@ -65,41 +123,30 @@ final class NotchOverlay {
         collapseTask?.cancel()
         collapseTask = nil
 
-        let notchHeight = Self.notchHeight(of: screen)
-        let notchWidth = Self.notchWidth(of: screen)
-        let hasNotch = notchHeight > 0 && notchWidth > 0
-
-        // La fenêtre est créée **à sa taille finale** et ne bouge plus. Toute
-        // l'ouverture est jouée par le tracé à l'intérieur : redimensionner un
-        // `NSPanel` à chaque image saccade, alors qu'un `Shape` animé est lissé
-        // par Core Animation.
-        let size = CGSize(
-            width: hasNotch ? notchWidth + 2 * NotchView.earWidth : NotchView.pillSize.width,
-            height: hasNotch ? notchHeight + NotchView.dropHeight : NotchView.pillSize.height
-        )
-
-        let origin = CGPoint(
-            x: screen.frame.midX - size.width / 2,
-            // Avec encoche, on part du bord haut de l'écran pour épouser le trou.
-            // Sans, on se glisse sous la barre de menus.
-            y: hasNotch
-                ? screen.frame.maxY - size.height
-                : screen.visibleFrame.maxY - size.height - 8
-        )
-
-        let view = NotchView(content: content, hasNotch: hasNotch, notchWidth: notchWidth)
+        let next = Self.geometry(of: screen)
 
         if let panel, let hosting {
-            hosting.rootView = view
-            panel.setFrame(NSRect(origin: origin, size: size), display: true)
+            // **La `rootView` n'est plus remplacée qu'au changement d'écran
+            // physique.** `show()` est appelé à chaque changement de phase, et
+            // remplacer la `rootView` d'un `NSHostingView` pendant qu'une
+            // animation tourne à 40 images par seconde laisse SwiftUI avec des
+            // attributs qui pointent vers l'arbre précédent. Le contenu, lui,
+            // est observable : il se met à jour tout seul, et la fenêtre garde
+            // la même taille quoi qu'il affiche.
+            if geometry != next {
+                geometry = next
+                hosting.rootView = view(for: next)
+                panel.setFrame(next.frame, display: true)
+            }
             panel.orderFrontRegardless()
             content.isExpanded = true
             return
         }
 
-        let hostingView = NSHostingView(rootView: view)
+        geometry = next
+        let hostingView = NSHostingView(rootView: view(for: next))
         let newPanel = NSPanel(
-            contentRect: NSRect(origin: origin, size: size),
+            contentRect: next.frame,
             // `.nonactivatingPanel` : afficher l'état de la dictée ne doit pas
             // voler le focus à l'application où l'on est en train d'écrire.
             styleMask: [.borderless, .nonactivatingPanel],
@@ -122,6 +169,15 @@ final class NotchOverlay {
         panel = newPanel
         hosting = hostingView
         content.isExpanded = true
+    }
+
+    private func view(for geometry: Geometry) -> NotchView {
+        NotchView(
+            content: content,
+            hasNotch: geometry.hasNotch,
+            notchWidth: geometry.notchWidth,
+            notchHeight: geometry.notchHeight
+        )
     }
 
     /// Referme, puis retire la fenêtre.
@@ -147,6 +203,7 @@ final class NotchOverlay {
         panel?.orderOut(nil)
         panel = nil
         hosting = nil
+        geometry = nil
     }
 }
 
@@ -156,6 +213,14 @@ final class NotchOverlay {
 @Observable
 final class NotchContent {
     enum Mode: Equatable {
+        /// Rien en cours. **L'état initial d'un panneau vide.**
+        ///
+        /// Sans lui, un panneau qui n'a encore rien à dire démarrait sur
+        /// « à l'écoute », pastille rouge comprise : tout chemin appelant
+        /// `show()` avant d'avoir posé un mode annonçait une dictée qui
+        /// n'existait pas.
+        case idle
+
         // Dictée
         case listening
         case transcribing
@@ -174,6 +239,21 @@ final class NotchContent {
         case cancelled
         case failed(String)
 
+        /// Un mode qu'on peut interrompre — donc dont le retour au repos veut
+        /// dire « annulé » et non « terminé ».
+        ///
+        /// **Une propriété, pas une comparaison de cas.** `NotchPresenter`
+        /// écrivait `[.listening, .transcribing].contains(mode)`, ce qui passe
+        /// par `Equatable`, donc par les valeurs associées : le jour où l'un de
+        /// ces cas en porte une, la comparaison devient silencieusement fausse.
+        /// `.preparing(_)` le montrait déjà — impossible à mettre dans une telle
+        /// liste sans en inventer la valeur.
+        var isCancellable: Bool {
+            switch self {
+            case .listening, .transcribing, .preparing, .reading: true
+            case .idle, .done, .captured, .empty, .cancelled, .failed: false
+            }
+        }
     }
 
     /// Quelle fonction pilote l'encoche.
@@ -186,7 +266,7 @@ final class NotchContent {
         case snapshot
     }
 
-    var mode: Mode = .listening
+    var mode: Mode = .idle
     var source: Source = .dictation
     var levels: [Float] = []
     var elapsed: TimeInterval = 0

@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-/// Le journal de la capture de texte.
+/// Le journal de la dictée et de la capture de texte.
 ///
 /// Écrit parce qu'une capture qui rend du vide peut échouer à six endroits — le
 /// viseur, l'écriture du fichier temporaire, le décodage, le moteur, le
@@ -18,9 +18,9 @@ import os
 ///   ```
 /// - **un fichier**, `Captures/journal.txt`, pour lire après coup ce qui s'est
 ///   passé quand on n'était pas devant.
-enum SnapshotLog {
+enum FeatureLog {
 
-    private static let logger = Logger(subsystem: "com.opahventures.bran", category: "snapshot")
+    private static let logger = Logger(subsystem: "com.opahventures.bran", category: "features")
 
     /// Là où le journal s'écrit. Fixé au démarrage par `SnapshotStore`, pour ne
     /// pas dépendre du dossier de destination à chaque ligne.

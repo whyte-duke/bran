@@ -37,12 +37,34 @@ public final class AppModel {
     let snapshotSettings = SnapshotSettings()
     let snapshot: SnapshotController
 
+    /// La veille des sessions parallèles. Même autonomie encore : son propre
+    /// résolveur, son propre journal, ses propres réglages.
+    ///
+    /// Elle a un second lien avec l'enregistreur, et un seul : elle doit savoir
+    /// se taire quand une réunion est en cours ou détectée (correctif CR-4).
+    /// Ce lien passe par une **fermeture**, comme le dossier de destination des
+    /// deux autres — le veilleur n'a pas à savoir ce qu'est une réunion, et
+    /// l'enregistreur n'a pas à savoir qu'un veilleur existe.
+    let watchSettings = WatchSettings()
+    let watch: WatchController
+
+    /// Le journal de bord. **La seule chose du modèle qui lise les quatre
+    /// sources d'un coup** — et elle ne les possède pas : elle relit le journal
+    /// du veilleur en lecture seule, et la vue lui passe les repères des trois
+    /// autres stores. Aucun module n'apprend l'existence des trois autres.
+    let week: WeekLoader
+
     /// Le guet du clavier, **partagé** par la dictée et la capture. Un seul
     /// `CGEventTap` pour toute l'application : deux taps doubleraient le
     /// travail à chaque frappe du système et pourraient mourir séparément.
     private let shortcuts = ShortcutRouter()
 
     private var notchPresenter: NotchPresenter?
+
+    /// Le panneau du veilleur. Son propre `NSPanel`, distinct de celui de
+    /// l'encoche : deux panneaux ne se volent rien, alors que deux présentateurs
+    /// pour un même panneau, si.
+    private var attention: AttentionOverlay?
 
     /// Réunion détectée, en attente d'une décision de l'utilisateur.
     /// Non nil ≠ enregistrement en cours.
@@ -135,6 +157,15 @@ public final class AppModel {
         self.snapshot = SnapshotController(settings: snapshotSettings, store: snapshotStore)
         shortcuts.attach(dictation: dictation, snapshot: snapshot)
 
+        let watchSettings = self.watchSettings
+        let watchStore = WatchStore(
+            root: { [storage] in storage.root },
+            retention: watchSettings.retention,
+            tickInterval: watchSettings.tickInterval
+        )
+        self.watch = WatchController(settings: watchSettings, store: watchStore)
+        self.week = WeekLoader(folder: { watchStore.folder })
+
         Task { [weak self, capture] in
             for await reason in capture.failures {
                 guard let self else { return }
@@ -148,12 +179,26 @@ public final class AppModel {
         }
         notifications.configure()
 
+        // CR-4 : « une réunion est en cours **ou détectée** ». Le prédicat est
+        // volontairement plus large qu'un enregistrement — ce dont il protège,
+        // c'est un partage d'écran, et on peut partager son écran sans que bran
+        // enregistre quoi que ce soit.
+        watch.isMuted = { [weak self] in
+            guard let self else { return false }
+            return hasOpenSession || pendingMeeting != nil
+        }
+
         Task { await capture.updateQuality(quality) }
         applyStorageRoot()
+
+        // Le journal vit à côté des enregistrements, et il est armé avant toute
+        // fonction : il ne doit pas dépendre de l'ordre de construction.
+        FeatureLog.folder = storage.root.appending(path: "Journal", directoryHint: .isDirectory)
 
         directory.start()
         startDictation()
         startSnapshot()
+        startWatch()
 
         // La surveillance est permanente. Il n'y a pas de raison de la
         // suspendre : elle ne fait qu'observer des titres de fenêtres, et une
@@ -219,6 +264,32 @@ public final class AppModel {
         Task { [snapshot] in
             await snapshot.store.reload()
             await snapshot.store.purgeExpiredImages()
+        }
+    }
+
+    // MARK: - Veille
+
+    private func startWatch() {
+        // Le panneau se tait pendant que l'encoche travaille. Une fermeture, et
+        // aucune propriété partagée : `NotchPresenter` garde son panneau, le
+        // veilleur a le sien.
+        attention = AttentionOverlay(isSuppressed: { [weak self] in
+            guard let self else { return true }
+            return dictation.isBusy || snapshot.isBusy
+        })
+
+        watch.onVerdict = { [weak self] verdict in
+            guard let self else { return }
+            attention?.update(verdict, enabled: watchSettings.showsOverlay)
+        }
+
+        watch.applySettings()
+
+        Task { [watch] in
+            await watch.store.reload()
+            // La purge tourne au lancement, comme pour les deux autres modules :
+            // à l'ouverture d'une vue, elle ne ferait que ralentir un affichage.
+            await watch.store.purgeExpired()
         }
     }
 

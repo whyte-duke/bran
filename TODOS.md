@@ -76,3 +76,68 @@ follow the system device instead and one setting disappears.
 
 **Where to start:** `Sources/BranApp/Dictation/DictationSettings.swift`,
 `inputDeviceUID`.
+
+---
+
+## Keep a week of resource samples, so the Week pane can say what bran cost
+
+**What:** write one CPU/RAM sample per minute to a day-scoped `.jsonl`, keep
+seven days, and surface the shape in `WeekPane`.
+
+**Why:** the resource meter added on 2026-08-06 answers "what is bran doing right
+now". It cannot answer "what did bran cost me this week", and constraint C10 of
+the watcher design — *"un plafond CPU/énergie est un critère de succès, pas un
+détail"* — has never had a measurement over time. A ceiling you estimate is not a
+ceiling. `WeekPane` already exists to bring the four sources together.
+
+**Pros:** gives C10 a real number instead of an estimate; makes a regression in
+idle cost visible the week it appears rather than the month someone notices the
+fan. The retention pattern is written three times already (`SnapshotRetention`,
+`WatchRetention`, `RecordingStore`) — this is the fourth application of a known
+mould, not a new subsystem.
+
+**Cons:** a fourth store to maintain and migrate. One sample per minute is ~1 440
+lines a day, small, but it is one more file that has to survive a day change, a
+sleep, and a crash. And nobody has yet looked at a single number from the meter,
+so the shape of the useful summary is a guess.
+
+**Depends on:** the resource meter shipping first, and a week of looking at the
+live number to know which summary is worth keeping.
+
+**Where to start:** `Sources/BranApp/Watch/WatchStore.swift` — day-scoped file,
+retention and `flush()` on sleep are all already written there.
+
+---
+
+## Merge the two window-enumeration loops once the common event layer exists
+
+**What:** a single `WindowFeed` that enumerates visible windows once per tick,
+read by both `AppModel` (Meet detection) and `WatchController` (lane sampling).
+
+**Why:** at idle, two independent loops call `CGWindowListCopyWindowInfo` — every
+5 s in `AppModel.swift:516`, every 4 s in `WatchController.swift:165`. On
+2026-08-06 they were aligned to 4 s so they stop drifting against each other,
+which cut ~27 enumerations a minute to ~15. It did not remove the duplicate work:
+the window server is still asked twice per tick. `BranWindows` unified the *call*
+(it existed in five copies); nothing has unified the *schedule*.
+
+**Pros:** halves the idle enumeration cost, and gives one place to change the
+cadence instead of two that must be kept in step by hand.
+
+**Cons:** a shared feed is a dependency between two modules that
+`AppModel.swift` documents three times as deliberately autonomous — *"la dictée,
+volontairement autonome"*, *"même autonomie"*, *"le seul lien est le dossier de
+destination"*. Wiring them directly buys performance with the property that keeps
+this codebase at 25k lines instead of 40k.
+
+**Depends on:** the common event layer accepted in the CEO plan of 2026-08-06
+(scope decision #1). That layer is what lets both modules read the same feed
+without knowing about each other — producers emit, readers subscribe. Doing the
+merge before it exists means doing it the wrong way.
+
+**Also depends on:** a measured number. The resource meter shipping in the same
+tranche is the instrument; take an idle baseline before and after so the change is
+justified by a delta rather than by intuition.
+
+**Where to start:** `Sources/BranWindows/` — the shared enumeration API is
+already there. The missing piece is a scheduler in front of it, not a new call.

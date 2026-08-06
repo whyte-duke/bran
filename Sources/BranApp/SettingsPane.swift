@@ -1,140 +1,143 @@
 import SwiftUI
 
+/// Les réglages, séparés au lieu d'être empilés.
+///
+/// **Le problème mesuré.** Un seul `Form` portait huit sections — qualité,
+/// démarrage, quinze contrôles de dictée, douze de capture, veille, CRM,
+/// autorisations, dossier — dans une feuille figée à 560 × 620. Changer le
+/// raccourci de la capture demandait de défiler devant tout le reste, et rien
+/// dans l'écran ne disait où s'arrêtait une fonction et où commençait la
+/// suivante : les titres de section étaient le seul séparateur, et ils défilent.
+///
+/// ```
+/// ┌───────────────┬──────────────────────────────┐
+/// │ ⚙ Général     │  Dictée                      │
+/// │ ▤ Réunions    │  ┌────────────────────────┐  │
+/// │ ∿ Dictée   ◀  │  │ Raccourci        ⌘ dr. │  │
+/// │ ⧉ Capture     │  │ Modèle          ✓ prêt │  │
+/// │ ◉ Veille      │  └────────────────────────┘  │
+/// │ ⛓ Connexions  │                              │
+/// │ 🔒 Autoris.   │                              │
+/// └───────────────┴──────────────────────────────┘
+/// ```
+///
+/// **Pourquoi une colonne et pas des onglets en barre.** Sept entrées, dont
+/// deux à deux mots (« Autorisations », « Connexions ») : en barre segmentée
+/// elles se tronquent ou forcent une feuille de 700 points de large pour une
+/// rangée d'icônes. Surtout, la fenêtre principale range déjà ses écrans dans
+/// une colonne latérale — l'utilisateur a demandé « comme la vue ». Deux
+/// métaphores de navigation dans la même application, c'est une de trop.
+/// `TabView` + `.sidebarAdaptable` donne la colonne sans réimplémenter la
+/// sélection, la restauration et l'accessibilité d'un `NavigationSplitView`.
 struct SettingsPane: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
+    /// L'onglet ouvert survit à la fermeture. Quelqu'un qui règle sa dictée
+    /// rouvre les réglages trois fois de suite : le renvoyer sur « Général » à
+    /// chaque fois lui fait refaire le trajet à chaque fois.
+    @AppStorage("settings.selectedTab") private var selection: SettingsTab = .general
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Réglages")
-                .font(.title2.weight(.semibold))
-                .padding(20)
-
-            Divider()
-
-            Form {
-                Section("Qualité d'enregistrement") {
-                    Picker("Qualité", selection: $model.quality) {
-                        ForEach(QualityPreset.allCases) { preset in
-                            VStack(alignment: .leading) {
-                                Text(preset.label)
-                                Text(preset.estimatedRate).foregroundStyle(.secondary)
-                            }
-                            .tag(preset)
-                        }
-                    }
-                    .pickerStyle(.radioGroup)
-                    .labelsHidden()
-                    .disabled(model.isRecording)
-
-                    Text("Le débit dépend du contenu : un écran figé coûte presque rien, une visio animée coûte le maximum. Ces valeurs sont des ordres de grandeur mesurés sur une vraie réunion.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if model.isRecording {
-                        Text("Modification impossible pendant un enregistrement : changer la configuration d'un flux actif l'interrompt.")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                }
-
-                Section("Démarrage") {
-                    Toggle("Lancer bran à l'ouverture de session", isOn: Binding(
-                        get: { model.loginItem.isEnabled },
-                        set: { model.setLaunchAtLogin($0) }
-                    ))
-                    Text("bran démarre sans fenêtre ni icône du Dock, et se contente d'observer.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                DictationSettingsSection(model: model)
-
-                SnapshotSettingsSection(model: model)
-
-                CRMSettingsSection(configuration: model.uploads.configuration, uploads: model.uploads)
-
-                Section("Autorisations") {
-                    PermissionsSummary(permissions: model.permissions)
-                }
-
-                Section("Dossier des enregistrements") {
-                    HStack(spacing: 10) {
-                        Image(systemName: "folder")
-                            .foregroundStyle(.secondary)
-                            .accessibilityHidden(true)
-
-                        Text(model.storage.root.path(percentEncoded: false))
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                            .textSelection(.enabled)
-                            .help(model.storage.root.path(percentEncoded: false))
-
-                        Spacer(minLength: 8)
-
-                        Button("Modifier…") { model.chooseStorageFolder() }
-                            .disabled(model.isRecording)
-                    }
-
-                    if let problem = model.storage.problem {
-                        Label(problem, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                            .font(.callout)
-                    }
-
-                    HStack {
-                        Button("Ouvrir le dossier") {
-                            NSWorkspace.shared.open(model.storage.root)
-                        }
-                        if model.storage.isDefault == false {
-                            Button("Revenir au dossier par défaut") { model.resetStorageFolder() }
-                                .disabled(model.isRecording)
-                        }
-                    }
-
-                    Text("Les enregistrements déjà réalisés restent où ils sont — bran ne déplace aucun fichier. Seuls les suivants iront dans le nouveau dossier, et c'est lui que la bibliothèque affichera.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+        // Pas de titre posé à la main : la feuille en a déjà un, et les deux se
+        // superposaient. Le titre de l'onglet sélectionné suffit à situer.
+        TabView(selection: $selection) {
+            ForEach(SettingsTab.allCases) { tab in
+                Tab(tab.title, systemImage: tab.symbol, value: tab) {
+                    pane(for: tab)
                 }
             }
-            .formStyle(.grouped)
+        }
+        .tabViewStyle(.sidebarAdaptable)
+        // **Plus de taille figée.** Un plancher qui garantit qu'aucun contrôle
+        // n'est coupé, une taille idéale confortable, et aucun plafond : la
+        // feuille suit le contenu de l'onglet et reste redimensionnable au lieu
+        // de forcer un défilement dans 620 points quoi qu'il arrive.
+        //
+        // Les quatre nombres restants sont des dimensions de fenêtre : `Design`
+        // n'a pas d'échelle pour ça — ce n'est ni un espacement, ni un rayon —
+        // et en inventer une pour un seul appel la rendrait fausse ailleurs.
+        .frame(minWidth: 620, idealWidth: 720, minHeight: 460, idealHeight: 640)
+    }
 
-            Divider()
-
+    @ViewBuilder
+    private func pane(for tab: SettingsTab) -> some View {
+        Form {
+            switch tab {
+            case .general:
+                GeneralSettingsSection(model: model)
+            case .meetings:
+                MeetingSettingsSection(model: model)
+            case .dictation:
+                DictationSettingsSection(model: model)
+            case .snapshot:
+                SnapshotSettingsSection(model: model)
+            case .watch:
+                WatchSettingsSection(model: model)
+            case .connections:
+                CRMSettingsSection(configuration: model.uploads.configuration, uploads: model.uploads)
+            case .permissions:
+                PermissionsSettingsSection(model: model)
+            }
+        }
+        .formStyle(.grouped)
+        // La sortie est ancrée au contenu, pas à la feuille entière : posée sous
+        // le `TabView`, elle barrait aussi la colonne, ce qui donnait un bouton
+        // « Terminé » flottant sous la liste des onglets.
+        .safeAreaInset(edge: .bottom) {
             HStack {
                 Spacer()
                 Button("Terminé") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
-            .padding(16)
+            .padding(Space.stack)
+            .background(.bar)
         }
-        .frame(width: 560, height: 620)
     }
 }
 
-private struct PermissionsSummary: View {
-    @Bindable var permissions: PermissionsService
+/// Les sept écrans de réglages.
+///
+/// Le découpage suit les fonctions de l'application, pas la mécanique : un
+/// utilisateur cherche « la dictée », jamais « les préférences du moteur de
+/// reconnaissance ». Chaque cas correspond à une section existante, déplacée
+/// telle quelle — aucune n'a été réécrite pour l'occasion.
+enum SettingsTab: String, CaseIterable, Identifiable {
+    case general
+    case meetings
+    case dictation
+    case snapshot
+    case watch
+    case connections
+    case permissions
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            row("Enregistrement de l'écran", permissions.screenRecording)
-            row("Microphone", permissions.microphone)
-            row("Calendrier", permissions.calendar)
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general: "Général"
+        case .meetings: "Réunions"
+        case .dictation: "Dictée"
+        case .snapshot: "Capture"
+        case .watch: "Veille"
+        case .connections: "Connexions"
+        case .permissions: "Autorisations"
         }
-        .onAppear { permissions.refresh() }
     }
 
-    private func row(_ title: String, _ access: PermissionsService.Access) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: access == .granted ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundStyle(access == .granted ? Color.green : .secondary)
-            Text(title)
-            Spacer()
-            Text(access == .granted ? "accordée" : "manquante")
-                .foregroundStyle(.secondary)
+    var symbol: String {
+        switch self {
+        case .general: "gearshape"
+        case .meetings: "film.stack"
+        case .dictation: "waveform"
+        case .snapshot: "text.viewfinder"
+        case .watch: "binoculars"
+        case .connections: "link"
+        case .permissions: "lock.shield"
         }
-        .accessibilityElement(children: .combine)
     }
+}
+
+#Preview("Réglages") {
+    SettingsPane(model: AppModel())
 }

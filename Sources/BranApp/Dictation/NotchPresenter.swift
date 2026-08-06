@@ -1,3 +1,4 @@
+import AppKit
 import BranSpeech
 import BranVision
 import Foundation
@@ -51,22 +52,22 @@ final class NotchPresenter {
         case .capturing:
             dismissTask?.cancel()
             content.source = .dictation
-            content.mode = .listening
             content.levels = []
             content.elapsed = 0
+            present(.listening)
             overlay.show()
             startRefreshing()
 
         case .transcribing:
             dismissTask?.cancel()
             stopRefreshing()
-            content.mode = .transcribing
+            present(.transcribing)
             overlay.show()
 
         case .pasting:
             stopRefreshing()
             if let text = dictation.lastTranscript {
-                content.mode = .done(Self.excerpt(text))
+                present(.done(Self.excerpt(text)))
             }
             overlay.show()
             // Assez pour lire le début de ce qui vient d'être collé et vérifier
@@ -75,14 +76,14 @@ final class NotchPresenter {
 
         case .failed(let reason):
             stopRefreshing()
-            content.mode = .failed(reason.summary)
+            present(.failed(reason.summary))
             overlay.show()
             // Plus longtemps : un échec doit se lire, pas se deviner.
             scheduleDismiss(after: 4)
 
         case .idle:
             stopRefreshing()
-            settleToIdle(cancellableFrom: [.listening, .transcribing])
+            settleToIdle()
         }
     }
 
@@ -102,30 +103,30 @@ final class NotchPresenter {
         case .preparing(let fraction):
             dismissTask?.cancel()
             content.source = .snapshot
-            content.mode = .preparing(fraction)
+            present(.preparing(fraction))
             overlay.show()
 
         case .recognising:
             dismissTask?.cancel()
             content.source = .snapshot
-            content.mode = .reading
+            present(.reading)
             overlay.show()
 
         case .copying:
             if let text = snapshot.lastText {
-                content.mode = .captured(Self.excerpt(text))
+                present(.captured(Self.excerpt(text)))
             }
             overlay.show()
             scheduleDismiss(after: 1.8)
 
         case .failed(let reason):
             content.source = .snapshot
-            content.mode = .failed(reason.summary)
+            present(.failed(reason.summary))
             overlay.show()
             scheduleDismiss(after: 4)
 
         case .idle:
-            settleToIdle(cancellableFrom: [.reading])
+            settleToIdle()
         }
     }
 
@@ -138,7 +139,7 @@ final class NotchPresenter {
     /// 1,8 s vient d'être posé : le raccourcir ici ferait disparaître le texte
     /// avant qu'on ait pu le lire. D'où le retour immédiat quand un état de fin
     /// est déjà affiché.
-    private func settleToIdle(cancellableFrom shown: [NotchContent.Mode]) {
+    private func settleToIdle() {
         if case .done = content.mode { return }
         if case .captured = content.mode { return }
         if case .empty = content.mode { return }
@@ -146,8 +147,8 @@ final class NotchPresenter {
 
         // Distinguer « annulé » de « rien trouvé » : deux gestes différents, et
         // l'utilisateur doit savoir lequel a été compris.
-        if shown.contains(content.mode) {
-            content.mode = .cancelled
+        if content.mode.isCancellable {
+            present(.cancelled)
             scheduleDismiss(after: 0.9)
         } else {
             scheduleDismiss(after: 1.2)
@@ -158,9 +159,58 @@ final class NotchPresenter {
     func announceEmpty(source: NotchContent.Source) {
         dismissTask?.cancel()
         content.source = source
-        content.mode = .empty
+        present(.empty)
         overlay.show()
         scheduleDismiss(after: 1.4)
+    }
+
+    // MARK: - Ce que l'encoche dit, et ce qu'elle en dit à voix haute
+
+    /// Le seul chemin par lequel le mode change.
+    ///
+    /// Il existe pour que l'annonce VoiceOver ne puisse pas être oubliée au
+    /// prochain état ajouté.
+    private func present(_ mode: NotchContent.Mode) {
+        content.mode = mode
+        announce(Self.spoken(mode, source: content.source))
+    }
+
+    /// Le dernier texte annoncé. `.preparing` arrive à chaque pour-cent : sans
+    /// cette mémoire, VoiceOver répéterait la même phrase vingt fois.
+    private var lastAnnouncement = ""
+
+    /// **Le panneau est hors de la hiérarchie d'accessibilité.** C'est une
+    /// fenêtre sans contrôle, qui n'accepte pas la souris et ne prend jamais le
+    /// focus : un utilisateur de VoiceOver appuyait sur le raccourci et n'avait
+    /// strictement aucun retour — ni que ça écoute, ni que ça a échoué. Une
+    /// annonce système coûte une ligne et ferme le trou.
+    private func announce(_ text: String) {
+        guard text.isEmpty == false, text != lastAnnouncement else { return }
+        lastAnnouncement = text
+        NSAccessibility.post(
+            element: NSApp as Any,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: text,
+                .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+            ]
+        )
+    }
+
+    private static func spoken(_ mode: NotchContent.Mode, source: NotchContent.Source) -> String {
+        let who = source == .snapshot ? "Capture" : "Dictée"
+        return switch mode {
+        case .idle: ""
+        case .listening: "Dictée : à l'écoute"
+        case .transcribing: "Dictée : transcription en cours"
+        case .done(let text): "Dictée collée : \(text)"
+        case .preparing: "Capture : chargement du moteur"
+        case .reading: "Capture : lecture du texte"
+        case .captured(let text): "Texte copié : \(text)"
+        case .empty: source == .snapshot ? "Capture : aucun texte trouvé" : "Dictée : rien entendu"
+        case .cancelled: "\(who) : annulé"
+        case .failed(let reason): "\(who) : \(reason)"
+        }
     }
 
     // MARK: - Rafraîchissement

@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// L'en-tête d'une section : grand titre, sous-titre, et une barre d'outils.
@@ -12,24 +13,24 @@ struct PaneHeader<Trailing: View>: View {
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.stack) {
             HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: Space.tight) {
                     Text(title)
-                        .font(.system(size: 26, weight: .semibold))
+                        .font(Type.paneTitle)
                     Text(subtitle)
-                        .font(.callout)
+                        .font(Type.paneLead)
                         .foregroundStyle(.secondary)
                 }
-                Spacer(minLength: 12)
+                Spacer(minLength: Space.inset)
                 trailing()
             }
 
             SearchField(text: $query, prompt: searchPrompt)
         }
-        .padding(.horizontal, 26)
-        .padding(.top, 22)
-        .padding(.bottom, 14)
+        .padding(.horizontal, Space.gutter)
+        .padding(.top, Space.gutter)
+        .padding(.bottom, Space.stack)
     }
 }
 
@@ -38,6 +39,10 @@ struct PaneHeader<Trailing: View>: View {
 /// Écrit à la main plutôt que `.searchable` : ce dernier se pose dans la barre
 /// d'outils ou dans la colonne, jamais au milieu du contenu, et c'est justement
 /// là qu'on le cherche du regard.
+///
+/// Le prix de ce choix, c'est que le clavier ne vient pas tout seul : il fallait
+/// donc lui rendre à la main ⌘F pour venir s'y poser et Échap pour en repartir,
+/// et un intitulé, faute de quoi VoiceOver ne lisait que le texte d'invite.
 struct SearchField: View {
     @Binding var text: String
     let prompt: String
@@ -45,14 +50,25 @@ struct SearchField: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: Space.small) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
-                .font(.system(size: 12))
+                .font(Type.meta)
+                .accessibilityHidden(true)
 
             TextField(prompt, text: $text)
                 .textFieldStyle(.plain)
                 .focused($isFocused)
+                .accessibilityLabel("Rechercher")
+                .accessibilityHint(prompt)
+                // Échap vide le champ, puis rend le clavier au contenu. Deux
+                // gestes en un, dans l'ordre où on les veut : une recherche
+                // qu'on abandonne laisse une liste filtrée, sinon.
+                .onKeyPress(.escape) {
+                    guard text.isEmpty == false else { return .ignored }
+                    text = ""
+                    return .handled
+                }
 
             if text.isEmpty == false {
                 Button("Effacer", systemImage: "xmark.circle.fill") { text = "" }
@@ -60,50 +76,35 @@ struct SearchField: View {
                     .labelStyle(.iconOnly)
                     .foregroundStyle(.secondary)
                     .transition(.opacity)
+                    .help("Effacer la recherche (Échap)")
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.horizontal, Space.inset)
+        .padding(.vertical, Space.small)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(.quaternary.opacity(0.45))
+            RoundedRectangle(cornerRadius: Radius.field, style: .continuous)
+                .fill(Palette.well)
                 .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.field, style: .continuous)
                         .stroke(isFocused ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 1.5)
                 }
         }
-        .animation(.easeOut(duration: 0.15), value: isFocused)
-        .animation(.easeOut(duration: 0.15), value: text.isEmpty)
-    }
-}
-
-/// Le fond d'une carte de la liste, avec son survol.
-///
-/// Le survol n'est pas de la décoration : dans une liste de cartes sans
-/// séparateur, c'est lui qui dit « cet élément est cliquable, et c'est
-/// celui-là ».
-struct CardBackground: ViewModifier {
-    var isHovering: Bool
-
-    func body(content: Content) -> some View {
-        content
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(.quaternary.opacity(isHovering ? 0.55 : 0.32))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(.white.opacity(isHovering ? 0.09 : 0), lineWidth: 1)
-            }
-            .contentShape(.rect)
-            .animation(.easeOut(duration: 0.14), value: isHovering)
+        .branAnimation(Motion.hover, value: isFocused)
+        .branAnimation(Motion.hover, value: text.isEmpty)
+        .onReceive(NotificationCenter.default.publisher(for: .branFocusSearch)) { _ in
+            isFocused = true
+        }
     }
 }
 
 extension View {
+    /// Le fond d'une carte de la liste, avec son survol.
+    ///
+    /// Ce n'est plus qu'un renvoi vers `branCard` : le fond dessinait un contour
+    /// blanc à 9 %, invisible en thème clair, et une carte n'a aucune raison
+    /// d'avoir deux implémentations. Le nom survit parce que deux sections
+    /// l'appellent encore.
     func cardBackground(isHovering: Bool) -> some View {
-        modifier(CardBackground(isHovering: isHovering))
+        branCard(isHovering: isHovering)
     }
 }

@@ -39,7 +39,6 @@ final class SnapshotStore {
     init(root: @escaping @MainActor () -> URL, retention: SnapshotRetention = .default) {
         self.root = root
         self.retention = retention
-        SnapshotLog.folder = folder
     }
 
     var folder: URL {

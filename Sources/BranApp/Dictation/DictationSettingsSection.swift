@@ -16,6 +16,14 @@ struct DictationSettingsSection: View {
     private var settings: DictationSettings { model.dictationSettings }
     private var controller: DictationController { model.dictation }
 
+    /// **Trois sections plutôt qu'une.** Empilée avec sept autres fonctions dans
+    /// un formulaire unique, la dictée n'avait droit qu'à un seul titre. Seule
+    /// dans son onglet, elle peut séparer ce qui se décide une fois (le geste)
+    /// de ce qui s'installe une fois (le modèle) et de ce qu'on ne touche
+    /// presque jamais.
+    ///
+    /// L'API ne bouge pas : c'est toujours `DictationSettingsSection(model:)`
+    /// posée dans un `Form`.
     var body: some View {
         Section("Dictée") {
             enableRow
@@ -25,20 +33,27 @@ struct DictationSettingsSection: View {
                 modeRow
                 languageRow
             }
+        }
 
+        Section("Modèle de reconnaissance") {
             modelRow
+        }
 
-            if settings.isEnabled {
-                DisclosureGroup("Réglages avancés") {
+        if settings.isEnabled {
+            Section("Réglages avancés") {
+                // Toujours repliés : quatre réglages qui ont un défaut correct
+                // n'ont pas à occuper l'écran de celui qui vient changer son
+                // raccourci.
+                DisclosureGroup("Afficher les réglages avancés") {
                     inputDeviceRow
                     retentionRow
                     behaviourRows
                     vocabularyRow
+                        .sheet(isPresented: $showsVocabulary) {
+                            VocabularySheet(settings: settings)
+                        }
                 }
             }
-        }
-        .sheet(isPresented: $showsVocabulary) {
-            VocabularySheet(settings: settings)
         }
     }
 
@@ -218,26 +233,33 @@ struct DictationSettingsSection: View {
             rendez-vous : selon la connexion, comptez plusieurs minutes.
             """
         }
-        return """
+        let common = """
         \(SpeechModelHost.modelName), exécuté sur le Neural Engine. Il se charge \
         dès que vous appuyez sur le raccourci, pendant que vous parlez, donc \
-        l'attente est invisible. Mesuré sur ce Mac : \(measuredSpeed).
+        l'attente est invisible.
         """
+        guard let measured = measuredSpeed else {
+            return common + " Comptez environ 67× le temps réel, soit ~4 s pour 4 minutes de parole."
+        }
+        return common + " " + measured
     }
 
-    /// Le chiffre mesuré ici, pas celui d'un article. S'affiche dès la première
-    /// dictée et remplace la valeur de référence.
-    private var measuredSpeed: String {
-        guard let last = controller.host.lastTranscribeDuration,
-              let entry = controller.store.entries.first,
+    /// La vitesse de la **dernière** dictée, datée.
+    ///
+    /// L'ancienne version annonçait « mesuré sur ce Mac » à partir de
+    /// `store.entries.first`, sans jamais regarder de quand cette entrée datait
+    /// ni si elle correspondait au dernier chargement : le chiffre affiché
+    /// pouvait venir d'une dictée d'il y a trois semaines, faite dans une autre
+    /// langue et sur un autre modèle. Une mesure sans date n'est pas
+    /// vérifiable ; on la date, ou on ne l'affirme pas.
+    private var measuredSpeed: String? {
+        guard let entry = controller.store.entries.max(by: { $0.createdAt < $1.createdAt }),
               let processing = entry.processingTime,
-              processing > 0
-        else {
-            return "environ 67× le temps réel, soit ~4 s pour 4 minutes de parole"
-        }
+              processing > 0, entry.duration > 0
+        else { return nil }
         let ratio = entry.duration / processing
-        _ = last
-        return "\(ratio.formatted(.number.precision(.fractionLength(0))))× le temps réel"
+        let when = entry.createdAt.formatted(.relative(presentation: .named))
+        return "Dernière dictée (\(when)) : \(ratio.formatted(.number.precision(.fractionLength(0))))× le temps réel."
     }
 
     // MARK: - Avancé
@@ -436,39 +458,82 @@ private struct VocabularySheet: View {
 
             Divider()
 
-            List {
-                ForEach($settings.vocabulary.rules) { $rule in
-                    HStack(spacing: 10) {
-                        TextField("entendu", text: $rule.heard)
-                            .textFieldStyle(.roundedBorder)
-                        Image(systemName: "arrow.right")
-                            .foregroundStyle(.tertiary)
-                        TextField("écrit", text: $rule.written)
-                            .textFieldStyle(.roundedBorder)
-                        Button("Supprimer", systemImage: "minus.circle.fill") {
-                            settings.vocabulary.rules.removeAll { $0.id == rule.id }
-                        }
-                        .buttonStyle(.plain)
-                        .labelStyle(.iconOnly)
-                        .foregroundStyle(.secondary)
+            // **Un état vide, plutôt qu'une liste vide.** Une zone blanche entre
+            // deux séparateurs ne dit pas si le dictionnaire est vide ou si
+            // l'écran n'a pas fini de charger — et surtout, elle n'explique pas
+            // ce qu'on est censé y mettre.
+            if settings.vocabulary.rules.isEmpty {
+                ContentUnavailableView {
+                    Label("Aucune correction", systemImage: "character.book.closed")
+                } description: {
+                    Text("Ajoutez ci-dessous les termes que la dictée écorche : noms de clients, de produits, sigles du métier.")
+                } actions: {
+                    Button("Partir des termes courants") {
+                        settings.vocabulary = .starter
                     }
-                    .padding(.vertical, 2)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach($settings.vocabulary.rules) { $rule in
+                        HStack(spacing: 10) {
+                            TextField("entendu", text: $rule.heard)
+                                .textFieldStyle(.roundedBorder)
+                            Image(systemName: "arrow.right")
+                                .foregroundStyle(.tertiary)
+                            TextField("écrit", text: $rule.written)
+                                .textFieldStyle(.roundedBorder)
+
+                            // Les champs de la liste sont modifiables : un
+                            // doublon peut naître ici aussi, et c'est la
+                            // dernière règle saisie qui n'aura jamais d'effet.
+                            if duplicates.contains(Self.key(rule.heard)) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .help("Ce terme apparaît plusieurs fois : seule la première ligne est appliquée.")
+                            }
+
+                            Button("Supprimer", systemImage: "minus.circle.fill") {
+                                settings.vocabulary.rules.removeAll { $0.id == rule.id }
+                            }
+                            .buttonStyle(.plain)
+                            .labelStyle(.iconOnly)
+                            .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+                .listStyle(.inset)
             }
-            .listStyle(.inset)
 
             Divider()
 
-            HStack(spacing: 10) {
-                TextField("castral", text: $heard)
-                    .textFieldStyle(.roundedBorder)
-                Image(systemName: "arrow.right")
-                    .foregroundStyle(.tertiary)
-                TextField("Castral", text: $written)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(add)
-                Button("Ajouter", action: add)
-                    .disabled(heard.isEmpty || written.isEmpty)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    TextField("castral", text: $heard)
+                        .textFieldStyle(.roundedBorder)
+                    Image(systemName: "arrow.right")
+                        .foregroundStyle(.tertiary)
+                    TextField("Castral", text: $written)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(add)
+                    Button("Ajouter", action: add)
+                        .disabled(isAddable == false)
+                }
+
+                // **On refuse le doublon au lieu de l'ajouter.** Les règles sont
+                // appliquées dans l'ordre : une seconde règle sur le même terme
+                // entendu ne s'appliquerait jamais, et l'utilisateur croirait
+                // avoir corrigé quelque chose.
+                if let existing = conflicting {
+                    Label(
+                        "« \(existing.heard) » est déjà corrigé en « \(existing.written) ». Modifiez la ligne existante plutôt que d'en ajouter une seconde, qui ne serait jamais appliquée.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(16)
 
@@ -484,9 +549,45 @@ private struct VocabularySheet: View {
         .frame(width: 560, height: 480)
     }
 
+    // MARK: - Doublons
+
+    /// La clé de comparaison : `VocabularyFixer` cherche sans distinguer la
+    /// casse, deux règles qui n'en diffèrent que sont donc bien un doublon.
+    private static func key(_ term: String) -> String {
+        term.trimmingCharacters(in: .whitespaces).lowercased()
+    }
+
+    /// La règle existante que la saisie en cours viendrait doubler.
+    private var conflicting: VocabularyFixer.Rule? {
+        let candidate = Self.key(heard)
+        guard candidate.isEmpty == false else { return nil }
+        return settings.vocabulary.rules.first { Self.key($0.heard) == candidate }
+    }
+
+    /// Les termes présents plus d'une fois dans la liste.
+    private var duplicates: Set<String> {
+        var seen: Set<String> = []
+        var repeated: Set<String> = []
+        for rule in settings.vocabulary.rules {
+            let key = Self.key(rule.heard)
+            guard key.isEmpty == false else { continue }
+            if seen.insert(key).inserted == false { repeated.insert(key) }
+        }
+        return repeated
+    }
+
+    private var isAddable: Bool {
+        Self.key(heard).isEmpty == false
+            && written.trimmingCharacters(in: .whitespaces).isEmpty == false
+            && conflicting == nil
+    }
+
     private func add() {
-        guard heard.isEmpty == false, written.isEmpty == false else { return }
-        settings.vocabulary.rules.append(.init(heard: heard, written: written))
+        guard isAddable else { return }
+        settings.vocabulary.rules.append(.init(
+            heard: heard.trimmingCharacters(in: .whitespaces),
+            written: written.trimmingCharacters(in: .whitespaces)
+        ))
         heard = ""
         written = ""
     }

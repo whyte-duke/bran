@@ -1,14 +1,18 @@
 import SwiftUI
 
-/// « Est-ce que ça tourne, et depuis combien de temps. »
+/// Le bandeau de la bibliothèque.
 ///
-/// C'est la question la plus fréquente et la seule à laquelle l'icône de barre
-/// de menus répond mal. Le bandeau la traite en toutes lettres.
+/// **Il n'est instancié que dans deux situations** — une réunion proposée, ou un
+/// échec à lire — et pendant un enregistrement ni l'une ni l'autre n'est vraie.
+/// Les trois quarts du bandeau décrivaient donc des états qu'il n'a jamais vus :
+/// un bouton « Arrêter », des intitulés « Enregistrement · … », « En pause »,
+/// « Démarrage… », « Finalisation ». Tout cela est parti ; ce qui reste est
+/// exactement ce qui s'affiche.
 struct StatusBanner: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Space.small) {
             Circle()
                 .fill(indicatorColor)
                 .frame(width: 9, height: 9)
@@ -16,15 +20,14 @@ struct StatusBanner: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(headline)
-                    .font(.subheadline.weight(.medium))
-                    .monospacedDigit()
+                    .font(Type.groupHead)
                 Text(subline)
-                    .font(.caption)
+                    .font(Type.meta)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: Space.small)
 
             action
         }
@@ -34,11 +37,7 @@ struct StatusBanner: View {
 
     @ViewBuilder
     private var action: some View {
-        if model.hasOpenSession {
-            Button("Arrêter") { model.stopRecording() }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-        } else if model.pendingMeeting != nil {
+        if model.pendingMeeting != nil {
             Button("Enregistrer") { model.startPendingRecording() }
                 .buttonStyle(.borderedProminent)
         } else {
@@ -48,44 +47,21 @@ struct StatusBanner: View {
     }
 
     private var headline: String {
-        switch model.engine.state {
-        case .recording: "Enregistrement · \(model.elapsedDescription)"
-        case .paused: "En pause · \(model.elapsedDescription)"
-        case .starting: "Démarrage…"
-        case .finalizing: "Finalisation du fichier"
-        case .failed: "Échec"
-        case .idle: model.pendingMeeting != nil ? "Réunion détectée" : "En veille"
-        }
+        model.pendingMeeting != nil ? "Réunion détectée" : "Échec"
     }
 
     private var subline: String {
         if let failure = model.lastFailure { return failure }
 
-        return switch model.engine.state {
-        case .paused:
-            "Le segment est fermé. La reprise ouvrira un nouveau morceau."
-        case .recording, .starting, .finalizing:
-            model.pendingMeeting?.title ?? "Écran entier · \(model.quality.estimatedRate)"
-        case .failed:
-            "Aucun enregistrement en cours."
-        case .idle:
-            if let booking = model.linkedBooking {
-                "Rattaché à « \(booking.displayName) » — rien n'est enregistré tant que vous ne l'avez pas demandé."
-            } else if model.pendingMeeting != nil {
-                "Réunion non reconnue par le CRM. Rien n'est enregistré tant que vous ne l'avez pas demandé."
-            } else {
-                "bran surveille les fenêtres Meet en permanence."
-            }
+        if let booking = model.linkedBooking {
+            return "Rattaché à « \(booking.displayName) » — rien n'est enregistré tant que vous ne l'avez pas demandé."
         }
+        return "Réunion non reconnue par le CRM. Rien n'est enregistré tant que vous ne l'avez pas demandé."
     }
 
+    /// Une proposition n'est pas un état de la machine : elle porte l'accent
+    /// système, comme tout ce qui attend une décision.
     private var indicatorColor: Color {
-        switch model.engine.state {
-        case .recording, .starting: .red
-        case .paused: .orange
-        case .finalizing: .orange
-        case .failed: .yellow
-        case .idle: model.pendingMeeting != nil ? .blue : .secondary
-        }
+        model.pendingMeeting != nil ? .accentColor : Palette.attention
     }
 }

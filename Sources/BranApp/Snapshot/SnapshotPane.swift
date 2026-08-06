@@ -16,6 +16,10 @@ struct SnapshotPane: View {
 
     private var controller: SnapshotController { model.snapshot }
 
+    /// Voir `watchesSecureInput(_:)` : la valeur ne peut pas être lue
+    /// directement dans le `body`, rien ne la publie.
+    @State private var isSecureInputActive = false
+
     var body: some View {
         VStack(spacing: 0) {
             PaneHeader(
@@ -34,12 +38,13 @@ struct SnapshotPane: View {
             content
         }
         .task { await controller.store.reload() }
+        .watchesSecureInput($isSecureInputActive)
     }
 
     @ViewBuilder
     private var notices: some View {
         VStack(spacing: 0) {
-            if controller.settings.isEnabled, HotkeyMonitor.isSecureInputActive {
+            if controller.settings.isEnabled, isSecureInputActive {
                 NoticeRow(
                     text: "Saisie sécurisée active : macOS bloque tout raccourci global tant qu'un champ de mot de passe a le focus. Fermez-le, ou décochez « Saisie sécurisée du clavier » dans le menu Terminal.",
                     symbol: "lock.fill",
@@ -68,6 +73,22 @@ struct SnapshotPane: View {
                 }
             }
         }
+        // **`.clipped()` avant l'animation.** Un bandeau qui entre par le haut
+        // passerait sinon par-dessus l'en-tête pendant toute la transition.
+        .clipped()
+        // Il n'y avait **aucune** animation ici : les `.transition` déclarées
+        // par `NoticeRow` ne se déclenchaient donc jamais, et l'apparition d'un
+        // bandeau faisait sauter toute la liste d'un cran.
+        .branAnimation(Motion.enter, value: noticeSignature)
+    }
+
+    /// Ce qui doit relancer l'animation des bandeaux. Voir `DictationPane`.
+    private var noticeSignature: String {
+        var parts: [String] = []
+        if controller.settings.isEnabled, isSecureInputActive { parts.append("saisie sécurisée") }
+        if let problem = controller.store.problem { parts.append(problem) }
+        if case .failed(let reason) = controller.phase { parts.append(reason.summary) }
+        return parts.joined(separator: "|")
     }
 
     private func repair(for failure: SnapshotFailure) -> (title: String, action: () -> Void)? {
@@ -181,25 +202,60 @@ private struct SnapshotCard: View {
     @State private var isHovering = false
     @State private var isExpanded = false
     @State private var justCopied = false
+    /// Voir `DictationCard` : un booléen seul laisse la première copie éteindre
+    /// le retour de la seconde.
+    @State private var copyTicket = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             text
 
+            // **Déplier montrait le texte, et rien d'autre.** Sur une capture
+            // courte — le cas courant — la carte ne bougeait pas d'un pixel, et
+            // le chevron avait l'air cassé. Le texte tel que le moteur l'a rendu,
+            // avant que `CharacterFixer` ne remplace ses guillemets et ses tirets,
+            // est précisément ce qu'on vient vérifier avant de coller dans un
+            // terminal.
+            if isExpanded, let raw = entry.rawText, raw != entry.text {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Avant corrections typographiques")
+                        .font(Type.metaFaint.weight(.medium))
+                        .foregroundStyle(.tertiary)
+                    Text(raw)
+                        .font(entry.layout == .monospaced ? Type.meta.monospaced() : Type.meta)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
             HStack(spacing: 7) {
+                DisclosureChevron(isExpanded: $isExpanded)
                 metadata
                 Spacer(minLength: 8)
                 actions
             }
         }
         .cardBackground(isHovering: isHovering)
+        // Sans ça, le texte déborde du cadre pendant le redimensionnement.
+        .geometryGroup()
         .onHover { isHovering = $0 }
-        .onTapGesture {
-            withAnimation(.snappy(duration: 0.28)) { isExpanded.toggle() }
-        }
+        .branAnimation(Motion.state, value: isExpanded)
         .animation(.smooth(duration: 0.3), value: isRereading)
         .animation(.smooth(duration: 0.3), value: entry.text)
+        .contextMenu { menu }
         .accessibilityElement(children: .contain)
+        .accessibilityAction(named: isExpanded ? "Replier" : "Déplier") {
+            isExpanded.toggle()
+        }
+        .task(id: copyTicket) {
+            guard copyTicket > 0 else { return }
+            try? await Task.sleep(for: .seconds(1.4))
+            guard Task.isCancelled == false else { return }
+            justCopied = false
+        }
     }
 
     private var isRereading: Bool { controller.isRereading(entry.id) }
@@ -301,28 +357,27 @@ private struct SnapshotCard: View {
         .lineLimit(1)
     }
 
+    /// Voir `DictationCard.actions` : toujours dans l'arbre, seulement
+    /// transparentes, sinon rien de tout ça n'existe au clavier.
     private var actions: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: Space.hair) {
             CardAction(
                 symbol: justCopied ? "checkmark" : "doc.on.doc",
                 help: "Copier le texte",
-                tint: justCopied ? .green : nil
-            ) {
-                controller.copy(entry)
-                justCopied = true
-                Task {
-                    try? await Task.sleep(for: .seconds(1.4))
-                    justCopied = false
-                }
-            }
+                tint: justCopied ? .green : nil,
+                action: copy
+            )
             .disabled(entry.text.isEmpty)
 
-            if isHovering || isRereading {
-                // **La relecture qui sert vraiment** : dans l'autre mise en
-                // page. Avec un moteur déterministe, rejouer à l'identique
-                // rendrait exactement le même texte — alors qu'une sortie de
-                // terminal lue comme de la prose a perdu ses colonnes, et c'est
-                // réparable en un clic.
+            Group {
+                // **La seule relecture qui mérite un bouton** : dans l'autre
+                // mise en page. Avec un moteur déterministe, rejouer à
+                // l'identique rendrait exactement le même texte — alors qu'une
+                // sortie de terminal lue comme de la prose a perdu ses colonnes,
+                // et c'est réparable en un clic. Le second bouton, qui relisait
+                // dans le *même* mode, était le voisin quasi identique d'une
+                // action utile : il est passé dans le menu contextuel, où il ne
+                // dispute plus la place à celle qu'on cherche.
                 CardAction(
                     symbol: otherLayout == .monospaced ? "chevron.left.forwardslash.chevron.right" : "text.alignleft",
                     help: rereadHelp,
@@ -333,30 +388,49 @@ private struct SnapshotCard: View {
                 }
                 .disabled(entry.canRetry == false || isRereading)
 
-                CardAction(
-                    symbol: "arrow.clockwise",
-                    help: entry.canRetry
-                        ? "Relire l'image dans le même mode"
-                        : "Image purgée le \(controller.store.expiryDate(for: entry).formatted(date: .abbreviated, time: .omitted))",
-                    isSpinning: false
-                ) {
-                    controller.reread(entry)
-                }
-                .disabled(entry.canRetry == false || isRereading)
+                CardAction(symbol: "folder", help: "Afficher l'image dans le Finder", action: reveal)
+                    .disabled(entry.canRetry == false)
 
-                CardAction(symbol: "folder", help: "Afficher l'image dans le Finder") {
-                    guard let url = controller.store.imageURL(for: entry) else { return }
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                }
-                .disabled(entry.canRetry == false)
-
-                CardAction(symbol: "trash", help: "Supprimer", tint: .red) {
-                    Task { await controller.store.delete(entry) }
-                }
+                CardAction(symbol: "trash", help: "Supprimer", tint: .red, action: delete)
             }
+            .opacity(isHovering || isRereading ? 1 : 0)
         }
-        .transition(.opacity)
-        .animation(.easeOut(duration: 0.14), value: isHovering)
+        .branAnimation(Motion.hover, value: isHovering || isRereading)
+    }
+
+    /// Les mêmes actions, nommées, au clic droit — plus celles qui n'ont pas
+    /// mérité un bouton.
+    @ViewBuilder
+    private var menu: some View {
+        Button("Copier le texte", action: copy)
+            .disabled(entry.text.isEmpty)
+        Button(isExpanded ? "Replier" : "Déplier") { isExpanded.toggle() }
+        Divider()
+        Button(otherLayout == .monospaced ? "Relire comme du code" : "Relire comme du texte courant") {
+            controller.reread(entry, layout: otherLayout)
+        }
+        .disabled(entry.canRetry == false || isRereading)
+        Button("Relire dans le même mode") { controller.reread(entry) }
+            .disabled(entry.canRetry == false || isRereading)
+        Button("Afficher l'image dans le Finder", action: reveal)
+            .disabled(entry.canRetry == false)
+        Divider()
+        Button("Supprimer", role: .destructive, action: delete)
+    }
+
+    private func copy() {
+        controller.copy(entry)
+        justCopied = true
+        copyTicket += 1
+    }
+
+    private func reveal() {
+        guard let url = controller.store.imageURL(for: entry) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func delete() {
+        Task { await controller.store.delete(entry) }
     }
 
     private var otherLayout: LayoutMode {

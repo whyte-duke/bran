@@ -67,11 +67,11 @@ struct SystemRegionCapturer: RegionCapturer {
         let arguments = interactive
             ? ["-i", "-x", "-o", "-r", "-t", "png", destination.path]
             : ["-x", "-r", "-R", rect, "-t", "png", destination.path]
-        SnapshotLog.record("viseur → screencapture \(arguments.joined(separator: " "))")
+        FeatureLog.record("viseur → screencapture \(arguments.joined(separator: " "))")
         let status = try await run(arguments: arguments)
 
         let size = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? Int) ?? nil
-        SnapshotLog.record("viseur ← code=\(status) fichier=\(size.map { "\($0) octets" } ?? "absent")")
+        FeatureLog.record("viseur ← code=\(status) fichier=\(size.map { "\($0) octets" } ?? "absent")")
 
         // Deux façons d'annuler, et il faut accepter les deux : selon la
         // version de macOS, `screencapture` sort avec 0 ou 1 quand on presse
@@ -86,11 +86,11 @@ struct SystemRegionCapturer: RegionCapturer {
         guard let source = CGImageSourceCreateWithURL(destination as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else {
-            SnapshotLog.record("✗ le PNG écrit par screencapture est indécodable")
+            FeatureLog.record("✗ le PNG écrit par screencapture est indécodable")
             throw SnapshotFailure.selectionFailed("image illisible")
         }
 
-        SnapshotLog.record(
+        FeatureLog.record(
             "image \(image.width)×\(image.height) bpc=\(image.bitsPerComponent) "
             + "bpp=\(image.bitsPerPixel) alpha=\(image.alphaInfo.rawValue) "
             + "espace=\(image.colorSpace?.name.map(String.init(describing:)) ?? "inconnu")"
@@ -101,7 +101,7 @@ struct SystemRegionCapturer: RegionCapturer {
         // l'historique et une encoche qui annonce « rien lu » — alors que
         // l'utilisateur a simplement raté son geste.
         guard image.width > 4, image.height > 4 else {
-            SnapshotLog.record("sélection ignorée : \(image.width)×\(image.height) px, trop petite")
+            FeatureLog.record("sélection ignorée : \(image.width)×\(image.height) px, trop petite")
             return nil
         }
 
@@ -141,7 +141,7 @@ struct SystemRegionCapturer: RegionCapturer {
             space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
         ) else {
-            SnapshotLog.record("✗ impossible de créer le contexte de décodage")
+            FeatureLog.record("✗ impossible de créer le contexte de décodage")
             return nil
         }
 
@@ -153,10 +153,10 @@ struct SystemRegionCapturer: RegionCapturer {
         context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
 
         guard let decoded = context.makeImage() else {
-            SnapshotLog.record("✗ le décodage n'a rien rendu")
+            FeatureLog.record("✗ le décodage n'a rien rendu")
             return nil
         }
-        SnapshotLog.record("image décodée en sRGB, pixels détenus par bran")
+        FeatureLog.record("image décodée en sRGB, pixels détenus par bran")
         return decoded
     }
 

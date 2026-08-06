@@ -206,6 +206,10 @@ final class DictationController {
 
         do {
             let device = AudioInputDevice.device(uid: settings.inputDeviceUID)
+            FeatureLog.record(
+                "dictée → micro « \(device?.name ?? "périphérique système") »"
+                + " (réglage=\(settings.inputDeviceUID ?? "aucun"))"
+            )
             try mic.start(deviceID: device?.id)
             startedAt = .now
             if settings.playsSound { Self.playStartCue() }
@@ -238,10 +242,26 @@ final class DictationController {
     private func startSilenceWatchdog() {
         watchdogTask?.cancel()
         watchdogTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(1200))
+            // Premier contrôle très tôt : si rien n'arrive au bout de 400 ms,
+            // le périphérique imposé est muet. On repart sur le défaut système
+            // avant que l'utilisateur ait fini sa première phrase, plutôt que de
+            // lui annoncer une panne qu'on sait réparer.
+            try? await Task.sleep(for: .milliseconds(400))
             guard let self, Task.isCancelled == false, machine.phase == .capturing else { return }
 
+            if mic.duration == 0, settings.inputDeviceUID != nil {
+                do {
+                    try mic.restartOnSystemDefault()
+                } catch {
+                    FeatureLog.record("micro : la reprise système a échoué", error: error)
+                }
+            }
+
+            try? await Task.sleep(for: .milliseconds(800))
+            guard Task.isCancelled == false, machine.phase == .capturing else { return }
+
             guard mic.duration > 0 else {
+                FeatureLog.record("dictée : aucun échantillon après 1,2 s — le flux ne tourne pas")
                 apply(machine.handle(.failed(.microphoneSilent)))
                 return
             }
@@ -252,6 +272,7 @@ final class DictationController {
             // Un vrai micro a toujours un plancher de bruit. Un pic exactement
             // nul sur trois secondes n'est pas du silence, c'est une panne.
             guard mic.peakLevel <= 0 else { return }
+            FeatureLog.record("dictée : pic resté à zéro après 3 s — le flux rend du silence")
             apply(machine.handle(.failed(.microphoneSilent)))
         }
     }
@@ -268,6 +289,11 @@ final class DictationController {
         let duration = Double(capturedSamples.count) / SpeechAudioFormat.sampleRate
         let peak = mic.peakLevel
         startedAt = nil
+
+        FeatureLog.record(String(
+            format: "dictée ← %d échantillons, %.2f s, pic %.5f (seuils : %.2f s et 0,004)",
+            capturedSamples.count, duration, peak, SpeechAudioFormat.minimumDuration
+        ))
         if settings.playsSound { Self.playStopCue() }
 
         // Deux façons de n'avoir rien dit, et elles méritent le même traitement :

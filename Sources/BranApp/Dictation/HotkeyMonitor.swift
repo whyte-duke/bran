@@ -3,6 +3,7 @@ import BranSpeech
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import Synchronization
 
 /// Le guet des raccourcis globaux.
 ///
@@ -60,9 +61,33 @@ final class HotkeyMonitor {
 
     /// Les touches surveillées, par fonction. Une fonction absente n'est pas
     /// surveillée du tout.
-    private(set) var bindings: [Action: HotkeyBinding] = [:]
+    private(set) var bindings: [Action: HotkeyBinding] = [:] {
+        didSet { refreshWatchedKeys() }
+    }
 
-    var cancelKey: HotkeyBinding = .escape
+    var cancelKey: HotkeyBinding = .escape {
+        didSet { refreshWatchedKeys() }
+    }
+
+    /// Les codes de touche qui méritent qu'on regarde de plus près, lisibles
+    /// depuis le callback du tap.
+    ///
+    /// Le tap voit **tout le clavier du système**. Sans ce filtre, écrire un
+    /// message dans une autre application créerait une tâche par frappe — pour
+    /// que `classify` conclue aussitôt qu'il n'y a rien à faire. À quatre-vingts
+    /// mots la minute ça fait une dizaine de tâches par seconde, et c'est
+    /// précisément le genre de charge qui fait dépasser au callback le budget de
+    /// temps que macOS lui accorde.
+    ///
+    /// Un `Mutex` et non l'état de l'acteur : le callback n'est pas un contexte
+    /// isolé, et il doit pouvoir répondre sans attendre personne.
+    private let watchedKeys = Mutex<Set<UInt16>>([HotkeyBinding.escape.keyCode])
+
+    private func refreshWatchedKeys() {
+        var codes = Set(bindings.values.map(\.keyCode))
+        codes.insert(cancelKey.keyCode)
+        watchedKeys.withLock { $0 = codes }
+    }
 
     /// Appelé sur la boucle principale. Doit rester bref.
     var onSignal: ((Signal) -> Void)?
@@ -176,22 +201,63 @@ final class HotkeyMonitor {
         // `uninstall()`, appelé explicitement.
     }
 
-    // MARK: - Réception (thread du tap, pas la boucle principale)
+    // MARK: - Réception (callback du port Mach)
 
-    /// Appelé par le callback C. Ne fait rien de coûteux : classer l'événement,
-    /// et transmettre. Tout le reste attend la boucle principale.
+    /// Appelé par le callback C. Lit l'événement — il n'est valide que pendant
+    /// l'appel — et rend la main immédiatement.
+    ///
+    /// **Pourquoi ce `Task` et pas `MainActor.assumeIsolated`.** Le callback est
+    /// bien exécuté sur le thread principal : la source est ajoutée à
+    /// `CFRunLoopGetMain()`. `assumeIsolated` était donc formellement correct,
+    /// et c'est précisément ce qui rendait le piège invisible — tout ce que la
+    /// fonction déclenche s'exécutait **à l'intérieur du callback** :
+    ///
+    /// ```
+    ///   callback du port Mach
+    ///     └─ classify → onSignal → hotkeyDown → startCapture
+    ///          ├─ AVAudioEngine.start()        ~30 ms
+    ///          └─ NotchOverlay.show()
+    ///               └─ NSPanel + NSHostingView.layout()   ← SwiftUI complet
+    /// ```
+    ///
+    /// Deux dégâts, tous deux constatés :
+    ///
+    /// - **le tap se fait couper.** macOS accorde un budget de temps au
+    ///   callback ; démarrer le moteur audio et poser un panneau SwiftUI le
+    ///   dépasse. Le système répond `.tapDisabledByTimeout`, et sans le
+    ///   réarmement ci-dessus le raccourci serait mort en silence ;
+    /// - **on tourne hors de toute tâche.** Un callback de `CFRunLoop` n'a
+    ///   aucune information d'exécuteur attachée. Chaque vérification
+    ///   d'isolation insérée par Swift 6 sous cette pile — et SwiftUI en fait
+    ///   une par image dans l'encoche — prend alors le chemin lent du runtime.
+    ///   C'est là que le processus tombait, systématiquement, à chaque appui sur
+    ///   Command droite.
+    ///
+    /// Un `Task { @MainActor }` rend la main au callback tout de suite et
+    /// exécute la suite comme n'importe quel autre travail de l'application.
+    /// L'ordre est conservé : les jobs d'un acteur sont traités dans l'ordre où
+    /// ils sont soumis, donc un appui ne peut pas doubler son relâchement.
     nonisolated private func receive(type: CGEventType, event: CGEvent) {
         // Le réarmement d'abord : c'est la seule branche dont dépend la survie
         // des raccourcis.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            MainActor.assumeIsolated { self.reenable() }
+            Task { @MainActor in self.reenable() }
             return
         }
 
+        // Lu ici, pas dans la tâche : `event` appartient au système et n'est
+        // valide que le temps du callback.
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+
+        // Le filtre porte sur le seul code de touche, jamais sur les
+        // modificateurs : un raccourci à modificateur seul — Command droite —
+        // n'apparaît que dans `flagsChanged`, et son code y est celui de la
+        // touche elle-même. Filtrer sur le masque le manquerait.
+        guard watchedKeys.withLock({ $0.contains(keyCode) }) else { return }
+
         let flags = event.flags
 
-        MainActor.assumeIsolated {
+        Task { @MainActor in
             self.classify(type: type, keyCode: keyCode, flags: flags)
         }
     }

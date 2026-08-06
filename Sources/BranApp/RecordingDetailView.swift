@@ -17,13 +17,13 @@ struct RecordingDetailView: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: Space.gutter) {
                     header
                     facts
                     crmPanel
                     notesEditor
                 }
-                .padding(20)
+                .padding(Space.gutter)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -42,12 +42,14 @@ struct RecordingDetailView: View {
         PlayerView(url: recording.url)
             .aspectRatio(16 / 10, contentMode: .fit)
             .frame(minHeight: 260)
-            .background(.black)
+            // Le noir n'est le bon fond que derrière une image. Derrière un
+            // message d'absence, il ne fait que rendre le message illisible.
+            .background(recording.existsOnDisk ? AnyShapeStyle(.black) : Palette.well)
             .accessibilityLabel("Lecteur vidéo — \(recording.displayTitle)")
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.tight) {
             Text(recording.displayTitle)
                 .font(.title2.weight(.semibold))
             Text(recording.metadata.startedAt.formatted(date: .complete, time: .shortened))
@@ -56,7 +58,7 @@ struct RecordingDetailView: View {
     }
 
     private var facts: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], alignment: .leading, spacing: 12) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: Space.inset)], alignment: .leading, spacing: Space.inset) {
             FactTile(label: "Durée", value: recording.durationDescription)
             FactTile(label: "Poids", value: recording.sizeDescription)
 
@@ -84,8 +86,8 @@ struct RecordingDetailView: View {
         if metadata.transcriptionID == nil, upload == nil {
             notSentPanel
         } else {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: Space.inset) {
+                HStack(spacing: Space.small) {
                     Text("Castral CRM").font(.headline)
 
                     if let company = metadata.companyName {
@@ -107,7 +109,7 @@ struct RecordingDetailView: View {
                     if let fraction = upload.fraction {
                         ProgressView(value: fraction) { Text(upload.description) }
                     } else {
-                        HStack(spacing: 6) {
+                        HStack(spacing: Space.small) {
                             ProgressView().controlSize(.small)
                             Text(upload.description)
                         }
@@ -119,27 +121,27 @@ struct RecordingDetailView: View {
                     // est là mais pas le compte-rendu. Afficher un échec serait
                     // faux : le cron reprendra le compte-rendu tout seul.
                     Label(warning, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .font(.callout)
+                        .foregroundStyle(Palette.attention)
+                        .font(Type.cardBody)
                 }
 
                 if let error = metadata.crmError {
                     HStack(alignment: .top) {
                         Label(error, systemImage: "xmark.octagon.fill")
-                            .foregroundStyle(.red)
-                            .font(.callout)
+                            .foregroundStyle(Palette.broken)
+                            .font(Type.cardBody)
                         Spacer()
                         Button("Réessayer") { model.uploads.retry(recording) }
                     }
                 }
 
                 if let summary = metadata.crmSummary {
-                    HStack(spacing: 10) {
+                    HStack(spacing: Space.small) {
                         if let issue = metadata.crmIssue {
                             Text(issue.replacing("_", with: " "))
-                                .font(.caption.weight(.medium))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
+                                .font(Type.meta.weight(.medium))
+                                .padding(.horizontal, Space.small)
+                                .padding(.vertical, Space.tight)
                                 .background(.tint.opacity(0.15), in: .capsule)
                         }
                         if let temperature = metadata.crmTemperature {
@@ -155,9 +157,7 @@ struct RecordingDetailView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
+            .branWell()
         }
     }
 
@@ -169,7 +169,35 @@ struct RecordingDetailView: View {
     /// raison et la marche à suivre — pas un refus muet.
     @ViewBuilder
     private var notSentPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        if model.uploads.configuration.isConfigured == false {
+            unconfiguredPanel
+        } else {
+            sendPanel
+        }
+    }
+
+    /// CRM non renseigné.
+    ///
+    /// L'écran montrait deux boutons désactivés et rien d'autre : le refus
+    /// était muet, et la seule action possible — ouvrir les réglages — n'était
+    /// proposée nulle part.
+    private var unconfiguredPanel: some View {
+        VStack(alignment: .leading, spacing: Space.small) {
+            Label("Aucun CRM configuré", systemImage: "link.badge.plus")
+                .font(Type.cardTitle)
+
+            Text("bran ne sait pas encore à quelle instance Castral envoyer cet enregistrement. Renseignez l'adresse et la clé dans les réglages : l'envoi et le rattachement au bon rendez-vous deviendront possibles.")
+                .font(Type.cardBody)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Ouvrir les réglages…") { model.showsSettings = true }
+        }
+        .branWell()
+    }
+
+    private var sendPanel: some View {
+        VStack(alignment: .leading, spacing: Space.small) {
             HStack {
                 Label("Pas encore envoyé au CRM", systemImage: "arrow.up.doc")
                     .foregroundStyle(.secondary)
@@ -180,7 +208,6 @@ struct RecordingDetailView: View {
                     ProgressView().controlSize(.small)
                 } else {
                     Button("Vérifier le rattachement") { check() }
-                        .disabled(model.uploads.configuration.isConfigured == false)
                 }
 
                 Button("Envoyer au CRM…") { model.requestUpload(for: recording) }
@@ -190,19 +217,19 @@ struct RecordingDetailView: View {
             .font(.callout)
 
             if let eligibility, let reason = eligibility.blockingReason {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: Space.tight) {
                     Label(reason, systemImage: "xmark.octagon.fill")
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(.red)
+                        .font(Type.cardBody.weight(.medium))
+                        .foregroundStyle(Palette.broken)
 
                     if let remedy = eligibility.remedy {
                         Text(remedy)
-                            .font(.caption)
+                            .font(Type.meta)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    HStack(spacing: 12) {
+                    HStack(spacing: Space.inset) {
                         // Un blocage doit toujours laisser une sortie : le RDV
                         // rapproché n'est peut-être simplement pas le bon.
                         Button("Choisir un autre rendez-vous…") {
@@ -220,13 +247,11 @@ struct RecordingDetailView: View {
                 }
             } else if let eligibility, let booking = eligibility.booking {
                 Label("Rattaché à « \(booking.displayName) »", systemImage: "checkmark.seal.fill")
-                    .font(.callout)
-                    .foregroundStyle(.green)
+                    .font(Type.cardBody)
+                    .foregroundStyle(Palette.done)
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
+        .branWell()
         .task { check() }
     }
 
@@ -246,16 +271,16 @@ struct RecordingDetailView: View {
     }
 
     private var notesEditor: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.small) {
             Text("Notes")
                 .font(.headline)
 
             TextEditor(text: $notes)
                 .font(.body)
                 .scrollContentBackground(.hidden)
-                .padding(8)
+                .padding(Space.small)
                 .frame(minHeight: 140)
-                .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
+                .background(Palette.well, in: .rect(cornerRadius: Radius.field))
                 // Écriture à chaque frappe : le fichier est minuscule et local.
                 // Un enregistrement automatique différé perdrait la dernière
                 // phrase à la fermeture de la fenêtre.
@@ -272,17 +297,15 @@ private struct FactTile: View {
     let value: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: Space.hair) {
             Text(label)
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
             Text(value)
-                .font(.body.weight(.medium))
+                .font(Type.cardTitle)
                 .monospacedDigit()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
+        .branWell()
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label) : \(value)")
     }

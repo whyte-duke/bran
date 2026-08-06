@@ -186,9 +186,18 @@ final class RecordingStore {
         }
     }
 
+    /// Corbeille, jamais suppression.
+    ///
+    /// Une heure de réunion effacée depuis un bouton de 24 points ne se
+    /// récupère pas. `trashItem` rend l'annulation possible sans écrire une
+    /// seule ligne de plus — c'est le Finder qui la porte.
     func delete(_ recording: Recording) async {
-        try? FileManager.default.removeItem(at: recording.url)
-        try? FileManager.default.removeItem(at: root.appending(path: recording.metadata.sidecarName))
+        let manager = FileManager.default
+        try? manager.trashItem(at: recording.url, resultingItemURL: nil)
+        try? manager.trashItem(
+            at: root.appending(path: recording.metadata.sidecarName),
+            resultingItemURL: nil
+        )
         await reload()
     }
 

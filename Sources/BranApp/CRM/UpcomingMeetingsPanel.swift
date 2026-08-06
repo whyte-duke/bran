@@ -9,6 +9,8 @@ struct UpcomingMeetingsPanel: View {
 
     @State private var isExpanded = true
 
+    /// Le panneau porte lui-même son encadré : sans rendez-vous **ni** panne à
+    /// signaler, il ne doit rien dessiner du tout — pas un cadre vide.
     var body: some View {
         if directory.upcoming.isEmpty == false {
             DisclosureGroup(isExpanded: $isExpanded) {
@@ -16,20 +18,22 @@ struct UpcomingMeetingsPanel: View {
                     UpcomingMeetingRow(booking: booking)
                 }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: Space.small) {
                     Text("À venir")
                     if let next = directory.next {
                         Text("· \(relativeStart(of: next))")
                             .foregroundStyle(.secondary)
                     }
                 }
-                .font(.callout.weight(.medium))
+                .font(Type.cardBody.weight(.medium))
             }
+            .branWell()
         } else if let problem = directory.problem {
             Label(problem, systemImage: "exclamationmark.triangle")
-                .font(.caption)
-                .foregroundStyle(.orange)
+                .font(Type.meta)
+                .foregroundStyle(Palette.attention)
                 .lineLimit(2)
+                .branWell()
         }
     }
 
@@ -48,13 +52,13 @@ private struct UpcomingMeetingRow: View {
     let booking: CRMBooking
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: Space.small) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(booking.displayName)
-                    .font(.callout.weight(.medium))
+                    .font(Type.cardBody.weight(.medium))
                     .lineLimit(1)
 
-                HStack(spacing: 5) {
+                HStack(spacing: Space.tight) {
                     // Toutes les dates de l'API sont en UTC ; le métier se
                     // raisonne en heure locale. Conversion à l'affichage.
                     Text(booking.start_at, format: .dateTime.weekday(.abbreviated).hour().minute())
@@ -67,12 +71,12 @@ private struct UpcomingMeetingRow: View {
                             .help("Aucun lead rattaché : l'email du prospect n'a pas de domaine connu.")
                     }
                 }
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             }
 
-            Spacer(minLength: 4)
+            Spacer(minLength: Space.tight)
 
             if let link = booking.meeting_url, let url = URL(string: link) {
                 Link(destination: url) {

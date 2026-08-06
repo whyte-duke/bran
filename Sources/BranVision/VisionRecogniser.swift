@@ -35,7 +35,7 @@ public struct VisionRecogniser: OCREngine {
 
     /// Journal du moteur lui-même.
     ///
-    /// Séparé de `SnapshotLog`, qui vit dans l'application : ce module ne doit
+    /// Séparé de `FeatureLog`, qui vit dans l'application : ce module ne doit
     /// dépendre de rien. Visible avec
     /// `log stream --predicate 'subsystem == "com.opahventures.bran"'`.
     private static let logger = Logger(subsystem: "com.opahventures.bran", category: "vision")
