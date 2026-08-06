@@ -278,6 +278,20 @@ public final class AppModel {
             return dictation.isBusy || snapshot.isBusy
         })
 
+        // Le clic sur la pilule est le geste de retour. Un échec passe par
+        // `lastFailure`, comme tous les autres : le panneau n'a pas de place
+        // pour l'expliquer, et un geste qui échoue en silence est ce qui apprend
+        // à ne plus cliquer.
+        attention?.onReturn = { [weak self] identity in
+            guard let self else { return }
+            switch LaneReturn.go(to: identity) {
+            case .raised:
+                lastFailure = nil
+            case .appOnly(let reason), .notFound(let reason):
+                lastFailure = reason
+            }
+        }
+
         watch.onVerdict = { [weak self] verdict in
             guard let self else { return }
             attention?.update(verdict, enabled: watchSettings.showsOverlay)

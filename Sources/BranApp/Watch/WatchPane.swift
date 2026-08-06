@@ -1,3 +1,4 @@
+import AppKit
 import BranWatch
 import SwiftUI
 
@@ -11,6 +12,14 @@ import SwiftUI
 struct WatchPane: View {
     @Bindable var model: AppModel
     @Binding var query: String
+
+    /// Ce que le dernier geste de retour n'a pas su faire.
+    ///
+    /// L'état est local et non dans `AppModel.lastFailure` : ici, contrairement
+    /// au panneau flottant, on sait exactement où l'écrire — juste au-dessus de
+    /// la liste où l'on vient de cliquer — et l'avertissement disparaît au
+    /// prochain retour réussi, sans que l'utilisateur ait à le congédier.
+    @State private var returnProblem: String?
 
     private var controller: WatchController { model.watch }
 
@@ -48,6 +57,19 @@ struct WatchPane: View {
 
             if let problem = controller.store.problem {
                 NoticeRow(text: problem, symbol: "externaldrive.badge.xmark", tint: .orange)
+            }
+
+            if let problem = returnProblem {
+                NoticeRow(text: problem, symbol: "arrow.uturn.backward.circle", tint: .orange) {
+                    // La seule réparation possible quand c'est l'Accessibilité
+                    // qui manque. Elle est déjà accordée dans le cas nominal —
+                    // la dictée ne marcherait pas sans — donc ce bouton ne
+                    // s'affiche qu'après une révocation.
+                    if HotkeyMonitor.isTrusted == false {
+                        Button("Ouvrir les Réglages") { _ = SystemSettings.reRequestAccessibility() }
+                            .controlSize(.small)
+                    }
+                }
             }
 
             if case .unavailable(let reason) = controller.human {
@@ -97,13 +119,32 @@ struct WatchPane: View {
                     summary
 
                     ForEach(visible, id: \.identity.key) { lane in
-                        LaneCard(lane: lane, isNext: lane.identity == controller.verdict.next?.identity)
+                        LaneCard(
+                            lane: lane,
+                            isNext: lane.identity == controller.verdict.next?.identity,
+                            onReturn: { goBack(to: lane) }
+                        )
                     }
                 }
                 .padding(.horizontal, 26)
                 .padding(.vertical, 18)
             }
             .animation(.snappy(duration: 0.25), value: controller.verdict.lanes.count)
+        }
+    }
+
+    /// **Le critère de succès du produit** : « revenir sur une voie qui attend
+    /// coûte une seule action ». C'est ce clic-là.
+    ///
+    /// Le succès ne dit rien — la fenêtre visée est devant, on l'a sous les yeux
+    /// et l'application n'est même plus au premier plan. Seuls les deux échecs
+    /// parlent, parce qu'eux ne se voient pas.
+    private func goBack(to lane: Lane) {
+        switch LaneReturn.go(to: lane.identity) {
+        case .raised:
+            returnProblem = nil
+        case .appOnly(let reason), .notFound(let reason):
+            returnProblem = reason
         }
     }
 
@@ -221,10 +262,17 @@ struct WatchPane: View {
 ///
 /// La raison n'est pas un ornement : une alerte dont on ne peut pas expliquer
 /// l'origine finit par être ignorée, et un veilleur ignoré ne sert à rien.
+///
+/// **La carte entière est le bouton de retour.** Une liste qui dit qui vous
+/// attend sans savoir vous y ramener est une liste qu'on lit puis qu'on quitte
+/// pour aller chercher la fenêtre à la main — soit exactement le coût que le
+/// produit prétend supprimer. Il n'y a donc pas de petit bouton dans un coin :
+/// la ligne qu'on regarde est la ligne qu'on clique.
 private struct LaneCard: View {
     let lane: Lane
     /// Vrai pour la voie que le routeur désigne. Une seule à la fois.
     let isNext: Bool
+    let onReturn: () -> Void
 
     @State private var isHovering = false
 
@@ -281,9 +329,35 @@ private struct LaneCard: View {
             }
         }
         .cardBackground(isHovering: isHovering)
-        .onHover { isHovering = $0 }
+        // `cardBackground` pose déjà `contentShape(.rect)` : la zone cliquable
+        // est le rectangle plein de la carte, y compris ses blancs, et pas
+        // seulement le texte.
+        .onTapGesture(perform: onReturn)
+        .onHover { hovering in
+            isHovering = hovering
+            setCursor(hovering)
+        }
+        // Une carte peut disparaître sous le curseur — un verdict qui change
+        // suffit — et `onHover(false)` n'arrive alors jamais. Sans ce rappel, la
+        // main resterait sur la pile des curseurs.
+        .onDisappear { setCursor(false) }
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Revient sur cette voie")
+        .accessibilityAction(.default, onReturn)
     }
+
+    private func setCursor(_ pointing: Bool) {
+        guard pointing != isPointing else { return }
+        isPointing = pointing
+        if pointing { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+    }
+
+    /// L'état réel de la pile de curseurs, distinct de `isHovering` qui pilote
+    /// le dessin : les deux se désynchronisent au démontage de la vue, et
+    /// dépiler un curseur qu'on n'a pas empilé change le pointeur de toute
+    /// l'application.
+    @State private var isPointing = false
 
     private var tint: Color {
         switch lane.state {
