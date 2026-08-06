@@ -14,6 +14,22 @@ struct BranSpike {
                 let interval = Double(value(of: "--interval", in: arguments) ?? "") ?? 5
                 try await TitlesProbe(interval: .seconds(interval)).run()
 
+            case "watch":
+                let mode = WatchProbe.Mode(rawValue: value(of: "--mode", in: arguments) ?? "") ?? .watch
+                let interval = Double(value(of: "--interval", in: arguments) ?? "") ?? 2
+                let delta = Double(value(of: "--delta", in: arguments) ?? "") ?? 0.02
+                let busy = Double(value(of: "--busy", in: arguments) ?? "") ?? 0.01
+                let minutes = Double(value(of: "--alert-after", in: arguments) ?? "") ?? 3
+                let ticks = Int(value(of: "--ticks", in: arguments) ?? "") ?? 0
+                try await WatchProbe(
+                    mode: mode,
+                    interval: .seconds(interval),
+                    delta: delta,
+                    busyRatio: busy,
+                    alertMinutes: minutes,
+                    ticks: ticks
+                ).run()
+
             case "record":
                 let duration = Double(value(of: "--duration", in: arguments) ?? "") ?? 30
                 let output = value(of: "--output", in: arguments).map(URL.init(fileURLWithPath:))
@@ -67,6 +83,22 @@ struct BranSpike {
               Journalise en continu les titres de fenêtres et le verdict de
               MeetTitleMatcher. À lancer PENDANT une vraie réunion Meet, en
               changeant d'onglet, pour mesurer les vrais formats de titre.
+
+          watch [--mode occlusion|cursor|watch] [--interval 2] [--delta 0.02]
+                [--busy 0.01] [--alert-after 3]
+              Mesure si le mouvement de pixels distingue une machine qui
+              travaille d'une machine qui attend. Trois modes, dans cet ordre :
+
+                occlusion  Une capture par fenêtre, puis un verdict : la capture
+                           par fenêtre traverse-t-elle l'occultation ? Si oui,
+                           une voie cachée derrière une autre reste observable.
+                cursor     Le test qui peut tuer le projet. Un terminal qui
+                           ATTEND montre un curseur qui clignote ; un terminal
+                           qui TRAVAILLE peut rester figé entre deux outils. Si
+                           les ratios ne se séparent pas, le signal est mort.
+                watch      La vraie mesure, sur une journée. Alertes annotables,
+                           plus lecture de ~/.claude/projects (trois champs,
+                           jamais de contenu).
 
           record [--duration 30] [--scale 1] [--codec h264|hevc] [--output <chemin.mp4>]
               Enregistre l'écran + l'audio système + le micro via SCRecordingOutput

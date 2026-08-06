@@ -26,6 +26,13 @@ let package = Package(
         // rectangles nus, sans image et sans autorisation.
         .target(name: "BranVision"),
 
+        // Le contrat une quatrième fois, pour le veilleur de sessions
+        // parallèles : identité des voies, machine à états, résolveur, lecture
+        // des transcriptions. Rien de tout ça n'a besoin d'un écran ni d'une
+        // autorisation — c'est là que se joue la justesse des alertes, donc
+        // c'est là que doivent être les tests.
+        .target(name: "BranWatch"),
+
         // **L'exception assumée, et la seule.** AppKit et CoreGraphics sont
         // autorisés ici : cette cible n'est pas de la logique pure et ne
         // prétend pas l'être — elle énumère les fenêtres du système et réduit
@@ -49,6 +56,7 @@ let package = Package(
                 "BranCore",
                 "BranSpeech",
                 "BranVision",
+                "BranWatch",
                 "BranWindows",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ]
@@ -63,6 +71,7 @@ let package = Package(
                 "BranCore",
                 "BranSpeech",
                 "BranVision",
+                "BranWatch",
                 "BranWindows",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ]
@@ -71,5 +80,6 @@ let package = Package(
         .testTarget(name: "BranCoreTests", dependencies: ["BranCore"]),
         .testTarget(name: "BranSpeechTests", dependencies: ["BranSpeech"]),
         .testTarget(name: "BranVisionTests", dependencies: ["BranVision"]),
+        .testTarget(name: "BranWatchTests", dependencies: ["BranWatch"]),
     ]
 )
