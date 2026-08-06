@@ -79,16 +79,66 @@ public struct LaneIdentity: Hashable, Sendable, Codable {
 
     /// Une fenêtre quelconque : navigateur, application de bureau, terminal sans
     /// transcription lisible.
+    ///
+    /// **Le titre nettoyé n'est pas seulement la clé, il est parfois l'aveu du
+    /// travail.** Un titre de terminal nomme la machine — `root@kvm4` — jamais
+    /// ce qu'on y fait, et le même serveur porte souvent trois chantiers. Le
+    /// seul remède honnête est de demander au shell distant d'écrire la vérité :
+    /// c'est le rôle du fragment `precmd` documenté dans le README, qui fait
+    /// écrire « scanner · feat/ocr ». Quand ce titre-là arrive, on cesse de
+    /// deviner et la précision monte d'un cran.
     public static func window(
         bundleIdentifier: String?,
         applicationName: String,
         title: String
     ) -> LaneIdentity {
-        LaneIdentity(
-            key: "win:\(bundleIdentifier ?? applicationName):\(Self.stableTitle(title))",
-            precision: .fragile,
-            displayName: title.isEmpty ? applicationName : title
+        let stable = Self.stableTitle(title)
+        let key = "win:\(bundleIdentifier ?? applicationName):\(stable)"
+
+        guard let work = Self.declaredWork(in: stable) else {
+            return LaneIdentity(
+                key: key,
+                precision: .fragile,
+                displayName: title.isEmpty ? applicationName : title
+            )
+        }
+
+        return LaneIdentity(
+            key: key,
+            precision: .stable,
+            displayName: stable,
+            workingDirectory: work.folder,
+            branch: work.branch
         )
+    }
+
+    /// Le titre qu'un shell instrumenté écrit lui-même : « scanner · feat/ocr ».
+    ///
+    /// Le séparateur est celui de `shortName(for:branch:)`, et ce n'est pas une
+    /// coïncidence : les deux nomment la même chose, l'une depuis une
+    /// transcription lue en local, l'autre depuis un shell à l'autre bout d'un
+    /// `ssh` où aucune transcription n'est lisible.
+    ///
+    /// **Pourquoi ça vaut `.stable` et pas `.exact`.** Le titre survit à un
+    /// redémarrage de l'émulateur et à un redimensionnement, donc il dépasse
+    /// `.fragile`. Mais rien ne garantit qu'un autre programme n'écrira pas le
+    /// même titre, et changer de branche change bien de voie — ce qui est
+    /// correct, mais reste une déduction et non une déclaration de session.
+    ///
+    /// Les gardes contre le hasard : exactement un séparateur, et une branche
+    /// sans espace. Un nom de branche git n'en contient pas ; une phrase
+    /// française qui utiliserait « · » comme puce en contient toujours.
+    static func declaredWork(in title: String) -> (folder: String, branch: String)? {
+        let parts = title.components(separatedBy: " · ")
+        guard parts.count == 2 else { return nil }
+
+        let folder = parts[0].trimmingCharacters(in: .whitespaces)
+        let branch = parts[1].trimmingCharacters(in: .whitespaces)
+        guard folder.isEmpty == false, branch.isEmpty == false,
+              branch.contains(" ") == false
+        else { return nil }
+
+        return (folder, branch)
     }
 
     /// « /Users/x/Documents/…/castral/crm » + « feat/recorder-api »
@@ -101,24 +151,17 @@ public struct LaneIdentity: Hashable, Sendable, Codable {
 
     /// Retire d'un titre ce qui bouge tout seul, pour qu'une même fenêtre garde
     /// la même clé : compteurs de notification, indicateur de modification,
-    /// caractères d'animation d'un spinner.
+    /// caractères d'animation d'un spinner, géométrie de l'émulateur, drapeaux
+    /// de tmux.
     ///
     /// Sans ça, un titre qui passe de « ⠂ Compilation » à « ⠄ Compilation »
     /// crée une nouvelle voie à chaque tic, et la file d'attente se remplit de
     /// fantômes.
-    static func stableTitle(_ title: String) -> String {
-        var cleaned = title
-
-        // Compteurs entre parenthèses en tête : « (3) Boîte de réception ».
-        if cleaned.hasPrefix("(") , let close = cleaned.firstIndex(of: ")") {
-            cleaned = String(cleaned[cleaned.index(after: close)...])
-        }
-
-        let noise = CharacterSet(charactersIn: "⠁⠂⠄⡀⢀⠠⠐⠈⣾⣽⣻⢿⡿⣟⣯⣷•●○◐◓◑◒")
-        cleaned = cleaned.unicodeScalars
-            .filter { noise.contains($0) == false }
-            .reduce(into: "") { $0.unicodeScalars.append($1) }
-
-        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    ///
+    /// Les règles vivent dans `TitleNoise`, chacune nommée et justifiée par
+    /// l'émulateur qu'elle vise. Elles n'ont pas leur place ici : ce type dit ce
+    /// qu'est une voie, pas ce qu'un terminal a l'habitude d'écrire.
+    public static func stableTitle(_ title: String) -> String {
+        TitleNoise.strip(title)
     }
 }
