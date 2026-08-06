@@ -141,3 +141,45 @@ justified by a delta rather than by intuition.
 
 **Where to start:** `Sources/BranWindows/` — the shared enumeration API is
 already there. The missing piece is a scheduler in front of it, not a new call.
+
+---
+
+## Give Design.swift a width scale, or decide it should not have one
+
+**What:** decide whether component and sheet widths belong in `Design.swift`
+alongside `Space`, `Radius` and `Type`, and if so, add the scale.
+
+**Why:** migrating the views to the design tokens on 2026-08-06 closed three
+missing typographic steps but exposed a fourth gap that is still open. `Space` is
+a spacing scale; widths are a different decision and have no home. What exists
+today, decided one call site at a time:
+
+```
+  BookingPickerSheet          680 × 620
+  VocabularySheet             560 × 480
+  sidebar column              200 / 224 / 280   (min / ideal / max)
+  download ProgressView       90
+  HotkeyField                 minWidth 130
+```
+
+Five widths, five independent decisions, no rule connecting them. The two sheets
+in particular are the same kind of object at two different sizes, and nothing
+says which is right.
+
+**Pros:** the two sheets stop disagreeing, and the next sheet has an answer
+before someone has to invent one. It is also the last category of literal number
+left in the views after the migration — `Design.swift` opens on "a view contains
+no number", and widths are the remaining exception.
+
+**Cons:** a scale invented from five samples is a guess wearing a token's
+clothes, which is worse than five honest literals. Component widths are also
+genuinely content-driven in a way spacing is not: `HotkeyField`'s 130 exists
+because "⌃⌥⌘Space" has to fit, not because 130 is a good number.
+
+**Depends on:** nothing technically. It needs a judgement call, and probably one
+more sheet before there is enough evidence to generalise from.
+
+**Where to start:** the `TODO(design)` comments left in place by the migration —
+`LibraryView.swift`, `CRM/BookingPickerSheet.swift`,
+`Dictation/DictationSettingsSection.swift`. Each one names the width it wanted
+and why the existing scale did not fit.
