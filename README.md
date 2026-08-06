@@ -415,20 +415,41 @@ model loading, the watcher sampling, a recording in progress — under the headi
 "En ce moment", because those are simultaneous states and not a measured cause.
 
 **Baseline, MacBook Pro M2 Pro (12 cores, 8P + 4E, 16 GB), bran idle**: watcher
-on, nothing recording, no dictation, Parakeet on disk but not in memory. Sampled
-every 2 s for 5 minutes with the same kernel counters the meter itself reads —
-`proc_pid_rusage` for CPU, `phys_footprint` for memory.
+on, nothing recording, no dictation, Parakeet on disk but not in memory. 90
+samples over 3 minutes, read with the same kernel counters the meter itself uses
+— `proc_pid_rusage` for CPU, `phys_footprint` for memory.
 
 | | reading | share of the machine |
 |---|---|---|
-| CPU | 0.01 % median, 0.05 % mean, 0.13 % peak | 0.001 % of 12 cores |
-| Memory | 68.7 MB | 0.40 % of 16 GB |
+| CPU | 0.95 % median, 2.2 % mean, 5.6 % peak | 0.08 % of 12 cores, median |
+| Memory | 68.1 MB | 0.40 % of 16 GB |
 
-So the menu bar item reads `<1·<1` at rest, and the meter's own loop — two
-system calls every 2 s, off the main thread — measured **0.0001 % of one core**,
-pushing one label update in 120 ticks. Idle really is idle. Constraint C10 says a
-CPU/energy ceiling is a success criterion rather than a detail; this is the first
-time it has had an instrument, and that table is its first entry.
+The spread between median and peak is the watcher, not noise: it samples window
+thumbnails every 4 s, so the cost arrives in bursts rather than as a steady
+draw. The menu bar item reads `<1·<1` at rest, and the meter's own loop — two
+system calls every 2 s, off the main thread — costs about 0.004 % of one core,
+pushing one label update in 120 ticks.
+
+Constraint C10 says a CPU/energy ceiling is a success criterion rather than a
+detail; this is the first time it has had an instrument, and that table is its
+first entry.
+
+**A correction worth keeping, because it is the reason to distrust round
+numbers.** The first version of this table read 0.01 % median, and it was wrong
+by a factor of 41.67. `proc_pid_rusage` documents `ri_user_time` and
+`ri_system_time` as nanoseconds and does not deliver them: on Apple Silicon those
+fields count `mach_absolute_time` units, which are 41.67 ns each. Burning one
+wall second on a single thread returns a delta of about 24 million, not one
+billion.
+
+So the meter was under-reporting the processor 24-fold. A Parakeet load pinning a
+whole core would have displayed 4 % instead of 100 % — the exact event the
+instrument exists to show, hidden by the instrument. Every unit test passed
+throughout, because they all verify the arithmetic *assuming* nanoseconds; the
+defect lived at the boundary between the kernel and the calculation, where there
+was no test at all. It only surfaced by measuring against a known quantity. On
+Intel the timebase is 1/1 and the bug does not exist, which is how it survived
+being written.
 
 Two conventions to know before comparing against anything else:
 
