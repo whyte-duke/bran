@@ -14,7 +14,14 @@ APP_NAME="bran"
 CONFIG="${1:-debug}"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-DEST="$HOME/Applications/$APP_NAME.app"
+
+# La destination est surchargeable, et ce n'est pas de la souplesse gratuite :
+# sans ça, la seule façon de vérifier que ce script produit encore un bundle
+# valide est d'écraser l'application installée — donc de la faire quitter, alors
+# qu'elle est peut-être en train d'enregistrer une réunion.
+#
+#   BRAN_DEST=/tmp/essai.app zsh Scripts/build-app.sh
+DEST="${BRAN_DEST:-$HOME/Applications/$APP_NAME.app}"
 
 cd "$ROOT"
 
