@@ -148,7 +148,13 @@ private struct SidebarItem: View {
             HStack(spacing: Self.gap) {
                 Image(systemName: pane.symbol)
                     .frame(width: Self.iconWidth)
+                    // L'accent porte la sélection **ici**, sur un glyphe, et pas
+                    // en fond : un symbole coloré sur un fond neutre garde son
+                    // contraste quel que soit l'accent choisi, alors qu'un fond
+                    // coloré impose sa couleur au texte posé dessus.
+                    .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                 Text(pane.label)
+                    .fontWeight(isSelected ? .medium : .regular)
                 Spacer(minLength: Space.tight)
                 if let badge {
                     Text(badge)
@@ -169,20 +175,30 @@ private struct SidebarItem: View {
         .branAnimation(Motion.hover, value: isHovering)
     }
 
-    /// **Ni blanc sur `.tint`, ni couleur imposée au texte.**
+    /// **Aucune couleur d'accent en fond, et c'est le fond du sujet.**
     ///
-    /// La sélection était peinte en `.tint` avec du texte blanc dessus. Mesuré :
-    /// dès que l'accent système est jaune ou vert — deux des huit choix qu'offre
-    /// macOS — le contraste tombe à ~1,4:1, très en dessous du seuil lisible de
-    /// 4,5:1. La ligne sélectionnée devenait la moins lisible de la colonne.
+    /// Trois versions de ce code se sont succédé, et les deux premières avaient
+    /// le même défaut sous des formes différentes.
     ///
-    /// `.selection` porte déjà la bonne couleur de fond, le bon contraste de
-    /// texte, et l'état « fenêtre au second plan » que le blanc en dur ignorait
-    /// complètement. Le texte n'a donc plus besoin qu'on lui impose quoi que ce
-    /// soit : il reste en `.primary` dans les trois états.
+    /// 1. Fond `.tint`, texte blanc en dur. Dès que l'accent système est jaune
+    ///    ou vert — deux des huit choix qu'offre macOS — le contraste tombe à
+    ///    ~1,4:1, très loin du seuil lisible de 4,5:1.
+    /// 2. Fond `.selection`, texte `.primary`. Le problème s'inverse au lieu de
+    ///    disparaître : `.selection` rend l'accent saturé, et `.primary` est
+    ///    **noir** en thème clair. Accent bleu, thème clair — c'est-à-dire la
+    ///    configuration macOS **par défaut** — donnait du noir sur du bleu
+    ///    foncé. Pire que le point de départ, et sur le cas le plus courant.
+    ///
+    /// La leçon est qu'aucune couleur de texte fixe ne peut être correcte sur un
+    /// fond que l'utilisateur choisit. Donc on ne met pas l'accent en fond. Le
+    /// fond reste un matériau neutre, dont le contraste avec `.primary` est
+    /// garanti dans les deux thèmes, et **l'accent passe sur le symbole**, où il
+    /// n'a personne à porter. La graisse du libellé fait le reste : la sélection
+    /// se voit sans dépendre d'une seule couleur, ce qui la rend aussi lisible
+    /// en vision daltonienne.
     private var background: AnyShapeStyle {
-        if isSelected { return Palette.selection }
-        if isHovering { return AnyShapeStyle(.quaternary.opacity(0.5)) }
+        if isSelected { return AnyShapeStyle(.quaternary) }
+        if isHovering { return AnyShapeStyle(.quinary) }
         return AnyShapeStyle(.clear)
     }
 }
