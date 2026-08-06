@@ -350,3 +350,55 @@ struct ResourceReadingTests {
         #expect(label.replacingOccurrences(of: ResourceFormat.figureSpace, with: "") == "2·2")
     }
 }
+
+// MARK: - La frontière entre le noyau et le calcul
+
+/// **Les tests que le premier jet ne pouvait pas avoir.**
+///
+/// Tout le reste de ce fichier vérifie l'arithmétique *en supposant* que le
+/// noyau rend des nanosecondes. Il n'en rend pas : `proc_pid_rusage` compte des
+/// unités de `mach_absolute_time`, qui valent 41,67 ns sur Apple Silicon. Le
+/// défaut vivait exactement là où il n'y avait aucun test — entre l'appel
+/// système et le calcul — et il faisait afficher 4 % un chargement de modèle qui
+/// occupait un cœur entier.
+@Suite("Unités du temps processeur")
+struct ResourceTimebaseTests {
+
+    @Test("Sur Apple Silicon, une unité mach vaut 41,67 nanosecondes")
+    func appleSilicon() {
+        // 125/3 est la base de temps mesurée sur M2 Pro.
+        let ticks: UInt64 = 23_996_610
+        let nanoseconds = ResourceMath.nanoseconds(machTicks: ticks, numer: 125, denom: 3)
+        #expect(nanoseconds != nil)
+        // Une seconde de mur brûlée sur un fil doit rendre ~1 milliard de ns.
+        let seconds = Double(nanoseconds ?? 0) / 1e9
+        #expect(seconds > 0.95 && seconds < 1.05)
+    }
+
+    @Test("Sur Intel, la conversion est l'identité")
+    func intel() {
+        #expect(ResourceMath.nanoseconds(machTicks: 1_000_000, numer: 1, denom: 1) == 1_000_000)
+    }
+
+    @Test("Une base de temps nulle ne divise pas par zéro")
+    func degenerate() {
+        #expect(ResourceMath.nanoseconds(machTicks: 42, numer: 125, denom: 0) == nil)
+        #expect(ResourceMath.nanoseconds(machTicks: 42, numer: 0, denom: 3) == nil)
+    }
+
+    @Test("Un compteur absurde rend inconnu au lieu de déborder")
+    func overflow() {
+        #expect(ResourceMath.nanoseconds(machTicks: .max, numer: 125, denom: 3) == nil)
+    }
+
+    @Test("Le pourcentage traverse la conversion sans se perdre")
+    func endToEnd() {
+        // Un cœur saturé pendant deux secondes : 2 s de temps CPU sur 2 s de mur.
+        let ticks = UInt64(2.0 * 1e9 / (125.0 / 3.0))
+        let nanoseconds = ResourceMath.nanoseconds(machTicks: ticks, numer: 125, denom: 3)
+        let percent = ResourceMath.cpuPercent(deltaNanoseconds: nanoseconds ?? 0, elapsed: 2)
+        #expect(percent != nil)
+        // Convention Moniteur d'activité : 100 % = un cœur.
+        #expect(abs((percent ?? 0) - 100) < 1)
+    }
+}

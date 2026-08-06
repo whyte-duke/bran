@@ -154,8 +154,25 @@ enum LaneReturn {
             return (WindowCandidate(owner: owner, title: window.title), app)
         }
 
-        if let winner = WindowChoice.best(among: listed.map(\.0), for: identity),
-           let match = listed.first(where: { $0.0 == winner }) {
+        // **Pour une voie de fenêtre, le propriétaire est une condition, pas un
+        // bonus.** `WindowChoice` note le propriétaire favorablement mais accepte
+        // un titre qui correspond chez n'importe qui. Le cas concret : la voie
+        // est `win:com.apple.TextEdit:Notes`, TextEdit tourne mais sa fenêtre a
+        // été fermée, et Safari a un onglet intitulé « Notes ». Le score de
+        // Safari passe, et le geste de retour vous emmène dans le navigateur.
+        //
+        // Une voie Claude Code n'a pas ce problème : elle n'a pas de
+        // propriétaire par construction — elle vient d'une transcription, pas
+        // d'une fenêtre — donc la recherche reste ouverte à toutes les
+        // applications, ce qui est exactement son but.
+        let searchable: [(WindowCandidate, NSRunningApplication)] = {
+            guard case .window = LaneTarget(key: identity.key) else { return listed }
+            let owned = Set(apps.map(\.processIdentifier))
+            return listed.filter { owned.contains($0.1.processIdentifier) }
+        }()
+
+        if let winner = WindowChoice.best(among: searchable.map(\.0), for: identity),
+           let match = searchable.first(where: { $0.0 == winner }) {
             match.1.activate()
             return .appOnly(reason: reason)
         }
@@ -180,6 +197,22 @@ enum LaneReturn {
         of app: NSRunningApplication
     ) -> [(title: String, element: AXUIElement)] {
         let application = AXUIElementCreateApplication(app.processIdentifier)
+
+        // **Sans ce délai, un clic sur la pilule peut geler bran.**
+        // `AXUIElementCopyAttributeValue` est synchrone et attend la réponse de
+        // l'application visée. Une application bloquée reste dans
+        // `runningApplications` et répond à `activate()` : elle a l'air vivante.
+        // L'appel d'accessibilité, lui, attend le délai par défaut — six
+        // secondes — sur le fil principal, et pendant ce temps l'interface de
+        // bran ne répond plus. Un geste censé faire gagner du temps se
+        // transformerait en roue qui tourne.
+        //
+        // 250 ms est très au-dessus de ce que met une application saine
+        // (quelques millisecondes) et très en dessous de ce qui se remarque. Au
+        // pire on retombe sur le geste dégradé, qui amène quand même la bonne
+        // application au premier plan.
+        AXUIElementSetMessagingTimeout(application, 0.25)
+
         var raw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &raw) == .success,
               let windows = raw as? [AXUIElement]

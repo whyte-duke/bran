@@ -110,6 +110,50 @@ public enum ResourceMath {
         guard total > 0 else { return nil }
         return min(100, Double(footprint) / Double(total) * 100)
     }
+
+    /// Convertit un temps processeur en **nanosecondes**, depuis les unités que
+    /// le noyau rend réellement.
+    ///
+    /// **Le bug que cette fonction répare, et pourquoi aucun test ne l'a vu.**
+    /// `ri_user_time` et `ri_system_time` de `proc_pid_rusage` sont documentés
+    /// « nanoseconds » et ne le sont pas : sur Apple Silicon ils comptent des
+    /// **unités de `mach_absolute_time`**. Mesuré sur cette machine, en brûlant
+    /// une seconde de mur sur un seul fil :
+    ///
+    /// ```
+    ///   mur           1 000 000 083 ns
+    ///   delta rusage     23 996 610
+    ///   ratio                 0,024      ← soit exactement 1/41,67
+    ///   timebase mach       125/3 = 41,67 ns par unité
+    /// ```
+    ///
+    /// Le moniteur sous-estimait donc le processeur d'un facteur **24** : un
+    /// chargement de Parakeet qui occupe un cœur entier s'affichait à 4 % au lieu
+    /// de 100 %. C'est-à-dire précisément l'événement que l'instrument existe
+    /// pour montrer, rendu invisible par l'instrument lui-même.
+    ///
+    /// Les tests de `cpuPercent` ne pouvaient rien y faire : ils vérifient
+    /// l'arithmétique **en supposant** des nanosecondes. Le défaut vivait à la
+    /// frontière entre le noyau et le calcul, là où il n'y avait rien. D'où cette
+    /// fonction, qui est pure et donc testable, plutôt qu'une multiplication
+    /// enfouie dans la sonde.
+    ///
+    /// `numer` et `denom` viennent de `mach_timebase_info`. Sur Intel ils valent
+    /// 1/1 et cette fonction est l'identité — ce qui explique que le défaut ait
+    /// pu survivre : il n'existe pas sur les machines où ce code a été écrit à
+    /// l'origine.
+    public static func nanoseconds(
+        machTicks: UInt64,
+        numer: UInt32,
+        denom: UInt32
+    ) -> UInt64? {
+        guard denom > 0, numer > 0 else { return nil }
+        // Le produit peut déborder pour des compteurs absurdes ; un moniteur n'a
+        // pas le droit de tuer ce qu'il observe.
+        let (product, overflowed) = machTicks.multipliedReportingOverflow(by: UInt64(numer))
+        guard overflowed == false else { return nil }
+        return product / UInt64(denom)
+    }
 }
 
 // MARK: - La fenêtre glissante

@@ -1,3 +1,4 @@
+import BranCore
 import Darwin
 import Foundation
 
@@ -69,8 +70,30 @@ enum ResourceProbe {
         // `&+` : deux compteurs monotones qui ne déborderont pas avant six cents
         // ans de temps processeur, mais un `+` qui déborde fait tomber le
         // processus, et un moniteur n'a pas le droit de tuer ce qu'il observe.
-        return info.ri_user_time &+ info.ri_system_time
+        let ticks = info.ri_user_time &+ info.ri_system_time
+
+        // **Ces champs ne sont pas des nanosecondes, malgré leur nom.** Ils
+        // comptent des unités de `mach_absolute_time`, qui valent 41,67 ns sur
+        // Apple Silicon. Voir `ResourceMath.nanoseconds(machTicks:numer:denom:)`
+        // pour la mesure qui l'établit et pour ce que le défaut coûtait.
+        return ResourceMath.nanoseconds(
+            machTicks: ticks,
+            numer: timebase.numer,
+            denom: timebase.denom
+        )
     }
+
+    /// La base de temps du noyau, lue **une seule fois**. Elle ne change pas
+    /// pendant la vie du processus, et `mach_timebase_info` est un appel système.
+    private static let timebase: mach_timebase_info_data_t = {
+        var info = mach_timebase_info_data_t()
+        guard mach_timebase_info(&info) == KERN_SUCCESS, info.denom > 0 else {
+            // Le repli est l'identité, c'est-à-dire le comportement d'Intel.
+            // Faux sur Apple Silicon, mais moins faux que zéro.
+            return mach_timebase_info_data_t(numer: 1, denom: 1)
+        }
+        return info
+    }()
 
     /// L'empreinte mémoire, en octets. Copié de `SpeechSpike.residentBytes()`,
     /// dont le nom mentait déjà : il rendait bien `phys_footprint`.

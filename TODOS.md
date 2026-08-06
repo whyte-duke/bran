@@ -183,3 +183,39 @@ more sheet before there is enough evidence to generalise from.
 `LibraryView.swift`, `CRM/BookingPickerSheet.swift`,
 `Dictation/DictationSettingsSection.swift`. Each one names the width it wanted
 and why the existing scale did not fit.
+
+---
+
+## Stop bran opening a window at login
+
+**What:** distinguish "launched by the user" from "launched at login", and only
+present the main window in the first case.
+
+**Why:** `BranApp.swift` declares the library window
+`.defaultLaunchBehavior(.presented)`. That exists for a good reason, fixed in
+commit `558e42c`: an app whose only entry point is a menu bar item has no usable
+first launch, because nothing announces the menu bar item. But the flag does not
+distinguish a deliberate launch from a login launch. So someone with "launch at
+login" enabled now gets a bran window in their face every time they log in.
+
+This was masked until 2026-08-06, when `LSUIElement` flipped to false. As an
+agent, the app had no Dock presence and the behaviour was less visible. It is
+visible now.
+
+**Pros:** removes the one thing that would make someone turn launch-at-login back
+off. Login is exactly the moment bran should be invisible and just start
+watching — the whole product promise is "the user never opens bran".
+
+**Cons:** there is no clean public API for "was I launched at login". The
+candidates are all somewhat indirect: `NSApplication.delegate`'s launch
+notification `userInfo`, checking whether the process was started by `launchd`
+via the parent PID, or having `SMAppService` write a marker. Each needs testing
+across a real logout/login cycle, which is slow to iterate on.
+
+**Depends on:** nothing. But it needs a real login cycle to verify, so it is not
+a change that can be checked from a build alone.
+
+**Where to start:** `Sources/BranApp/BranApp.swift`, the
+`.defaultLaunchBehavior(.presented)` on the `library` window, and
+`Sources/BranApp/LoginItemService.swift`, whose doc comment now names this as the
+open question.
