@@ -41,6 +41,9 @@ struct BookingPickerSheet: View {
             Divider()
             footer
         }
+        // TODO(design) : aucune échelle de tailles de feuille. Cette feuille fait
+        // 680×620 et celle du dictionnaire 560×480, sans qu'aucune règle ne dise
+        // laquelle a raison.
         .frame(width: 680, height: 620)
         .onAppear { selection = candidates.first { $0.company != nil } ?? candidates.first }
         .task { await loadAll(force: false) }
@@ -49,18 +52,21 @@ struct BookingPickerSheet: View {
     // MARK: - En-tête et recherche
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.tight) {
             Text("Rattacher au CRM")
+                // TODO(design) : il manque un échelon `sheetTitle`. `paneTitle`
+                // est un `.largeTitle`, trop grand pour un en-tête de feuille, et
+                // `cardTitle` un `.body` — rien entre les deux.
                 .font(.title2.weight(.semibold))
             Text("\(recording.displayTitle) · \(recording.durationDescription) · enregistré le \(recording.metadata.startedAt.formatted(date: .abbreviated, time: .shortened))")
-                .font(.callout)
+                .font(Type.cardBody)
                 .foregroundStyle(.secondary)
         }
-        .padding(20)
+        .padding(Space.gutter)
     }
 
     private var searchField: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.small) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
@@ -88,8 +94,8 @@ struct BookingPickerSheet: View {
                 .help("Recharger la liste des rendez-vous depuis le CRM")
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.gutter)
+        .padding(.vertical, Space.inset)
     }
 
     // MARK: - Liste
@@ -118,7 +124,7 @@ struct BookingPickerSheet: View {
 
                 if wasTruncated, query.isEmpty == false {
                     Text("Le CRM ne renvoie que 100 rendez-vous : affinez la recherche si le vôtre n'apparaît pas.")
-                        .font(.caption)
+                        .font(Type.meta)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -169,26 +175,33 @@ struct BookingPickerSheet: View {
     }
 
     private var complementField: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.small) {
             Label("L'enregistrement semble plus court que le rendez-vous", systemImage: "exclamationmark.triangle.fill")
+                // TODO(design) : il manque un `cardBody` accentué. Retomber sur
+                // `Type.cardBody` retirerait le demi-gras qui distingue cet
+                // avertissement de l'explication grise juste dessous.
                 .font(.callout.weight(.medium))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Palette.attention)
 
             Text("Décrivez ce qui n'a pas été capté — prix annoncé, échéance, décision. Ce texte est donné au modèle en plus de la transcription, et n'est jamais cité en verbatim.")
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // Encastré à la main plutôt qu'avec `branWell()` : son rembourrage de
+            // 12 pt coûterait une ligne de texte sur les 70 pt de l'éditeur.
+            // TODO(design) : il manque un échelon de saisie. `Type.cardBody`
+            // rapetisserait un champ que l'on écrit, pas que l'on lit.
             TextEditor(text: $complement)
                 .font(.body)
                 .scrollContentBackground(.hidden)
-                .padding(6)
+                .padding(Space.small)
                 .frame(height: 70)
-                .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 6))
+                .background(Palette.well, in: .rect(cornerRadius: Radius.control))
                 .accessibilityLabel("Ce qui n'a pas été enregistré")
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, Space.gutter)
+        .padding(.vertical, Space.inset)
     }
 
     // MARK: - Pied
@@ -199,25 +212,27 @@ struct BookingPickerSheet: View {
 
     private var footer: some View {
         HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: Space.tight) {
                 if let reason = eligibility.blockingReason {
                     Label(reason, systemImage: "xmark.octagon.fill")
+                        // TODO(design) : même échelon manquant qu'au-dessus, un
+                        // `cardBody` accentué.
                         .font(.callout.weight(.medium))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Palette.broken)
                     if let remedy = eligibility.remedy {
                         Text(remedy)
-                            .font(.caption)
+                            .font(Type.meta)
                             .foregroundStyle(.secondary)
                     }
                 } else if let selection, selection.hasExistingTranscription {
                     Label("Ce RDV porte déjà une transcription — le nouveau compte-rendu remplacera l'ancien.", systemImage: "exclamationmark.circle.fill")
-                        .font(.callout)
-                        .foregroundStyle(.orange)
+                        .font(Type.cardBody)
+                        .foregroundStyle(Palette.attention)
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
 
-            Spacer(minLength: 12)
+            Spacer(minLength: Space.inset)
 
             Button("Annuler", role: .cancel) { onCancel() }
 
@@ -229,7 +244,7 @@ struct BookingPickerSheet: View {
             .disabled(eligibility.canSend == false)
             .keyboardShortcut(.defaultAction)
         }
-        .padding(16)
+        .padding(Space.stack)
     }
 }
 
@@ -238,23 +253,23 @@ private struct BookingRow: View {
     let recordingStart: Date
 
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+        HStack(spacing: Space.inset) {
+            VStack(alignment: .leading, spacing: Space.hair) {
+                HStack(spacing: Space.small) {
                     Text(booking.company?.nom ?? booking.displayName)
-                        .font(.body.weight(.medium))
+                        .font(Type.cardTitle)
 
                     if let owner = booking.company?.owner_sdr {
                         Text(owner)
-                            .font(.caption)
+                            .font(Type.meta)
                             .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(.quaternary.opacity(0.6), in: .capsule)
+                            .padding(.horizontal, Space.small)
+                            .padding(.vertical, Space.hair)
+                            .background(Palette.well, in: .capsule)
                     }
                 }
 
-                HStack(spacing: 6) {
+                HStack(spacing: Space.small) {
                     // Le contrat le rappelle : l'API est en UTC, le métier se
                     // raisonne en heure locale. Conversion à l'affichage.
                     Text(booking.start_at, format: .dateTime.weekday(.abbreviated).day().month().hour().minute())
@@ -269,25 +284,25 @@ private struct BookingRow: View {
                         Text(domain)
                     }
                 }
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: Space.small)
 
             if booking.hasExistingTranscription {
                 Image(systemName: "doc.badge.clock")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Palette.attention)
                     .help("Une transcription a déjà été déposée sur ce RDV.")
             }
             if booking.isOrphan {
                 Image(systemName: "xmark.octagon.fill")
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Palette.broken)
                     .help("Aucun lead rattaché : envoi impossible tant que le RDV n'est pas relié à une entreprise dans le CRM.")
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, Space.tight)
         .accessibilityElement(children: .combine)
     }
 

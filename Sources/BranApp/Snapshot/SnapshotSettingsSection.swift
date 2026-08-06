@@ -23,7 +23,7 @@ struct SnapshotSettingsSection: View {
             ))
 
             Text("Un raccourci ouvre le viseur de macOS — celui de ⌘⇧4. Vous tracez un rectangle, et le texte de la zone part dans le presse-papiers. Tout est calculé sur ce Mac : aucune image, aucun texte n'est envoyé nulle part.")
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -31,7 +31,7 @@ struct SnapshotSettingsSection: View {
                 accessibilityWarning
             }
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: Space.small) {
                 HStack {
                     Text("Raccourci")
                     Spacer()
@@ -50,13 +50,13 @@ struct SnapshotSettingsSection: View {
                 // `ShortcutRouter` en arbitrait une en silence. L'utilisateur
                 // voyait la dictée « ne plus marcher » sans rien pour l'expliquer.
                 if let refused {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: Space.small) {
                         Label(
                             "\(refused.displayName) est déjà le raccourci de la dictée. Les deux fonctions ne peuvent pas le partager : le système n'en préviendrait qu'une seule, toujours la même.",
                             systemImage: "exclamationmark.triangle.fill"
                         )
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                        .font(Type.meta)
+                        .foregroundStyle(Palette.attention)
                         .fixedSize(horizontal: false, vertical: true)
 
                         HStack {
@@ -67,8 +67,8 @@ struct SnapshotSettingsSection: View {
                     }
                 } else if let conflict = conflictLabel {
                     Label(conflict, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                        .font(Type.meta)
+                        .foregroundStyle(Palette.attention)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -84,7 +84,7 @@ struct SnapshotSettingsSection: View {
             .pickerStyle(.radioGroup)
 
             Text(layoutHint)
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -100,7 +100,7 @@ struct SnapshotSettingsSection: View {
 
             if settings.defaultLayout == .monospaced {
                 Text("En mode « Code et terminal », la langue est forcée à l'anglais et le correcteur linguistique est coupé. Ce n'est pas un goût : avec le correcteur actif sur la même image, `awk '{print` devient `awk 'fprint`.")
-                    .font(.caption)
+                    .font(Type.meta)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -111,7 +111,7 @@ struct SnapshotSettingsSection: View {
             ))
 
             Text("Désactivé par défaut : on capture souvent du texte **depuis** l'application où l'on est en train d'écrire, et un collage automatique tomberait au mauvais endroit.")
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -133,7 +133,7 @@ struct SnapshotSettingsSection: View {
             }
 
             Text(retentionHint)
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -199,14 +199,14 @@ struct SnapshotSettingsSection: View {
     }
 
     private var accessibilityWarning: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: Space.small) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 4) {
+                .foregroundStyle(Palette.attention)
+            VStack(alignment: .leading, spacing: Space.tight) {
                 Text("bran n'a pas l'autorisation d'Accessibilité : le raccourci ne peut pas être lu.")
-                    .font(.callout)
+                    .font(Type.cardBody)
                 Text("Réglages système › Confidentialité et sécurité › Accessibilité, puis relancez bran.")
-                    .font(.caption)
+                    .font(Type.meta)
                     .foregroundStyle(.secondary)
             }
         }

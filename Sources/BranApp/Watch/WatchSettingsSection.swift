@@ -20,7 +20,7 @@ struct WatchSettingsSection: View {
             ))
 
             Text("bran lit lesquelles de vos sessions d'agents ont fini leur tour et vous attendent. Les transcriptions sont lues **sans jamais charger une ligne de conversation** : trois champs — le dossier, la branche, le marqueur de fin de tour — et rien d'autre.")
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -31,7 +31,7 @@ struct WatchSettingsSection: View {
             .disabled(settings.isEnabled == false)
 
             Text("Ajoute les tribus qui n'ont pas de transcription — un onglet claude.ai, une compilation dans un terminal — en comparant des vignettes de 320 pixels en niveaux de gris. Aucune image n'est conservée : bran ne garde qu'une liste de moyennes. Demande l'autorisation d'enregistrement de l'écran, et consomme un peu de batterie.")
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -54,7 +54,7 @@ struct WatchSettingsSection: View {
             .disabled(settings.isEnabled == false)
 
             Text("Durée d'immobilité au-delà de laquelle une voie sans capteur certain est réputée vous attendre. Les sessions d'agents, elles, ne dépendent pas de ce seuil : leur fin de tour est un fait, pas une supposition.")
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -65,7 +65,7 @@ struct WatchSettingsSection: View {
             .disabled(settings.isEnabled == false)
 
             Text("La pilule n'apparaît que lorsque quelque chose vous attend **et** que vous ne faites rien : c'est le seul moment où interrompre ne coûte rien. Elle disparaît pendant une réunion.")
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -82,7 +82,7 @@ struct WatchSettingsSection: View {
             }
 
             Text(retentionHint)
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -97,12 +97,15 @@ struct WatchSettingsSection: View {
     /// présenter comme un réglage réglé serait un mensonge poli ; on dit d'où
     /// elle sort et on laisse la corriger.
     private var sensitivity: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.small) {
             HStack {
                 Text("Seuil de mouvement")
                 Spacer()
+                // La chasse fixe, ici, n'est pas décorative : le nombre change à
+                // chaque pixel de glissement du curseur, et trois décimales en
+                // largeur variable le font gigoter sous le doigt.
                 Text(settings.busyRatio.formatted(.number.precision(.fractionLength(3))))
-                    .font(.callout.monospacedDigit())
+                    .font(Type.code)
                     .foregroundStyle(.secondary)
             }
 
@@ -122,7 +125,7 @@ struct WatchSettingsSection: View {
                     "Valeur non mesurée sur ce Mac : elle vient d'un seul relevé — ratio 0,036 sur un terminal en travail, 0,000 sur des fenêtres immobiles. Si des voies sont annoncées actives alors qu'elles ne le sont pas, montez-la.",
                     systemImage: "ruler"
                 )
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -138,12 +141,12 @@ struct WatchSettingsSection: View {
     }
 
     private var screenWarning: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: Space.small) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 4) {
+                .foregroundStyle(Palette.attention)
+            VStack(alignment: .leading, spacing: Space.tight) {
                 Text("bran ne peut pas observer les fenêtres : l'autorisation d'enregistrement de l'écran manque ou a été accordée à une version antérieure.")
-                    .font(.callout)
+                    .font(Type.cardBody)
                 Button("Ouvrir les Réglages") { SystemSettings.open(.screenRecording) }
                     .controlSize(.small)
             }

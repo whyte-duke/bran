@@ -56,6 +56,9 @@ struct LibraryView: View {
     var body: some View {
         NavigationSplitView {
             SectionSidebar(model: model, pane: $pane, showsSettings: $model.showsSettings)
+                // TODO(design) : `Design.swift` n'a pas d'échelle de largeurs.
+                // Ces trois valeurs sont une décision de mise en page, pas un
+                // espacement — aucun échelon de `Space` ne leur correspond.
                 .navigationSplitViewColumnWidth(min: 200, ideal: 224, max: 280)
         } detail: {
             detail
@@ -69,7 +72,7 @@ struct LibraryView: View {
                     .transition(.move(edge: .bottom))
             }
         }
-        .animation(.snappy(duration: 0.25), value: model.hasOpenSession)
+        .branAnimation(Motion.enter, value: model.hasOpenSession)
         .task {
             // L'accueil s'ouvre de lui-même tant que les trois capacités ne
             // sont pas en place. Sans ça il ne s'ouvrait jamais : la fenêtre

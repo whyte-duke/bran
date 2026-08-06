@@ -17,7 +17,7 @@ struct CRMSettingsSection: View {
                 .textContentType(.password)
 
             Text("Le jeton est conservé dans le Trousseau, jamais dans les préférences ni dans le dépôt. Il ne peut faire que six appels : lister les RDV, déposer un audio, lancer et suivre son traitement. Il ne peut pas effacer un closing déjà transcrit.")
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -30,8 +30,8 @@ struct CRMSettingsSection: View {
 
             if let testResult {
                 Text(testResult)
-                    .font(.callout)
-                    .foregroundStyle(testResult.hasPrefix("Connexion établie") ? .green : .orange)
+                    .font(Type.cardBody)
+                    .foregroundStyle(testResult.hasPrefix("Connexion établie") ? Palette.done : Palette.attention)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -47,13 +47,13 @@ struct CRMSettingsSection: View {
                 in: 2...6
             )
             Text("3 pour un closing standard : commercial et technique Castral, plus le prospect. Monter si le prospect vient avec son prestataire.")
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Toggle("Envoyer automatiquement quand le rattachement est certain", isOn: $configuration.autoUpload)
             Text("N'envoie tout seul que si un unique rendez-vous tombe dans les deux heures autour de l'enregistrement, et qu'aucun audio n'y a déjà été déposé. Dans tous les autres cas, bran demande — un audio rattaché au mauvais lead écrase le compte-rendu de quelqu'un d'autre.")
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

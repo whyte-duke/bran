@@ -60,7 +60,7 @@ struct DictationSettingsSection: View {
     // MARK: - Activation
 
     private var enableRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.small) {
             Toggle("Dicter avec un raccourci clavier", isOn: Binding(
                 get: { settings.isEnabled },
                 set: { wanted in
@@ -69,20 +69,20 @@ struct DictationSettingsSection: View {
             ))
 
             if accessibilityRefused {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: Space.small) {
                     Label(
                         "bran n'a pas l'autorisation d'Accessibilité.",
                         systemImage: "xmark.octagon.fill"
                     )
-                    .foregroundStyle(.red)
-                    .font(.callout)
+                    .foregroundStyle(Palette.broken)
+                    .font(Type.cardBody)
 
                     Text("""
                     Sans elle, macOS refuse à la fois de lire le raccourci et de \
                     coller le texte. Accordez-la, puis relancez bran : le système \
                     ne l'applique qu'au prochain démarrage.
                     """)
-                    .font(.caption)
+                    .font(Type.meta)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -95,11 +95,11 @@ struct DictationSettingsSection: View {
                         }
                         Button("Relancer bran") { Self.relaunch() }
                     }
-                    .font(.callout)
+                    .font(Type.cardBody)
                 }
             } else if settings.isEnabled {
                 Text("Tout se passe sur votre Mac. Aucun son, aucun texte ne part sur Internet.")
-                    .font(.caption)
+                    .font(Type.meta)
                     .foregroundStyle(.secondary)
             }
         }
@@ -108,7 +108,7 @@ struct DictationSettingsSection: View {
     // MARK: - Raccourci
 
     private var triggerRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.small) {
             HStack {
                 Text("Raccourci")
                 Spacer()
@@ -125,16 +125,16 @@ struct DictationSettingsSection: View {
                 Text("Annuler")
                 Spacer()
                 Text(settings.cancelKey.displayName)
-                    .font(.callout.monospaced())
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(.quaternary.opacity(0.6), in: .rect(cornerRadius: 5))
+                    .font(Type.code)
+                    .padding(.horizontal, Space.small)
+                    .padding(.vertical, Space.tight)
+                    .background(Palette.well, in: .rect(cornerRadius: Radius.control))
             }
         }
     }
 
     private var modeRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.tight) {
             Picker("Déclenchement", selection: Binding(
                 get: { settings.triggerMode },
                 set: { settings.triggerMode = $0; controller.applySettings() }
@@ -149,14 +149,14 @@ struct DictationSettingsSection: View {
             Le maintien est plus rapide sur une phrase courte, et l'annulation \
             devient évidente : on relâche sans avoir parlé.
             """)
-            .font(.caption)
+            .font(Type.meta)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var languageRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.tight) {
             Picker("Langue", selection: Binding(
                 get: { settings.language },
                 set: { settings.language = $0 }
@@ -167,7 +167,7 @@ struct DictationSettingsSection: View {
             }
 
             Text(SpeechLanguage.guidance)
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -176,8 +176,8 @@ struct DictationSettingsSection: View {
     // MARK: - Modèle
 
     private var modelRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.small) {
+            HStack(spacing: Space.small) {
                 Image(systemName: symbol)
                     .foregroundStyle(tint)
                 Text(controller.host.availability.description)
@@ -187,21 +187,22 @@ struct DictationSettingsSection: View {
                 case .absent, .failed:
                     Button("Télécharger") { Task { try? await controller.host.load() } }
                 case .downloading(let fraction):
+                    // TODO(design) : pas d'échelle de largeurs de composant.
                     ProgressView(value: fraction).frame(width: 90)
                 default:
                     EmptyView()
                 }
             }
-            .font(.callout)
+            .font(Type.cardBody)
 
             Text(modelExplanation)
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if let load = controller.host.lastLoadDuration {
                 Text("Dernier chargement : \(load.formatted(.number.precision(.fractionLength(1)))) s")
-                    .font(.caption2)
+                    .font(Type.metaFaint)
                     .foregroundStyle(.tertiary)
             }
         }
@@ -219,9 +220,9 @@ struct DictationSettingsSection: View {
 
     private var tint: Color {
         switch controller.host.availability {
-        case .ready: .green
-        case .failed: .red
-        default: .secondary
+        case .ready: Palette.done
+        case .failed: Palette.broken
+        default: Palette.asleep
         }
     }
 
@@ -265,7 +266,7 @@ struct DictationSettingsSection: View {
     // MARK: - Avancé
 
     private var inputDeviceRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.tight) {
             Picker("Micro", selection: Binding(
                 get: { settings.inputDeviceUID ?? "" },
                 set: { settings.inputDeviceUID = $0.isEmpty ? nil : $0 }
@@ -284,14 +285,14 @@ struct DictationSettingsSection: View {
             votre appel serait haché à chaque dictée. Le réseau de micros du Mac \
             est en prime meilleur pour la reconnaissance.
             """)
-            .font(.caption)
+            .font(Type.meta)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var retentionRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.tight) {
             Picker("Conserver l'audio", selection: Binding(
                 get: { settings.retentionDays },
                 set: { settings.retentionDays = $0; controller.applySettings() }
@@ -306,14 +307,14 @@ struct DictationSettingsSection: View {
             purgé, la transcription ne peut plus être relancée — c'est indiqué \
             sur chaque dictée. Actuellement \(Self.bytes(controller.store.audioBytes)) d'audio.
             """)
-            .font(.caption)
+            .font(Type.meta)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var behaviourRows: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.small) {
             Toggle("Restaurer le presse-papiers après le collage", isOn: Binding(
                 get: { settings.restoresClipboard },
                 set: { settings.restoresClipboard = $0; controller.applySettings() }
@@ -337,10 +338,10 @@ struct DictationSettingsSection: View {
 
     private var vocabularyRow: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Space.hair) {
                 Text("Dictionnaire de corrections")
                 Text("\(settings.vocabulary.rules.count) termes")
-                    .font(.caption)
+                    .font(Type.meta)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -388,7 +389,10 @@ struct HotkeyField: View {
             isCapturing ? startListening() : stopListening()
         } label: {
             Text(isCapturing ? "Appuyez sur une touche…" : binding.displayName)
-                .font(.callout.monospaced())
+                .font(Type.code)
+                // TODO(design) : pas d'échelle de largeurs de composant. Cette
+                // largeur plancher empêche le bouton de sauter entre « ⌘⇧2 » et
+                // « Appuyez sur une touche… » ; elle est mesurée sur le texte.
                 .frame(minWidth: 130)
         }
         .buttonStyle(.bordered)
@@ -442,19 +446,22 @@ private struct VocabularySheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Space.tight) {
                 Text("Dictionnaire de corrections")
+                    // TODO(design) : il manque un échelon `sheetTitle`. Cette
+                    // feuille prend un `.title3` et celle du CRM un `.title2` —
+                    // deux en-têtes de feuille, deux tailles, aucune règle.
                     .font(.title3.weight(.semibold))
                 Text("""
                 Parakeet n'a jamais entendu le nom de votre entreprise ni celui de \
                 vos clients. Chaque terme ajouté ici est corrigé après la \
                 transcription, sur les mots entiers uniquement.
                 """)
-                .font(.callout)
+                .font(Type.cardBody)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(20)
+            .padding(Space.gutter)
 
             Divider()
 
@@ -476,7 +483,7 @@ private struct VocabularySheet: View {
             } else {
                 List {
                     ForEach($settings.vocabulary.rules) { $rule in
-                        HStack(spacing: 10) {
+                        HStack(spacing: Space.small) {
                             TextField("entendu", text: $rule.heard)
                                 .textFieldStyle(.roundedBorder)
                             Image(systemName: "arrow.right")
@@ -489,7 +496,7 @@ private struct VocabularySheet: View {
                             // dernière règle saisie qui n'aura jamais d'effet.
                             if duplicates.contains(Self.key(rule.heard)) {
                                 Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(.orange)
+                                    .foregroundStyle(Palette.attention)
                                     .help("Ce terme apparaît plusieurs fois : seule la première ligne est appliquée.")
                             }
 
@@ -500,7 +507,7 @@ private struct VocabularySheet: View {
                             .labelStyle(.iconOnly)
                             .foregroundStyle(.secondary)
                         }
-                        .padding(.vertical, 2)
+                        .padding(.vertical, Space.hair)
                     }
                 }
                 .listStyle(.inset)
@@ -508,8 +515,8 @@ private struct VocabularySheet: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: Space.small) {
+                HStack(spacing: Space.small) {
                     TextField("castral", text: $heard)
                         .textFieldStyle(.roundedBorder)
                     Image(systemName: "arrow.right")
@@ -530,12 +537,12 @@ private struct VocabularySheet: View {
                         "« \(existing.heard) » est déjà corrigé en « \(existing.written) ». Modifiez la ligne existante plutôt que d'en ajouter une seconde, qui ne serait jamais appliquée.",
                         systemImage: "exclamationmark.triangle.fill"
                     )
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                    .font(Type.meta)
+                    .foregroundStyle(Palette.attention)
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(16)
+            .padding(Space.stack)
 
             Divider()
 
@@ -544,8 +551,10 @@ private struct VocabularySheet: View {
                 Button("Terminé") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
-            .padding(16)
+            .padding(Space.stack)
         }
+        // TODO(design) : aucune échelle de tailles de feuille (cf. la feuille
+        // de rattachement CRM, en 680×620).
         .frame(width: 560, height: 480)
     }
 
