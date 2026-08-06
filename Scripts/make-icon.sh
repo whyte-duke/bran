@@ -1,22 +1,31 @@
 #!/bin/zsh
 #
-# Fabrique Resources/AppIcon.icns à partir d'une image carrée.
+# Fabrique Resources/AppIcon.icns.
 #
-#   zsh Scripts/make-icon.sh mon-icone.png
+#   zsh Scripts/make-icon.sh
 #
-# Les dix tailles requises par macOS sont générées par `sips`, pas à la main :
-# une icône dont les petites tailles sont de simples réductions est floue à
-# 16 px. Le rendu correct demanderait un dessin simplifié pour chaque palier —
-# c'est ce que fait Icon Composer. Ici on fait au mieux automatiquement, ce qui
-# suffit tant que la marque reste une forme simple et contrastée.
+# **L'icône est dessinée, pas photographiée.** La version précédente réduisait un
+# JPEG de 1,5 Mo aux dix paliers réclamés par macOS, avec `sips`. Son propre
+# commentaire disait déjà pourquoi c'était faux :
+#
+#   « une icône dont les petites tailles sont de simples réductions est floue à
+#     16 px. Le rendu correct demanderait un dessin simplifié pour chaque
+#     palier. »
+#
+# C'était exact, et le résultat était pire que flou : trois yeux en relief noir
+# sur un fond noir, illisibles en dessous de 64 points. Dans le Dock, à côté de
+# vingt icônes colorées, l'application n'apparaissait pas.
+#
+# `RenderIcon.swift` fait ce que ce commentaire réclamait : il redessine la forme
+# à chaque taille en CoreGraphics, et il simplifie par palier — l'iris ambre
+# disparaît sous 128 points, l'œil entier sous 32, le dégradé sous 32. Ce qui
+# reste à seize pixels est une silhouette, parce qu'une silhouette survit à la
+# réduction et qu'un détail ne survit jamais.
+#
+# Conséquence pratique : il n'y a plus de fichier source à ne pas perdre.
+# L'icône EST son code, elle se régénère, et elle pèse 346 Ko au lieu de 1,6 Mo.
 
 set -euo pipefail
-
-SOURCE="${1:-}"
-if [[ -z "$SOURCE" || ! -f "$SOURCE" ]]; then
-  echo "usage : zsh Scripts/make-icon.sh <image carrée .png|.jpeg>"
-  exit 1
-fi
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=$(mktemp -d)
@@ -25,31 +34,15 @@ trap 'rm -rf "$WORK"' EXIT
 
 mkdir -p "$ICONSET" "$ROOT/Resources"
 
-# sips ne lit correctement que du PNG pour ce genre d'enchaînement.
-sips -s format png "$SOURCE" --out "$WORK/source.png" >/dev/null
+echo "→ rendu des dix paliers"
+swift "$ROOT/Scripts/RenderIcon.swift" "$ICONSET"
 
-DIMENSIONS=(16 32 64 128 256 512 1024)
-for size in $DIMENSIONS; do
-  sips -z $size $size "$WORK/source.png" --out "$WORK/$size.png" >/dev/null
-done
+echo "→ assemblage"
+iconutil -c icns -o "$ROOT/Resources/AppIcon.icns" "$ICONSET"
 
-cp "$WORK/16.png"   "$ICONSET/icon_16x16.png"
-cp "$WORK/32.png"   "$ICONSET/icon_16x16@2x.png"
-cp "$WORK/32.png"   "$ICONSET/icon_32x32.png"
-cp "$WORK/64.png"   "$ICONSET/icon_32x32@2x.png"
-cp "$WORK/128.png"  "$ICONSET/icon_128x128.png"
-cp "$WORK/256.png"  "$ICONSET/icon_128x128@2x.png"
-cp "$WORK/256.png"  "$ICONSET/icon_256x256.png"
-cp "$WORK/512.png"  "$ICONSET/icon_256x256@2x.png"
-cp "$WORK/512.png"  "$ICONSET/icon_512x512.png"
-cp "$WORK/1024.png" "$ICONSET/icon_512x512@2x.png"
-
-iconutil -c icns "$ICONSET" -o "$ROOT/Resources/AppIcon.icns"
-
-echo "✓ Resources/AppIcon.icns"
-echo "  Relancez : zsh Scripts/build-app.sh"
 echo
-echo "  Aperçu des petites tailles — c'est à celles-là qu'une icône se juge :"
-echo "  $WORK/16.png, 32.png (copiés ci-dessous pour inspection)"
-cp "$WORK/16.png" "$ROOT/Resources/apercu-16.png"
-cp "$WORK/32.png" "$ROOT/Resources/apercu-32.png"
+echo "✓ Resources/AppIcon.icns ($(du -h "$ROOT/Resources/AppIcon.icns" | cut -f1))"
+echo "  Reconstruire l'app pour la voir :  zsh Scripts/build-app.sh"
+echo
+echo "  macOS met les icônes en cache. Si le Finder montre encore l'ancienne :"
+echo "    killall Dock Finder"

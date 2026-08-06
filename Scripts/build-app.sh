@@ -55,8 +55,18 @@ cat > "$DEST/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>    <string>15.0</string>
 $ICON_ENTRY
 
-    <!-- Agent en barre de menus : ni Dock, ni fenêtre au lancement. -->
-    <key>LSUIElement</key>               <true/>
+    <!-- **Une application normale, que l'utilisateur peut démoter.**
+
+         C'était <true/>, donc aucune icône dans le Dock. Mais BranApp.swift
+         pose .defaultLaunchBehavior(.presented) sur la fenêtre principale :
+         bran ouvrait donc une vraie fenêtre sans exister dans le Dock. On la
+         fermait d'un ⌘W et le seul chemin de retour était la barre de menus,
+         que rien n'annonce.
+
+         L'inverse — une icône permanente — se retire depuis les réglages, où
+         « Afficher dans le Dock » repose la politique d'activation. Le défaut
+         qui se corrige d'un clic vaut mieux que celui qui n'a pas d'interface. -->
+    <key>LSUIElement</key>               <false/>
 
     <!-- Textes affichés par macOS dans la fenêtre d'autorisation. Ils doivent
          dire à quoi sert la permission, pas la réclamer. -->
