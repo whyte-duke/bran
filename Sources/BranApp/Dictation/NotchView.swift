@@ -548,7 +548,13 @@ private struct LoadingBar: View {
             .frame(height: 4)
             .frame(maxHeight: .infinity)
         }
-        .onAppear { shuttle = reduceMotion == false }
+        // Même correctif que `PulsingDot` : `onAppear` est à un coup et laissait
+        // la navette immobile à gauche — précisément l'état que le commentaire
+        // ci-dessus dit qu'il faut éviter — quand on désactivait le réglage sans
+        // fermer l'encoche.
+        .onChange(of: reduceMotion, initial: true) { _, reduced in
+            shuttle = reduced == false
+        }
     }
 }
 
@@ -638,10 +644,18 @@ private struct PulsingDot: View {
                 .frame(width: 7, height: 7)
         }
         .branLoop(Motion.pulse, value: isPulsing)
-        // La boucle n'est pas seulement non animée : elle n'est pas armée. Poser
-        // `isPulsing` sans animation ferait sauter le halo d'un état à l'autre
-        // à la première image, ce qui est un mouvement de plus, pas un de moins.
-        .onAppear { isPulsing = pulses }
+        // **`onChange(initial:)` et pas `onAppear`.** Le réglage d'accessibilité
+        // peut basculer pendant que cette vue est vivante, et `onAppear` est à un
+        // coup : la pulsation ne repartait jamais après qu'on ait désactivé
+        // « Réduire les animations », parce que la valeur observée ne changeait
+        // plus. `initial: true` couvre l'apparition, le reste couvre le vol.
+        //
+        // Dans le sens inverse, remettre `isPulsing` à faux passe par `branLoop`,
+        // qui rend `nil` sous le réglage : la valeur change donc sans animation,
+        // ce qui interrompt la boucle en cours au lieu de la laisser tourner.
+        .onChange(of: pulses, initial: true) { _, allowed in
+            isPulsing = allowed
+        }
         .frame(width: 16, height: 16)
     }
 

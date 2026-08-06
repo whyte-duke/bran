@@ -610,9 +610,17 @@ struct CardAction: View {
         .onChange(of: isSpinning) { _, spinning in
             // Remettre l'angle à zéro à l'arrêt : sinon l'icône garde
             // l'inclinaison où la rotation s'est interrompue.
-            angle = spinning ? 360 : 0
+            angle = spinning && reduceMotion == false ? 360 : 0
         }
-        .onAppear { if isSpinning { angle = 360 } }
+        // **Le réglage doit faire bouger `angle`, sinon il ne fait rien.**
+        // `.animation(nil, value:)` supprime l'animation des changements *à
+        // venir* de cette valeur ; il n'annule pas une boucle déjà lancée. Sans
+        // ce `onChange`, activer « Réduire les animations » pendant qu'une
+        // reprise tourne laissait la flèche tourner jusqu'à la fin de la reprise.
+        .onChange(of: reduceMotion) { _, _ in
+            angle = isSpinning && reduceMotion == false ? 360 : 0
+        }
+        .onAppear { if isSpinning, reduceMotion == false { angle = 360 } }
     }
 
     /// L'animation de la rotation. `nil` quand le mouvement est refusé, une

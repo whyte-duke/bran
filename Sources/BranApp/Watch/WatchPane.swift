@@ -129,7 +129,7 @@ struct WatchPane: View {
                 .padding(.horizontal, 26)
                 .padding(.vertical, 18)
             }
-            .animation(.snappy(duration: 0.25), value: controller.verdict.lanes.count)
+            .branAnimation(Motion.enter, value: controller.verdict.lanes.count)
         }
     }
 

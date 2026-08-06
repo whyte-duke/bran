@@ -256,10 +256,12 @@ extension View {
     /// vite. La seule réponse correcte est de ne pas la jouer, et de laisser la
     /// vue dans son état de repos.
     ///
-    /// D'où le second effet : `isActive` rend `false` sous le réglage, pour que
-    /// l'appelant puisse aussi **ne pas lancer sa boucle** plutôt que de
-    /// l'animer dans le vide. `AnimatedStripe` s'en sert pour ne pas réveiller
-    /// une horloge à 40 Hz que personne ne veut voir bouger.
+    /// **Et ce n'est pas un annulateur.** `nil` supprime l'animation des
+    /// changements *à venir* de `value` ; il ne coupe pas une boucle déjà
+    /// lancée. Une vue dont le réglage peut basculer en cours de vie doit donc
+    /// **aussi faire changer la valeur observée** — voir `PulsingDot`, qui
+    /// repose `isPulsing` sur un `onChange(of:initial:)`, et non sur un
+    /// `onAppear` qui ne se déclenche qu'une fois.
     func branLoop<V: Equatable>(_ animation: Animation, value: V) -> some View {
         modifier(LoopingMotion(animation: animation, value: value))
     }
