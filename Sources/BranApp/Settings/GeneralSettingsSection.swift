@@ -21,6 +21,17 @@ struct GeneralSettingsSection: View {
                 .foregroundStyle(.secondary)
         }
 
+        Section("Consommation") {
+            Toggle("Afficher la consommation dans la barre de menus", isOn: Binding(
+                get: { model.meter.showsInMenuBar },
+                set: { model.meter.showsInMenuBar = $0 }
+            ))
+            Text("Un second élément, séparé de celui de bran : « processeur·mémoire », en pourcentage. Éteint, il ne mesure plus rien — la boucle s'arrête aussi.")
+                .font(Type.meta)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
         Section("Dossier des enregistrements") {
             HStack(spacing: Space.small) {
                 Image(systemName: "folder")

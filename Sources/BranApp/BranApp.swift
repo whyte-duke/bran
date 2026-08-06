@@ -14,6 +14,33 @@ struct BranApp: App {
             Label(model.menuBarTitle, systemImage: model.menuBarSymbol)
         }
 
+        // **Un second élément, et pas une ligne de plus dans le premier.**
+        //
+        // Le libellé de l'élément bran porte déjà le chrono pendant un
+        // enregistrement et « à l'écoute » pendant une dictée : les deux moments
+        // où la consommation monte sont donc exactement les deux moments où le
+        // chiffre disparaîtrait. iStat Menus et Stats, les deux références du
+        // genre, séparent pour la même raison.
+        //
+        // `isInserted` plutôt qu'un `if` : c'est la façon dont SwiftUI retire
+        // proprement un élément de la barre de menus, sans reconstruire la scène.
+        MenuBarExtra(isInserted: Binding(
+            get: { model.meter.showsInMenuBar },
+            set: { model.meter.showsInMenuBar = $0 }
+        )) {
+            ResourceMenu(meter: model.meter)
+        } label: {
+            // `monospacedDigit` ici, et un remplissage en U+2007 dans la chaîne
+            // elle-même : le modificateur de police n'est pas toujours honoré
+            // sur un élément de barre de menus, le contenu de la chaîne l'est
+            // toujours. Voir `ResourceFormat.menuBarLabel`.
+            Label {
+                Text(model.meter.label).monospacedDigit()
+            } icon: {
+                Image(systemName: "speedometer")
+            }
+        }
+
         Window("bran", id: "library") {
             LibraryView(model: model)
         }

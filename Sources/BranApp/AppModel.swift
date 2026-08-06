@@ -48,6 +48,16 @@ public final class AppModel {
     let watchSettings = WatchSettings()
     let watch: WatchController
 
+    /// Ce que bran coûte, en processeur et en mémoire.
+    ///
+    /// **La contrainte C10 dit qu'un plafond CPU/énergie est un critère de
+    /// succès, pas un détail** — et elle n'avait jamais eu d'instrument. Le
+    /// moniteur est cet instrument, et il est aussi découplé que les trois
+    /// autres modules : il ne connaît ni Parakeet, ni le veilleur, ni les
+    /// réunions. Ce qu'il affiche sous « En ce moment » lui arrive par une
+    /// fermeture, câblée plus bas.
+    let meter = ResourceMeter()
+
     /// Le journal de bord. **La seule chose du modèle qui lise les quatre
     /// sources d'un coup** — et elle ne les possède pas : elle relit le journal
     /// du veilleur en lecture seule, et la vue lui passe les repères des trois
@@ -199,6 +209,7 @@ public final class AppModel {
         startDictation()
         startSnapshot()
         startWatch()
+        startMeter()
 
         // La surveillance est permanente. Il n'y a pas de raison de la
         // suspendre : elle ne fait qu'observer des titres de fenêtres, et une
@@ -304,6 +315,78 @@ public final class AppModel {
             // La purge tourne au lancement, comme pour les deux autres modules :
             // à l'ouverture d'une vue, elle ne ferait que ralentir un affichage.
             await watch.store.purgeExpired()
+        }
+    }
+
+    // MARK: - Le moniteur
+
+    /// Câble « En ce moment » et démarre la boucle.
+    ///
+    /// **Ce sont des états simultanés, pas des causes.** Personne n'a mesuré que
+    /// le chargement de Parakeet explique ces 104 % — c'est très probable, ça
+    /// n'est pas démontré, et un panneau qui affirmerait une causalité qu'il n'a
+    /// pas mesurée mentirait sur ce qu'il sait.
+    ///
+    /// Chaque ligne n'apparaît que lorsqu'elle a quelque chose à dire. En
+    /// particulier, un modèle `.installed` — présent sur le disque mais pas en
+    /// mémoire — ne coûte rien et ne s'affiche donc pas : c'est exactement la
+    /// distinction que l'utilisateur cherche quand il demande à savoir « quand
+    /// il importe / active le modèle Parakeet ».
+    private func startMeter() {
+        meter.activities = { [weak self] in
+            guard let self else { return [] }
+            var lines: [ResourceMeter.Activity] = []
+
+            if let detail = Self.modelActivity(
+                dictation.host.availability,
+                unloadDelay: dictation.host.idleUnloadDelay
+            ) {
+                lines.append(ResourceMeter.Activity(title: "Modèle de dictée", detail: detail))
+            }
+
+            // Le veilleur ne coûte que s'il a des voies à observer : à zéro
+            // fenêtre, il fait une liste de titres et se rendort. Le dire quand
+            // même serait la quatrième ligne permanente qu'on cherche à éviter.
+            let lanes = watch.verdict.lanes.count
+            if watchSettings.isEnabled, watch.pause == nil, lanes > 0 {
+                lines.append(ResourceMeter.Activity(
+                    title: "Veille",
+                    detail: "\(lanes) \(lanes == 1 ? "fenêtre" : "fenêtres") / \(watchSettings.tickSeconds) s"
+                ))
+            }
+
+            if hasOpenSession {
+                lines.append(ResourceMeter.Activity(
+                    title: "Enregistrement",
+                    detail: isPaused ? "en pause" : "en cours"
+                ))
+            }
+
+            return lines
+        }
+
+        meter.start()
+    }
+
+    /// Ce que le modèle de dictée coûte, ou `nil` s'il ne coûte rien.
+    private static func modelActivity(
+        _ availability: SpeechModelHost.Availability,
+        unloadDelay: TimeInterval
+    ) -> String? {
+        switch availability {
+        case .downloading(let fraction):
+            let percent = (fraction * 100).formatted(.number.precision(.fractionLength(0)))
+            return "téléchargement \(percent) %"
+        case .loading:
+            return "chargement…"
+        case .ready:
+            // Le délai est dit parce qu'il répond tout de suite à la question
+            // suivante : « et ça va rester chargé combien de temps ? »
+            let minutes = Int((unloadDelay / 60).rounded())
+            return "chargé — libéré après \(minutes) min sans dictée"
+        case .absent, .installed, .failed:
+            // Sur le disque et pas en mémoire, c'est zéro octet et zéro cycle.
+            return nil
         }
     }
 
