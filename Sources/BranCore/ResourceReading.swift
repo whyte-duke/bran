@@ -23,7 +23,7 @@ import Foundation
 /// | compteur qui recule | un pourcentage négatif | `-3 %` n'existe pas |
 ///
 /// Tout cela se teste sur des entiers, sans noyau, sans écran et sans horloge.
-/// Le fichier voisin `Sources/BranApp/Resources/ResourceProbe.swift` fait les
+/// Le fichier voisin `Sources/BranApp/Meter/ResourceProbe.swift` fait les
 /// deux appels système et ne calcule rien.
 ///
 /// **L'unité, et elle est décidée : celle du Moniteur d'activité, où
