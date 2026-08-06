@@ -116,7 +116,7 @@ struct PermissionsView: View {
         VStack(alignment: .leading, spacing: Space.small) {
             HStack(spacing: Space.small) {
                 Image(systemName: "bird.fill")
-                    .font(.title2.weight(.semibold))
+                    .font(Type.sheetTitle)
                     .foregroundStyle(.tint)
                 Text("bran")
                     .font(.title.weight(.semibold))

@@ -448,10 +448,7 @@ private struct VocabularySheet: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: Space.tight) {
                 Text("Dictionnaire de corrections")
-                    // TODO(design) : il manque un échelon `sheetTitle`. Cette
-                    // feuille prend un `.title3` et celle du CRM un `.title2` —
-                    // deux en-têtes de feuille, deux tailles, aucune règle.
-                    .font(.title3.weight(.semibold))
+                    .font(Type.sheetTitle)
                 Text("""
                 Parakeet n'a jamais entendu le nom de votre entreprise ni celui de \
                 vos clients. Chaque terme ajouté ici est corrigé après la \

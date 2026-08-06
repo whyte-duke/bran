@@ -54,10 +54,7 @@ struct BookingPickerSheet: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: Space.tight) {
             Text("Rattacher au CRM")
-                // TODO(design) : il manque un échelon `sheetTitle`. `paneTitle`
-                // est un `.largeTitle`, trop grand pour un en-tête de feuille, et
-                // `cardTitle` un `.body` — rien entre les deux.
-                .font(.title2.weight(.semibold))
+                .font(Type.sheetTitle)
             Text("\(recording.displayTitle) · \(recording.durationDescription) · enregistré le \(recording.metadata.startedAt.formatted(date: .abbreviated, time: .shortened))")
                 .font(Type.cardBody)
                 .foregroundStyle(.secondary)
@@ -177,10 +174,7 @@ struct BookingPickerSheet: View {
     private var complementField: some View {
         VStack(alignment: .leading, spacing: Space.small) {
             Label("L'enregistrement semble plus court que le rendez-vous", systemImage: "exclamationmark.triangle.fill")
-                // TODO(design) : il manque un `cardBody` accentué. Retomber sur
-                // `Type.cardBody` retirerait le demi-gras qui distingue cet
-                // avertissement de l'explication grise juste dessous.
-                .font(.callout.weight(.medium))
+                .font(Type.cardBodyStrong)
                 .foregroundStyle(Palette.attention)
 
             Text("Décrivez ce qui n'a pas été capté — prix annoncé, échéance, décision. Ce texte est donné au modèle en plus de la transcription, et n'est jamais cité en verbatim.")
@@ -190,10 +184,8 @@ struct BookingPickerSheet: View {
 
             // Encastré à la main plutôt qu'avec `branWell()` : son rembourrage de
             // 12 pt coûterait une ligne de texte sur les 70 pt de l'éditeur.
-            // TODO(design) : il manque un échelon de saisie. `Type.cardBody`
-            // rapetisserait un champ que l'on écrit, pas que l'on lit.
             TextEditor(text: $complement)
-                .font(.body)
+                .font(Type.input)
                 .scrollContentBackground(.hidden)
                 .padding(Space.small)
                 .frame(height: 70)
@@ -215,9 +207,7 @@ struct BookingPickerSheet: View {
             VStack(alignment: .leading, spacing: Space.tight) {
                 if let reason = eligibility.blockingReason {
                     Label(reason, systemImage: "xmark.octagon.fill")
-                        // TODO(design) : même échelon manquant qu'au-dessus, un
-                        // `cardBody` accentué.
-                        .font(.callout.weight(.medium))
+                        .font(Type.cardBodyStrong)
                         .foregroundStyle(Palette.broken)
                     if let remedy = eligibility.remedy {
                         Text(remedy)

@@ -64,9 +64,33 @@ enum Type {
     static let appMark = Font.system(.title3, design: .default, weight: .semibold)
 
     static let paneTitle = Font.system(.largeTitle, design: .default, weight: .semibold)
+
+    /// Le titre d'une feuille modale.
+    ///
+    /// **Échelon manquant, trouvé en migrant.** Entre `paneTitle` (largeTitle)
+    /// et `cardTitle` (body) il n'y avait rien, et deux feuilles avaient tranché
+    /// chacune de leur côté : `BookingPickerSheet` en `.title2.weight(.semibold)`,
+    /// `VocabularySheet` en `.title3`. Deux en-têtes, deux tailles, aucune règle.
+    /// Une feuille n'est pas une section — elle est plus petite qu'une fenêtre et
+    /// plus grande qu'une carte.
+    static let sheetTitle = Font.title2.weight(.semibold)
+
     static let paneLead = Font.callout
     static let cardTitle = Font.body.weight(.medium)
     static let cardBody = Font.callout
+
+    /// Un corps de carte qui doit se détacher : l'avertissement au-dessus de son
+    /// explication. `cardBody` seul les met sur le même plan, et on perd
+    /// exactement la hiérarchie que le paragraphe gris en dessous suppose.
+    static let cardBodyStrong = Font.callout.weight(.medium)
+
+    /// Un champ qu'on **écrit**, par opposition à un texte qu'on lit.
+    ///
+    /// Une taille au-dessus de `cardBody` et c'est délibéré : rétrécir la zone
+    /// de saisie pour l'aligner sur les libellés voisins rend la frappe moins
+    /// confortable au bénéfice d'une régularité que personne ne remarque.
+    static let input = Font.body
+
     static let meta = Font.caption
     static let metaFaint = Font.caption2
     static let groupHead = Font.subheadline.weight(.medium)

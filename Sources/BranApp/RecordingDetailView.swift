@@ -51,7 +51,7 @@ struct RecordingDetailView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: Space.tight) {
             Text(recording.displayTitle)
-                .font(.title2.weight(.semibold))
+                .font(Type.sheetTitle)
             Text(recording.metadata.startedAt.formatted(date: .complete, time: .shortened))
                 .foregroundStyle(.secondary)
         }
