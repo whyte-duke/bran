@@ -21,6 +21,17 @@ struct MenuBarContent: View {
             WindowPresenter.bringToFront("library", using: openWindow)
         }
         .keyboardShortcut("o")
+        // **Le seul endroit où l'état des autorisations est rafraîchi à
+        // l'ouverture du menu**, et c'est ce qui rend le masquage de
+        // « Bienvenue » plus bas honnête.
+        //
+        // `HotkeyMonitor.isTrusted` interroge le système à chaque lecture, mais
+        // `permissions.canRecord` lit trois valeurs mémorisées : sans ce
+        // rappel, une autorisation révoquée pendant que l'app tourne laisserait
+        // l'entrée cachée alors qu'elle vient de redevenir nécessaire. Les trois
+        // requêtes de `refresh()` sont des préflights TCC, sans boîte de
+        // dialogue et sans coût mesurable.
+        .onAppear { model.permissions.refresh() }
 
         Divider()
 
@@ -76,15 +87,29 @@ struct MenuBarContent: View {
             Divider()
         }
 
-        // Toujours présent. La version précédente ne le montrait que si
-        // l'enregistrement était impossible : quelqu'un dont l'enregistrement
-        // marchait n'avait donc aucun moyen de découvrir la dictée ni la
-        // capture de texte, ni de télécharger le modèle.
-        Button(model.isFullyReady ? "Bienvenue…" : "Bienvenue — il reste à faire…") {
-            WindowPresenter.bringToFront("permissions", using: openWindow)
-        }
+        // **Présent tant qu'il reste quelque chose à faire, et absent sinon.**
+        //
+        // Les deux versions précédentes se sont trompées en sens inverse. La
+        // première ne le montrait que si l'enregistrement était impossible :
+        // quelqu'un dont l'enregistrement marchait n'avait aucun moyen de
+        // découvrir la dictée ni la capture de texte. La seconde l'a rendu
+        // permanent, ce qui règle la découverte mais laisse à vie, dans une
+        // barre de menus déjà chargée, une ligne qui ne sert plus à rien une
+        // fois l'accueil lu.
+        //
+        // Ce qui débloque le retrait, c'est que l'écran ait maintenant **une
+        // porte qui ne se ferme jamais** : « Autorisations » vit désormais au
+        // bas de la colonne, à côté de « Réglages ». L'entrée de menu redevient
+        // ce qu'elle aurait toujours dû être — une alerte, pas un raccourci —
+        // et elle réapparaît d'elle-même si macOS révoque une autorisation,
+        // grâce au rafraîchissement posé sur « Ouvrir bran… ».
+        if model.isFullyReady == false {
+            Button("Bienvenue — il reste à faire…") {
+                WindowPresenter.bringToFront("permissions", using: openWindow)
+            }
 
-        Divider()
+            Divider()
+        }
 
         Button("Quitter bran") {
             NSApplication.shared.terminate(nil)

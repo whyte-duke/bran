@@ -69,15 +69,68 @@ enum AgentTranscripts {
                 )
 
                 // Plusieurs transcriptions par dossier, c'est la norme : chaque
-                // `--resume` en ouvre une. La clé de voie étant le dossier, on
-                // garde la plus avancée — celle du fichier touché le plus
-                // récemment gagne, puisqu'on les parcourt dans l'ordre du
-                // système de fichiers et qu'on écrase.
-                byLane[identity.key] = observation(for: gated, identity: identity, now: now)
+                // `--resume` en ouvre une, et deux fenêtres peuvent travailler
+                // sur le même dépôt. La clé de voie étant le dossier, il faut
+                // en élire une.
+                //
+                // **Ce n'était pas une élection, c'était un écrasement.** Le
+                // commentaire d'origine affirmait garder « la plus avancée »
+                // parce que les fichiers sont parcourus « dans l'ordre du
+                // système de fichiers » — mais `contentsOfDirectory` ne promet
+                // aucun ordre, et surtout pas celui des dates de modification.
+                // La gagnante était donc tirée au sort à chaque tic : une
+                // session qui travaille et une session qui attend dans le même
+                // dossier faisaient basculer l'état de la voie d'un tic à
+                // l'autre, avec l'alerte et le panneau qui vont avec.
+                //
+                // La règle est maintenant écrite, et elle répond à la question
+                // que l'utilisateur se pose vraiment — « ce dossier a-t-il
+                // besoin de moi » : si **quelque chose y tourne**, la voie
+                // travaille ; sinon c'est l'attente la plus récente qui parle.
+                let candidate = observation(for: gated, identity: identity, now: now)
+                byLane[identity.key] = elect(candidate, over: byLane[identity.key])
             }
         }
 
         return Array(byLane.values)
+    }
+
+    /// Départage deux transcriptions du même dossier. **Déterministe**, et
+    /// c'est tout ce qu'on lui demande.
+    ///
+    /// L'ordre de préférence : ce qui travaille l'emporte sur ce qui attend, ce
+    /// qui attend l'emporte sur ce qui ne dit rien, et à égalité c'est
+    /// l'horodatage le plus récent qui tranche. Aucun de ces trois critères ne
+    /// dépend de l'ordre dans lequel le disque a rendu ses fichiers.
+    private static func elect(
+        _ candidate: LaneObservation,
+        over incumbent: LaneObservation?
+    ) -> LaneObservation {
+        guard let incumbent else { return candidate }
+
+        let rank: (LaneObservation) -> Int = { observation in
+            switch observation.certain {
+            case .working: 2
+            case .waiting: 1
+            case nil: 0
+            }
+        }
+
+        let (new, old) = (rank(candidate), rank(incumbent))
+        if new != old { return new > old ? candidate : incumbent }
+
+        // Même rang : la plus récente. `certainSince` porte l'horodatage écrit
+        // par l'outil lui-même, `stillFor` une durée d'immobilité — donc plus
+        // elle est **petite**, plus la transcription est fraîche.
+        switch (candidate.certainSince, incumbent.certainSince) {
+        case let (new?, old?): return new >= old ? candidate : incumbent
+        case (_?, nil): return candidate
+        case (nil, _?): return incumbent
+        case (nil, nil):
+            let new = candidate.stillFor ?? .greatestFiniteMagnitude
+            let old = incumbent.stillFor ?? .greatestFiniteMagnitude
+            return new <= old ? candidate : incumbent
+        }
     }
 
     /// Traduit une lecture en observation.

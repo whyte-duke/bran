@@ -42,14 +42,12 @@ final class WatchController {
         case disabled
         case muted
         case lowPower
-        case displayAsleep
 
         var label: String {
             switch self {
             case .disabled: "veille désactivée"
             case .muted: "silence — réunion en cours"
             case .lowPower: "silence — mode économie d'énergie"
-            case .displayAsleep: "écran éteint"
             }
         }
     }
@@ -95,6 +93,14 @@ final class WatchController {
     /// Les dernières mesures de pixels, par clé de voie, et leur âge.
     private var pixels: [String: WindowSampler.Measurement] = [:]
     private var pixelsAt: Duration = .zero
+
+    /// Le temps qu'un prélèvement de pixels a le droit de prendre.
+    ///
+    /// Nommé une fois parce qu'il sert **deux fois** : le budget donné au
+    /// préleveur, et le seuil de péremption qui doit forcément le dépasser.
+    /// Les écrire séparément avait produit exactement l'égalité qui fait
+    /// clignoter toutes les voies — voir `watchWindows`.
+    private var pixelBudget: TimeInterval { settings.tickInterval * 2 }
     /// Depuis quand un prélèvement est en cours. Sert de garde-fou : voir
     /// `requestSample`.
     private var samplingSince: Duration?
@@ -107,7 +113,7 @@ final class WatchController {
     init(settings: WatchSettings, store: WatchStore) {
         self.settings = settings
         self.store = store
-        self.focus = HumanFocus(startedAt: .zero)
+        self.focus = HumanFocus()
         observeSystem()
     }
 
@@ -183,6 +189,10 @@ final class WatchController {
         // inventées.
         if step.jumped {
             forgetEverything()
+            // …mais l'absence, elle, n'est pas inconnue : on en connaît les deux
+            // bornes exactement. C'est la seule chose qu'une veille apprend au
+            // lieu de la détruire.
+            store.recordSleep(seconds: step.slept, endingAt: now)
         }
 
         // Le jour a changé : un intervalle qui commence à 23 h 50 et se ferme à
@@ -190,7 +200,34 @@ final class WatchController {
         if store.dayChanged(at: now) {
             store.flush()
             await store.reload()
+            // **Et c'est le seul moment où la rétention peut être tenue.**
+            //
+            // La purge ne tournait qu'au lancement de l'application et au
+            // changement de réglage. Sur une application de barre de menus, qui
+            // reste ouverte des semaines, « conserver 7 jours » voulait donc
+            // dire « conserver 7 jours à compter du dernier redémarrage » —
+            // c'est-à-dire ne rien supprimer du tout. Le journal du veilleur
+            // écrit des titres de fenêtres : des noms de documents, de projets
+            // et de clients. Une durée de conservation qu'on annonce sans la
+            // tenir est pire que pas de durée du tout, parce qu'elle rassure.
+            //
+            // Ici, exactement une fois par jour, au moment où l'on rouvre déjà
+            // le fichier : la purge est un `removeItem` après lecture d'un nom.
+            await store.purgeExpired(now: now)
         }
+
+        // **La présence est relevée avant tout arbitrage, et notamment avant la
+        // décision de se taire.**
+        //
+        // C'est l'inversion qui compte. Les quatre raisons de silence — veille
+        // désactivée mise à part — sont exactement les moments où l'on veut
+        // savoir si quelqu'un était là : écran éteint, réunion en cours,
+        // économie d'énergie. La version précédente n'écrivait rien pendant
+        // ces périodes, et le journal ne pouvait plus distinguer une pause
+        // déjeuner d'un capteur mort. Trois appels système, aucune capture
+        // d'écran, aucun titre de fenêtre écrit.
+        human = Self.presence()
+        recordPresence(at: now, step: step)
 
         guard let reason = idleReason() else {
             pause = nil
@@ -215,14 +252,35 @@ final class WatchController {
     /// c'est un interrupteur que l'utilisateur a actionné lui-même, et le
     /// respecter sur secteur ne coûte rien de plus qu'un veilleur silencieux
     /// pendant qu'on ne lui demande rien.
+    ///
+    /// **L'écran éteint n'y figure plus.** Il coupait tout, alors qu'il ne
+    /// devrait couper que les pixels : voir `pixelsAreBlind`.
     private func idleReason() -> Pause? {
         if settings.isEnabled == false { return .disabled }
         if isMuted() { return .muted }
         if ProcessInfo.processInfo.isLowPowerModeEnabled { return .lowPower }
-        // Écran éteint : personne ne regarde, et le compositeur ne rendrait de
-        // toute façon que des images figées.
-        if CGDisplayIsAsleep(CGMainDisplayID()) != 0 { return .displayAsleep }
         return nil
+    }
+
+    /// L'écran est éteint : **le capteur de pixels est aveugle, et lui seul**.
+    ///
+    /// Cette distinction était perdue. `displayAsleep` figurait parmi les
+    /// raisons de silence, donc un écran éteint arrêtait le tic entier — y
+    /// compris la lecture des transcriptions d'agent, qui ne regarde aucun
+    /// écran, ne demande aucune autorisation et se moque complètement de savoir
+    /// si un moniteur est allumé.
+    ///
+    /// Ce que ça coûtait, très concrètement : lancer une longue tâche à un agent
+    /// et aller déjeuner. L'écran s'éteint au bout de dix minutes, la tâche
+    /// finit à la douzième, et l'attente commence — mais bran s'était tu à la
+    /// dixième. Au retour, aucune alerte, aucune durée mesurée, et le seul
+    /// scénario que le produit existe pour couvrir n'était justement pas
+    /// couvert.
+    ///
+    /// Le compositeur ne rendant que des images figées, les pixels, eux,
+    /// s'arrêtent bien : `watchWindows` le lit et n'ouvre aucun prélèvement.
+    private var pixelsAreBlind: Bool {
+        CGDisplayIsAsleep(CGMainDisplayID()) != 0
     }
 
     // MARK: - Un tour d'observation
@@ -240,7 +298,9 @@ final class WatchController {
         }.value
 
         let certainKeys = Set(certain.map(\.identity.key))
-        human = Self.presence()
+        // `human` a déjà été relevé en tête de tic, avant l'arbitrage du
+        // silence : le relever une seconde fois ici donnerait deux mesures d'un
+        // même battement, et c'est celle du journal de présence qui ferait foi.
         focus.update(uptime: uptime, human: human, within: settings.tickInterval * 2)
 
         let windows = watchWindows(certain: certain, keys: certainKeys, uptime: uptime)
@@ -301,14 +361,38 @@ final class WatchController {
             screenProblem = ScreenAccess.diagnosis
             return []
         }
+
+        // L'écran éteint arrête les pixels, et rien d'autre. Les voies déjà
+        // mesurées ne sont pas rendues `unknown` de force : elles cessent
+        // simplement d'être rafraîchies, et la péremption de deux tics s'en
+        // charge — c'est la même règle que pour un prélèvement en retard.
+        guard pixelsAreBlind == false else {
+            screenProblem = "L'écran est éteint : les fenêtres ne sont plus observées. Les sessions d'agent, elles, continuent de l'être."
+            return []
+        }
         screenProblem = nil
 
         requestSample(uptime: uptime, certainKeys: certainKeys)
 
-        // Des mesures plus vieilles que deux tics ne valent plus rien : le
-        // prélèvement s'est figé ou la fenêtre a disparu. `motionRatio: nil`
-        // donne `.unknown`, ce qui est la forme exacte de CR-5.
-        let staleAfter = settings.tickInterval * 2
+        // Des mesures trop vieilles ne valent plus rien : le prélèvement s'est
+        // figé ou la fenêtre a disparu. `motionRatio: nil` donne `.unknown`, ce
+        // qui est la forme exacte de CR-5.
+        //
+        // **Le budget de capture entre dans le seuil, et c'est le correctif.**
+        // La version précédente comparait deux tics à un âge compté depuis la
+        // *demande* du prélèvement — alors que le prélèvement a le droit de
+        // durer `plan.timeBudget`, qui vaut lui-même deux tics. Une capture qui
+        // consommait son budget arrivait donc périmée à la seconde où elle
+        // arrivait : sur une machine chargée, ou simplement avec vingt fenêtres
+        // ouvertes, toutes les voies observées à l'image clignotaient entre
+        // « travaille » et « pas observable » à chaque tic — et le journal
+        // écrivait la même alternance, ligne après ligne.
+        //
+        // Le seuil juste est donc « le temps qu'un prélèvement a le droit de
+        // prendre, plus deux tics de grâce ». Deux tics est la même tolérance
+        // que celle de `WatchLedger.pulse`, et pour la même raison : absorber un
+        // battement sauté sans fabriquer un trou.
+        let staleAfter = pixelBudget + settings.tickInterval * 2
         let age = WatchClock.seconds(from: pixelsAt, to: uptime)
         let folders = LaneDeduplication.folderNames(of: certain.map(\.identity))
 
@@ -346,7 +430,7 @@ final class WatchController {
         }
 
         var plan = WindowSampler.Plan(busyRatio: settings.busyRatio)
-        plan.timeBudget = settings.tickInterval * 2
+        plan.timeBudget = pixelBudget
         plan.cadence.waitingAfter = settings.thresholds.waitingAfter
         plan.cadence.certain = certainKeys
         plan.cadence.states = Dictionary(
@@ -372,6 +456,49 @@ final class WatchController {
                 self.isSampling = false
             }
         }
+    }
+
+    // MARK: - La présence
+
+    /// Le verrouillage de session, tenu à jour par notification.
+    ///
+    /// **Il n'y a pas d'API pour le demander.** `CGSessionCopyCurrentDictionary`
+    /// expose `kCGSSessionOnConsoleKey`, mais il répond « sur console » pour un
+    /// écran simplement verrouillé — il distingue le changement d'utilisateur
+    /// rapide, pas le verrou. Les deux notifications distribuées sont le seul
+    /// signal juste, et elles imposent de tenir un état plutôt que d'interroger.
+    ///
+    /// Le défaut est « déverrouillé » : bran démarre au lancement de la session,
+    /// donc déverrouillé, et se tromper dans ce sens fabrique au pire une
+    /// présence en trop pendant quelques secondes — jamais une absence
+    /// inventée.
+    private var isScreenLocked = false
+
+    /// Écrit la présence de ce battement, ou n'écrit rien.
+    ///
+    /// La durée versée est **murale** et non celle de l'horloge suspendue : voir
+    /// `PresenceEvent.d`, où le choix inverse de `WatchEvent` est justifié.
+    private func recordPresence(at now: Date, step: WatchClock.Step) {
+        let input = PresenceInput(
+            isScreenLocked: isScreenLocked,
+            isDisplayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
+            // La veille de ce pas a déjà été écrite en intervalle fermé par
+            // `recordSleep` : la redire ici ouvrirait une absence au moment
+            // précis où l'utilisateur revient.
+            machineSlept: false,
+            idleSeconds: human.idleSeconds
+        )
+
+        guard let presence = Presence.resolve(input) else {
+            // Capteur d'inactivité muet. On ferme ce qui est ouvert plutôt que
+            // de l'étendre sur une mesure qu'on n'a pas : le trou qui en résulte
+            // dit la vérité, et c'est exactement ce que `Presence` n'a pas de
+            // cas pour représenter.
+            store.flushPresence()
+            return
+        }
+
+        store.record(presence: presence, at: now, elapsed: step.elapsed + step.slept)
     }
 
     // MARK: - CR-1, la présence humaine
@@ -442,6 +569,27 @@ final class WatchController {
                 guard let self else { return }
                 self.store.flush()
             }
+        })
+
+        // **Le verrou, et son centre à lui.** Un troisième centre de
+        // notifications, après `NSWorkspace.shared.notificationCenter` et
+        // `NotificationCenter.default` : `com.apple.screenIsLocked` n'est postée
+        // que sur le centre **distribué**, celui qui traverse les processus.
+        // S'abonner au mauvais des trois ne lève rien — l'observateur ne se
+        // déclenche jamais — et le défaut ne se verrait qu'en verrouillant son
+        // écran pour de vrai, ce qu'aucun test ne fait.
+        let distributed = DistributedNotificationCenter.default()
+
+        observers.append(distributed.addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.isScreenLocked = true }
+        })
+
+        observers.append(distributed.addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.isScreenLocked = false }
         })
     }
 

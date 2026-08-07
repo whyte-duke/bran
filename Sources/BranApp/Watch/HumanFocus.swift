@@ -18,19 +18,16 @@ import Foundation
 /// croise « quelle fenêtre est devant » avec « le système a vu un événement
 /// récemment », deux informations que macOS donne gratuitement.
 ///
-/// **Le cas de la voie jamais vue au premier plan.** Rendre `nil` la
-/// condamnerait à ne jamais pouvoir attendre. On rend donc le temps écoulé
-/// depuis le démarrage du veilleur : c'est vrai — elle n'a pas été touchée
-/// depuis au moins ça — et ça se corrige tout seul dès qu'on l'active une fois.
+/// **Le cas de la voie jamais vue au premier plan**, qui est celui où ce type
+/// s'est trompé le plus longtemps. On rend `nil`, et le résolveur en fait ce
+/// qu'il a toujours dit qu'il en ferait : il refuse de conclure à une attente.
+/// Voir `sinceTouched`, où le raisonnement est écrit en entier.
 @MainActor
 final class HumanFocus {
 
     private var touched: [String: Duration] = [:]
-    private let startedAt: Duration
 
-    init(startedAt: Duration) {
-        self.startedAt = startedAt
-    }
+    init() {}
 
     /// À appeler une fois par tic, avant de résoudre.
     ///
@@ -42,8 +39,35 @@ final class HumanFocus {
         touched[identity.key] = uptime
     }
 
+    /// Depuis quand l'humain n'a pas touché cette voie. **`nil` quand il ne l'a
+    /// jamais touchée**, ce qui n'est pas la même chose que « il y a
+    /// longtemps ».
+    ///
+    /// La version précédente rendait le temps écoulé depuis le démarrage du
+    /// veilleur, en se justifiant ainsi : « c'est vrai — elle n'a pas été
+    /// touchée depuis au moins ça — et ça se corrige tout seul dès qu'on
+    /// l'active une fois ». Les deux moitiés de la phrase sont exactes et la
+    /// conclusion est fausse, parce qu'elle oublie le cas où l'on ne l'active
+    /// **jamais**.
+    ///
+    /// Ce que ça donnait : toute fenêtre visible et immobile que l'utilisateur
+    /// n'a pas mise au premier plan — un onglet de documentation laissé ouvert,
+    /// une fenêtre de préférences, un lecteur PDF sur un second écran — passait
+    /// à « vous attend » au bout de trois minutes de fonctionnement du veilleur,
+    /// et pouvait rafler le routeur d'attention. C'est-à-dire le générateur de
+    /// fausses alertes que `lastTouchedByHuman` avait été introduit pour
+    /// supprimer, réintroduit par sa propre valeur de repli.
+    ///
+    /// `WatchResolver` sait déjà quoi faire de `nil` : il refuse de conclure à
+    /// une attente et laisse la voie en `stale`, « un état visible qui ne
+    /// dérange personne, plutôt qu'une alerte inventée ». Il ne restait qu'à le
+    /// lui dire.
+    ///
+    /// Les sessions d'agent ne perdent rien : un capteur certain court-circuite
+    /// cette clause avant même de la lire.
     func sinceTouched(_ key: String, uptime: Duration) -> TimeInterval? {
-        WatchClock.seconds(from: touched[key] ?? startedAt, to: uptime)
+        guard let at = touched[key] else { return nil }
+        return WatchClock.seconds(from: at, to: uptime)
     }
 
     func forget() {

@@ -99,7 +99,16 @@ public struct LaneIdentity: Hashable, Sendable, Codable {
             return LaneIdentity(
                 key: key,
                 precision: .fragile,
-                displayName: title.isEmpty ? applicationName : title
+                // **Le titre nettoyé, comme la clé.** La version précédente
+                // affichait le titre brut : la clé était donc stable pendant que
+                // le nom, lui, portait le compteur de notifications et le
+                // caractère d'animation du spinner. Une même voie changeait de
+                // nom d'un tic à l'autre dans l'interface, et le journal en
+                // gardait la trace — si bien qu'un projet relu le lendemain
+                // s'appelait « ⠂ Compilation (3) » un jour et « ⠄ Compilation »
+                // le suivant. Nommer autrement que ce qu'on identifie n'a aucun
+                // sens ; `TitleNoise` existe exactement pour ça.
+                displayName: stable.isEmpty ? applicationName : stable
             )
         }
 

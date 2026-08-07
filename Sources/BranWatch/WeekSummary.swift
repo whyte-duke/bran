@@ -42,9 +42,23 @@ public struct WeekSummary: Equatable, Sendable {
     /// mois si le veilleur sert à quelque chose.
     public let waitingSeconds: TimeInterval
 
-    /// Le temps que bran **n'a pas su lire** (`LaneState.unknown`). Il est
-    /// compté et montré au lieu d'être écarté : un trou visible est réparable,
-    /// un trou silencieux se confond avec du repos.
+    /// Le temps que bran **n'a pas su lire** (`LaneState.unknown`), mesuré à
+    /// l'horloge murale.
+    ///
+    /// **C'est la seule des quatre durées qui soit une union et pas une somme,
+    /// et c'en est la définition même.** `worked` et `waiting` cumulent du
+    /// temps-voie : deux sessions qui avancent une heure en parallèle *ont* fait
+    /// deux heures de travail, et `parallelism` est là pour dire à quel prix.
+    /// « Non observé » ne se cumule pas — c'est une propriété de l'observateur,
+    /// pas des voies. Quinze fenêtres illisibles pendant dix minutes font dix
+    /// minutes d'aveuglement, pas deux heures trente.
+    ///
+    /// La version précédente les additionnait, et le chiffre annoncé montait
+    /// avec le nombre de fenêtres ouvertes : une journée à vingt onglets
+    /// affichait plus d'heures « non observées » qu'elle n'en comptait.
+    ///
+    /// Il reste compté et montré au lieu d'être écarté : un trou visible est
+    /// réparable, un trou silencieux se confond avec du repos.
     public let unknownSeconds: TimeInterval
 
     public let parallelism: Parallelism
@@ -249,9 +263,13 @@ extension WeekSummary {
 
         var worked: TimeInterval = 0
         var waiting: TimeInterval = 0
-        var unknown: TimeInterval = 0
 
         var workingSpans: [(from: Date, to: Date)] = []
+        // « Non observé » se mesure en union, pas en somme : voir
+        // `unknownSeconds`. On garde donc les intervalles au lieu d'un total,
+        // globalement et par jour.
+        var unknownSpans: [(from: Date, to: Date)] = []
+        var unknownPerDay: [String: [(from: Date, to: Date)]] = [:]
 
         for event in events {
             // Un intervalle qui déborde de la fenêtre est **rogné**, pas
@@ -262,7 +280,10 @@ extension WeekSummary {
             switch event.state {
             case .working: worked += clipped.seconds
             case .waiting: waiting += clipped.seconds
-            case .unknown: unknown += clipped.seconds
+            case .unknown:
+                if clipped.to > clipped.from {
+                    unknownSpans.append((clipped.from, clipped.to))
+                }
             case .stale, .abandoned: break
             }
 
@@ -272,12 +293,15 @@ extension WeekSummary {
             // peut porter un intervalle à cheval, et le perdre décalerait
             // silencieusement l'histogramme.
             for slice in split(clipped, over: boundaries, calendar: calendar) {
+                if event.state == .unknown {
+                    unknownPerDay[slice.key, default: []].append((slice.from, slice.to))
+                    continue
+                }
                 var bucket = perDay[slice.key] ?? (0, 0, 0)
                 switch event.state {
                 case .working: bucket.worked += slice.seconds
                 case .waiting: bucket.waiting += slice.seconds
-                case .unknown: bucket.unknown += slice.seconds
-                case .stale, .abandoned: continue
+                case .unknown, .stale, .abandoned: continue
                 }
                 perDay[slice.key] = bucket
             }
@@ -302,7 +326,7 @@ extension WeekSummary {
                 date: day.start,
                 worked: bucket.worked,
                 waiting: bucket.waiting,
-                unknown: bucket.unknown,
+                unknown: union(of: unknownPerDay[day.key] ?? []),
                 isToday: day.key == todayKey
             )
         }
@@ -336,7 +360,7 @@ extension WeekSummary {
             trackedSeconds: worked + waiting,
             workedSeconds: worked,
             waitingSeconds: waiting,
-            unknownSeconds: unknown,
+            unknownSeconds: union(of: unknownSpans),
             parallelism: concurrency(of: workingSpans),
             timeline: timeline(of: markers, from: start, to: end, calendar: calendar)
         )
@@ -390,12 +414,21 @@ extension WeekSummary {
     private struct Slice {
         let key: String
         let seconds: TimeInterval
+        /// Les bornes murales de la tranche. Une somme n'en a pas besoin ; une
+        /// **union** si, et c'est ce que réclame le temps non observé.
+        let from: Date
+        let to: Date
     }
 
     private static func split(_ clipped: Clipped, over days: [Day], calendar: Calendar) -> [Slice] {
         let wall = clipped.to.timeIntervalSince(clipped.from)
         guard wall > 0 else {
-            return [Slice(key: WatchDay.key(for: clipped.from, calendar: calendar), seconds: clipped.seconds)]
+            return [Slice(
+                key: WatchDay.key(for: clipped.from, calendar: calendar),
+                seconds: clipped.seconds,
+                from: clipped.from,
+                to: clipped.from
+            )]
         }
 
         return days.compactMap { day in
@@ -403,8 +436,49 @@ extension WeekSummary {
             let to = min(clipped.to, day.end)
             let overlap = to.timeIntervalSince(from)
             guard overlap > 0 else { return nil }
-            return Slice(key: day.key, seconds: clipped.seconds * overlap / wall)
+            return Slice(
+                key: day.key,
+                seconds: clipped.seconds * overlap / wall,
+                from: from,
+                to: to
+            )
         }
+    }
+
+    /// La durée **couverte** par un ensemble d'intervalles, comptée une seule
+    /// fois quels que soient leurs recouvrements.
+    ///
+    /// Même balayage que `concurrency`, réduit à sa question la plus simple :
+    /// combien de temps la profondeur a-t-elle été non nulle. C'est ce que
+    /// `Parallelism.busySeconds` rend déjà pour le travail ; ici il n'y a que ça
+    /// à savoir.
+    static func union(of spans: [(from: Date, to: Date)]) -> TimeInterval {
+        guard spans.isEmpty == false else { return 0 }
+
+        var points: [(at: Date, delta: Int)] = []
+        points.reserveCapacity(spans.count * 2)
+        for span in spans where span.to > span.from {
+            points.append((span.from, 1))
+            points.append((span.to, -1))
+        }
+        guard points.isEmpty == false else { return 0 }
+
+        points.sort { left, right in
+            left.at == right.at ? left.delta < right.delta : left.at < right.at
+        }
+
+        var depth = 0
+        var covered: TimeInterval = 0
+        var previous = points[0].at
+
+        for point in points {
+            let elapsed = point.at.timeIntervalSince(previous)
+            if elapsed > 0, depth > 0 { covered += elapsed }
+            previous = point.at
+            depth += point.delta
+        }
+
+        return covered
     }
 
     // MARK: - Le parallélisme
@@ -478,13 +552,27 @@ extension WeekSummary {
 
     // MARK: - L'identité d'un projet
 
-    /// Le dossier de travail s'il existe, sinon la voie.
+    /// Le dossier de travail s'il existe, sinon **l'application** — jamais la
+    /// voie.
     ///
     /// Pas le `name` : celui d'une session Claude Code contient la branche
     /// (« crm · feat/api »), si bien qu'un changement de branche ferait
     /// apparaître un deuxième projet portant le même travail.
+    ///
+    /// **Et pas la voie non plus, ce qui était le vrai défaut.** La clé d'une
+    /// fenêtre vaut `win:<paquet>:<titre nettoyé>`, donc chaque titre distinct
+    /// devenait un « projet » : mesuré sur deux jours de journal réel, 125 clés
+    /// pour 18 propriétaires. La ligne « 4 projets » de l'en-tête annonçait
+    /// alors des dizaines, et la liste des projets était une liste de titres de
+    /// fenêtres triée par durée — c'est-à-dire l'écran que ce résumé existe pour
+    /// remplacer.
+    ///
+    /// Un onglet de navigateur n'est pas un projet. L'application, elle, en est
+    /// une approximation honnête tant qu'on n'a pas le domaine — voir
+    /// `Docs/ANALYSEUR.md`, capteur 3.
     static func projectKey(for event: WatchEvent) -> String {
         if let cwd = event.cwd, cwd.isEmpty == false { return cwd }
+        if let owner = applicationKey(of: event.lane) { return owner }
         return event.lane
     }
 
@@ -493,6 +581,32 @@ extension WeekSummary {
            let folder = cwd.split(separator: "/").last, folder.isEmpty == false {
             return String(folder)
         }
+        if let owner = applicationKey(of: event.lane) {
+            return applicationName(from: owner)
+        }
         return event.name.isEmpty ? event.lane : event.name
+    }
+
+    /// `win:com.google.Chrome:GitHub — bran` → `win:com.google.Chrome`.
+    ///
+    /// Rend `nil` sur tout ce qui n'est pas une clé de fenêtre : une session
+    /// Claude Code (`cc:…`) a déjà son dossier, et une clé d'une forme inconnue
+    /// ne doit pas être découpée au hasard.
+    static func applicationKey(of lane: String) -> String? {
+        let parts = lane.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "win", parts[1].isEmpty == false else { return nil }
+        return "win:\(parts[1])"
+    }
+
+    /// `win:com.google.Chrome` → `Chrome`.
+    ///
+    /// Le dernier segment d'un identifiant de paquet est le nom que l'éditeur a
+    /// choisi, et c'est celui que l'utilisateur reconnaît. Quand il n'y a pas de
+    /// point, c'est que `LaneIdentity.window` est retombé sur le nom
+    /// d'application faute d'identifiant : il est alors déjà lisible tel quel.
+    static func applicationName(from key: String) -> String {
+        let raw = String(key.dropFirst("win:".count))
+        guard let last = raw.split(separator: ".").last, last.isEmpty == false else { return raw }
+        return String(last)
     }
 }

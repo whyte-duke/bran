@@ -122,15 +122,91 @@ struct WeekSummaryTests {
         #expect(result.projects[0].worked == 7200)
     }
 
-    @Test("Sans dossier de travail, la voie fait office de projet")
-    func laneIsTheFallbackProject() {
+    /// **Un onglet n'est pas un projet.** Ce test verrouillait l'inverse : il
+    /// affirmait que la clé de voie — donc le titre de la fenêtre — faisait
+    /// office de projet. Mesuré sur deux jours de journal réel, ça donnait 125
+    /// « projets » pour 18 propriétaires, et la ligne « 4 projets » de l'en-tête
+    /// annonçait des dizaines. Faute de mieux, l'application est le bon grain :
+    /// voir `WeekSummary.projectKey`.
+    @Test("Sans dossier de travail, c'est l'application qui fait office de projet")
+    func applicationIsTheFallbackProject() {
         let result = summary([
             event(lane: "win:com.apple.Terminal:build", name: "build", from: date(6, 9), to: date(6, 10), cwd: nil)
         ])
 
         #expect(result.projects.count == 1)
-        #expect(result.projects[0].key == "win:com.apple.Terminal:build")
-        #expect(result.projects[0].name == "build")
+        #expect(result.projects[0].key == "win:com.apple.Terminal")
+        #expect(result.projects[0].name == "Terminal")
+    }
+
+    /// La conséquence qui compte : trois titres du même navigateur font **un**
+    /// projet, pas trois. C'est ce que le compteur de l'en-tête annonce.
+    @Test("Trois titres d'une même application ne font qu'un projet")
+    func troisTitresUnSeulProjet() {
+        let result = summary([
+            event(lane: "win:com.google.Chrome:GitHub", name: "GitHub", from: date(6, 9), to: date(6, 10), cwd: nil),
+            event(lane: "win:com.google.Chrome:Gmail", name: "Gmail", from: date(6, 10), to: date(6, 11), cwd: nil),
+            event(lane: "win:com.google.Chrome:Docs", name: "Docs", from: date(6, 11), to: date(6, 12), cwd: nil),
+        ])
+
+        #expect(result.projects.count == 1)
+        #expect(result.projects[0].name == "Chrome")
+        #expect(result.projects[0].worked == 10800)
+        // Trois voies distinctes ont fait avancer ce « projet », et le dire
+        // reste juste : c'est exactement ce que porte `laneCount`.
+        #expect(result.projects[0].laneCount == 3)
+    }
+
+    /// Une clé qui n'est pas celle d'une fenêtre n'est pas découpée au hasard :
+    /// une session Claude Code a déjà son dossier, et une forme inconnue reste
+    /// intacte plutôt que d'être tronquée par une règle qui ne la vise pas.
+    @Test("Une clé qui n'est pas une fenêtre n'est pas découpée")
+    func cleNonFenetreIntacte() {
+        let result = summary([
+            event(lane: "autre-chose", name: "autre", from: date(6, 9), to: date(6, 10), cwd: nil)
+        ])
+
+        #expect(result.projects[0].key == "autre-chose")
+        #expect(result.projects[0].name == "autre")
+    }
+
+    // MARK: - Le temps non observé
+
+    /// **Le défaut le plus grave que l'audit ait trouvé.** « Non observé » est
+    /// une propriété de l'observateur, pas des voies : quinze fenêtres
+    /// illisibles pendant dix minutes font dix minutes d'aveuglement, pas deux
+    /// heures trente. La version précédente les additionnait, et le chiffre
+    /// affiché montait avec le nombre d'onglets ouverts.
+    @Test("Le temps non observé se compte une fois, pas une fois par fenêtre")
+    func tempsNonObserveSeCompteUneFois() {
+        let result = summary([
+            event(lane: "a", name: "a", state: .unknown, from: date(6, 9), to: date(6, 10), cwd: nil),
+            event(lane: "b", name: "b", state: .unknown, from: date(6, 9), to: date(6, 10), cwd: nil),
+            event(lane: "c", name: "c", state: .unknown, from: date(6, 9), to: date(6, 10), cwd: nil),
+        ])
+
+        #expect(result.unknownSeconds == 3600)
+        #expect(result.days.first(where: \.isToday)?.unknown == 3600)
+    }
+
+    @Test("Deux périodes non observées disjointes s'ajoutent")
+    func periodesDisjointesSAjoutent() {
+        let result = summary([
+            event(lane: "a", name: "a", state: .unknown, from: date(6, 9), to: date(6, 10), cwd: nil),
+            event(lane: "b", name: "b", state: .unknown, from: date(6, 14), to: date(6, 15), cwd: nil),
+        ])
+
+        #expect(result.unknownSeconds == 7200)
+    }
+
+    @Test("Deux périodes non observées qui se chevauchent à moitié ne comptent qu'une fois le recouvrement")
+    func chevauchementCompteUneFois() {
+        let result = summary([
+            event(lane: "a", name: "a", state: .unknown, from: date(6, 9), to: date(6, 11), cwd: nil),
+            event(lane: "b", name: "b", state: .unknown, from: date(6, 10), to: date(6, 12), cwd: nil),
+        ])
+
+        #expect(result.unknownSeconds == 10800)
     }
 
     @Test("Les projets sont triés du plus long au plus court")

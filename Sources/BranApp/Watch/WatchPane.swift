@@ -166,7 +166,6 @@ struct WatchPane: View {
         case .disabled: "binoculars"
         case .muted: "eye.slash"
         case .lowPower: "battery.25"
-        case .displayAsleep: "moon.zzz"
         }
     }
 
@@ -178,8 +177,6 @@ struct WatchPane: View {
             "Une réunion est en cours ou détectée. Le veilleur se tait entièrement : pendant un partage d'écran, il afficherait le nom de vos clients à vos clients."
         case .lowPower:
             "Le mode économie d'énergie est actif. La veille reprendra dès qu'il sera coupé."
-        case .displayAsleep:
-            "L'écran est éteint : personne ne regarde, et le système ne rendrait que des images figées."
         }
     }
 

@@ -26,6 +26,7 @@ struct SectionSidebar: View {
     @Binding var showsSettings: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -118,21 +119,58 @@ struct SectionSidebar: View {
                     .padding(.horizontal, Self.inset)
             }
 
-            Button {
-                showsSettings = true
-            } label: {
-                HStack(spacing: SidebarItem.gap) {
-                    Image(systemName: "gearshape")
-                        .frame(width: SidebarItem.iconWidth)
-                    Text("Réglages")
-                    Spacer()
-                }
-                .contentShape(.rect)
+            // **La porte qui ne se ferme jamais vers l'écran d'accueil.**
+            //
+            // Elle existe parce que l'entrée « Bienvenue » a quitté la barre de
+            // menus une fois les trois capacités en place — voir
+            // `MenuBarContent`. Sans cette ligne, l'écran qui explique ce que
+            // bran sait faire n'aurait plus aucun chemin d'accès, et le jour où
+            // macOS révoque une autorisation après une mise à jour, le seul
+            // recours serait de relancer l'application.
+            //
+            // Le point d'exclamation n'est pas décoratif : il porte l'alerte que
+            // la barre de menus ne montre plus, et il est doublé du libellé pour
+            // que la couleur ne soit pas seule à la porter.
+            FooterButton(
+                symbol: model.isFullyReady ? "hand.raised" : "exclamationmark.triangle.fill",
+                label: model.isFullyReady ? "Autorisations" : "Autorisations — il reste à faire",
+                tint: model.isFullyReady ? nil : Palette.attention
+            ) {
+                WindowPresenter.bringToFront("permissions", using: openWindow)
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, Self.inset)
+
+            FooterButton(symbol: "gearshape", label: "Réglages") {
+                showsSettings = true
+            }
             .padding(.horizontal, Self.inset)
             .padding(.bottom, Space.card)
         }
+    }
+}
+
+/// Une action du bas de colonne. Deux existent, et elles s'alignaient déjà sur
+/// la même gouttière d'icône que les sections : ce type ne fait que cesser de
+/// l'écrire deux fois.
+private struct FooterButton: View {
+    let symbol: String
+    let label: String
+    var tint: Color?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: SidebarItem.gap) {
+                Image(systemName: symbol)
+                    .frame(width: SidebarItem.iconWidth)
+                    .foregroundStyle(tint ?? .primary)
+                Text(label)
+                Spacer()
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 }
 

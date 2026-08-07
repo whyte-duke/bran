@@ -44,6 +44,13 @@ final class WatchStore {
     /// Les intervalles déjà fermés **du jour**. C'est tout ce que l'interface
     /// affiche : personne n'ouvre le veilleur pour lire avant-hier.
     private(set) var today: [WatchEvent] = []
+
+    /// Les intervalles de **présence** du jour, dans le même fichier.
+    ///
+    /// Ils répondent à une question que les précédents ne peuvent pas poser :
+    /// « étais-je là ». Sans eux, une journée sans voie observée est un trou, et
+    /// un trou ne dit pas s'il s'agit d'une pause déjeuner ou d'un capteur mort.
+    private(set) var presenceToday: [PresenceEvent] = []
     private(set) var problem: String?
     private(set) var journalBytes: Int64 = 0
 
@@ -60,6 +67,7 @@ final class WatchStore {
     private let root: @MainActor () -> URL
     private var retention: WatchRetention
     private var ledger: WatchLedger
+    private var presenceLedger: PresenceLedger
 
     /// Le `FileHandle` du jour, gardé ouvert. Rouvert au changement de jour.
     private var handle: FileHandle?
@@ -73,6 +81,7 @@ final class WatchStore {
         self.root = root
         self.retention = retention
         self.ledger = WatchLedger(tickInterval: tickInterval)
+        self.presenceLedger = PresenceLedger(tickInterval: tickInterval)
     }
 
     var folder: URL {
@@ -82,6 +91,7 @@ final class WatchStore {
     func setRetention(_ policy: WatchRetention, tickInterval: TimeInterval) {
         retention = policy
         ledger.pulse = tickInterval * 2.5
+        presenceLedger.pulse = tickInterval * 2.5
         if policy.keepsNothing { closeFile() }
         Task { await purgeExpired() }
     }
@@ -101,7 +111,9 @@ final class WatchStore {
                     total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
                 }
 
-            today = readDay(WatchDay.key(for: .now))
+            let lines = readDay(WatchDay.key(for: .now))
+            today = lines.lanes
+            presenceToday = lines.presence
             waitSecondsToday = today.filter { $0.state == .waiting }.reduce(0) { $0 + $1.d }
             problem = nil
         } catch {
@@ -114,19 +126,33 @@ final class WatchStore {
     /// ligne peut être coupée au milieu par une coupure de courant. C'est
     /// exactement la leçon de CR-6 sur les transcriptions, appliquée à nos
     /// propres fichiers.
-    private func readDay(_ day: String) -> [WatchEvent] {
+    ///
+    /// **Deux formes dans un seul fichier**, et c'est la même tolérance qui les
+    /// sépare. Une ligne de présence porte `k` et n'a ni `lane` ni `state` ;
+    /// une ligne de voie a l'inverse. Chacun des deux décodeurs échoue
+    /// proprement sur les lignes de l'autre, exactement comme il échoue déjà sur
+    /// une ligne coupée en deux. Aucun aiguillage à écrire, aucun format à
+    /// migrer : les journaux d'avant la présence se relisent tels quels.
+    private func readDay(_ day: String) -> (lanes: [WatchEvent], presence: [PresenceEvent]) {
         let url = folder.appending(path: "\(day).jsonl")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return ([], []) }
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
 
-        return text
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .compactMap { line in
-                guard let data = line.data(using: .utf8) else { return nil }
-                return try? decoder.decode(WatchEvent.self, from: data)
+        var lanes: [WatchEvent] = []
+        var presence: [PresenceEvent] = []
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let data = line.data(using: .utf8) else { continue }
+            if let event = try? decoder.decode(PresenceEvent.self, from: data) {
+                presence.append(event)
+            } else if let event = try? decoder.decode(WatchEvent.self, from: data) {
+                lanes.append(event)
             }
+        }
+
+        return (lanes, presence)
     }
 
     // MARK: - Écriture
@@ -154,6 +180,36 @@ final class WatchStore {
         }
     }
 
+    /// Absorbe la présence de l'humain. Même contrat que `record(_:at:elapsed:)`,
+    /// sur un registre qui n'a qu'un intervalle ouvert puisqu'il n'y a qu'un
+    /// humain.
+    ///
+    /// **Appelée même quand le veilleur se tait**, et c'est tout l'intérêt : les
+    /// moments où il se tait — écran éteint, réunion en cours, économie
+    /// d'énergie — sont précisément ceux où l'on veut savoir si quelqu'un était
+    /// là. La présence ne coûte aucune capture d'écran et n'écrit aucun titre.
+    func record(presence: Presence, at now: Date, elapsed: TimeInterval) {
+        if let closed = presenceLedger.beat(presence, at: now, elapsed: elapsed) {
+            write(closed)
+        }
+    }
+
+    /// Ferme le seul intervalle de présence ouvert, sans toucher aux voies.
+    /// Appelée quand le capteur d'inactivité devient muet : mieux vaut un trou
+    /// qu'un intervalle prolongé sur une mesure absente.
+    func flushPresence() {
+        if let closed = presenceLedger.flush() { write(closed) }
+    }
+
+    /// Écrit l'absence correspondant à une veille machine, dont on n'apprend les
+    /// bornes qu'au réveil. Sans elle, une nuit laisserait un trou là où il y a
+    /// une absence parfaitement connue.
+    func recordSleep(seconds: TimeInterval, endingAt now: Date) {
+        for closed in presenceLedger.slept(for: seconds, endingAt: now) {
+            write(closed)
+        }
+    }
+
     /// Ferme tous les intervalles ouverts.
     ///
     /// Appelée à la mise en veille, à la fermeture de bran et au changement de
@@ -161,21 +217,31 @@ final class WatchStore {
     /// justement celui qui durait le plus longtemps.
     func flush() {
         for closed in ledger.flush() { write(closed) }
+        if let closed = presenceLedger.flush() { write(closed) }
     }
 
     private func write(_ event: WatchEvent) {
         today.insert(event, at: 0)
         if event.state == .waiting { waitSecondsToday += event.d }
-        append(event)
+        append(event, from: event.from)
+    }
+
+    private func write(_ event: PresenceEvent) {
+        presenceToday.insert(event, at: 0)
+        append(event, from: event.from)
     }
 
     /// Écrit une ligne. Le `FileHandle` est ouvert une fois et gardé.
-    private func append(_ event: WatchEvent) {
+    ///
+    /// Générique sur le type d'intervalle : les deux formes partagent le même
+    /// fichier, le même roulement à minuit et la même rétention. `start` est
+    /// passé à part parce que `Encodable` ne promet aucune date.
+    private func append(_ event: some Encodable, from start: Date) {
         guard retention.keepsNothing == false else { return }
 
         // Le fichier est celui du **début** de l'intervalle : un intervalle ne
         // traverse jamais minuit, puisqu'on ferme tout au changement de jour.
-        let day = WatchDay.key(for: event.from)
+        let day = WatchDay.key(for: start)
         do {
             let handle = try self.handle(for: day)
             let encoder = JSONEncoder()
