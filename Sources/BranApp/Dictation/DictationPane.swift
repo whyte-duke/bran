@@ -72,7 +72,7 @@ struct DictationPane: View {
 
             if case .failed(let reason) = controller.phase {
                 NoticeRow(text: reason.remedy, symbol: "exclamationmark.triangle.fill", tint: .red) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.small) {
                         // Le bouton de réparation d'abord : c'est ce qu'on veut
                         // faire, pas acquitter un message.
                         if let repair = repair(for: reason) {
@@ -149,7 +149,7 @@ struct DictationPane: View {
             ContentUnavailableView.search(text: query)
         } else {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
+                LazyVStack(alignment: .leading, spacing: Space.stack) {
                     ForEach(grouped, id: \.day) { group in
                         Section {
                             ForEach(group.entries) { entry in
@@ -337,7 +337,7 @@ private struct DictationCard: View {
             // seulement s'il diffère : le montrer toujours doublerait chaque
             // carte pour une information qu'on consulte une fois sur cinquante.
             if isExpanded, let raw = entry.rawText {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: Space.tight) {
                     Text("Avant dictionnaire")
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.tertiary)
@@ -426,7 +426,7 @@ private struct DictationCard: View {
                 .opacity(0.12)
                 .accessibilityHidden(true)
 
-            HStack(spacing: 8) {
+            HStack(spacing: Space.small) {
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.8)

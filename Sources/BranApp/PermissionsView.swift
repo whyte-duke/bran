@@ -175,7 +175,7 @@ struct PermissionsView: View {
             case .downloading(let fraction):
                 // La progression réelle, pas un tourniquet : 483 Mo sans chiffre
                 // en face, c'est une attente qu'on ne sait pas mesurer.
-                VStack(alignment: .trailing, spacing: 3) {
+                VStack(alignment: .trailing, spacing: Space.tight) {
                     ProgressView(value: fraction)
                         .progressViewStyle(.linear)
                         .frame(width: 130)

@@ -18,7 +18,7 @@ struct StatusBanner: View {
                 .frame(width: 9, height: 9)
                 .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: Space.line) {
                 Text(headline)
                     .font(Type.groupHead)
                 Text(subline)

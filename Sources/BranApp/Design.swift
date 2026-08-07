@@ -16,6 +16,14 @@ import SwiftUI
 
 /// Une échelle de 4 points, et rien d'autre.
 enum Space {
+    /// 1 — entre un titre et son sous-titre, dans une étiquette de deux lignes.
+    ///
+    /// **L'échelon manquant, trouvé en mesurant.** Quatre vues écrivaient
+    /// `spacing: 1` en clair pour la même figure — un libellé au-dessus de sa
+    /// précision — parce qu'aucun échelon ne descendait sous 2. Deux points
+    /// séparent déjà deux éléments distincts ; ces deux lignes-là n'en sont
+    /// qu'un, et les écarter davantage les fait lire comme deux.
+    static let line: CGFloat = 1
     /// 2 — entre deux icônes d'une même barre d'actions.
     static let hair: CGFloat = 2
     /// 4 — entre un libellé et sa valeur.
@@ -43,6 +51,13 @@ enum Radius {
     static let field: CGFloat = 8
     /// 12 — une carte de liste, un panneau.
     static let card: CGFloat = 12
+    /// 14 — un panneau de tableau de bord.
+    ///
+    /// Deux points de plus qu'une carte de liste, et c'est délibéré : un
+    /// panneau contient des cartes, et un conteneur au même rayon que son
+    /// contenu donne cette impression d'emboîtement approximatif qu'on n'arrive
+    /// pas à nommer en regardant.
+    static let panel: CGFloat = 14
     /// 26 — la pilule de l'encoche, sur les écrans qui n'en ont pas.
     static let pill: CGFloat = 26
 }
@@ -95,6 +110,35 @@ enum Type {
     static let metaFaint = Font.caption2
     static let groupHead = Font.subheadline.weight(.medium)
 
+    // MARK: Le tableau de bord
+
+    /// **Le chiffre principal d'un écran.** Un seul par colonne, jamais deux.
+    ///
+    /// L'écran Aujourd'hui annonçait « 4 h 08 de travail · 68 % d'une journée de
+    /// 6 h » dans une phrase en `paneLead`. C'est une phrase juste, et c'est
+    /// exactement le problème : on la lit, au lieu de la voir. Un tableau de
+    /// bord se scanne — le chiffre qu'on est venu chercher doit se prendre en
+    /// une fixation, pas en une lecture.
+    ///
+    /// Arrondi comme `timer`, et pour la même raison : ces chiffres changent
+    /// sous les yeux, et une chasse fixe empêche la ligne de gigoter à chaque
+    /// minute qui passe.
+    static let metric = Font.system(.largeTitle, design: .rounded, weight: .semibold)
+
+    /// Le chiffre d'une tuile secondaire. Assez grand pour se détacher de son
+    /// libellé, assez petit pour ne pas concurrencer `metric`.
+    static let metricSmall = Font.system(.title2, design: .rounded, weight: .semibold)
+
+    /// Le libellé **au-dessus** d'un chiffre. Au-dessus et pas en dessous : on
+    /// lit ce qu'on mesure avant de lire la mesure, sinon le nombre arrive sans
+    /// unité et il faut y revenir.
+    static let metricLabel = Font.caption
+
+    /// L'en-tête d'un panneau. Petites capitales, comme toutes les barres de
+    /// titre de tableau de bord depuis toujours : elle doit se voir sans se
+    /// lire, puisqu'on la relit rarement après la première fois.
+    static let panelHead = Font.caption.weight(.semibold)
+
     /// Le chrono : arrondi, chiffres de largeur fixe, pour ne pas gigoter.
     static let timer = Font.system(.title3, design: .rounded, weight: .semibold)
 
@@ -122,6 +166,27 @@ enum Palette {
 
     /// Un panneau encastré : tuile de fait, éditeur de notes, bandeau.
     static let well = AnyShapeStyle(.quinary)
+
+    /// Le fond d'un **panneau de tableau de bord**, et la barre de titre qui le
+    /// coiffe.
+    ///
+    /// Deux valeurs et pas une : c'est la barre plus claire qui fait qu'un
+    /// panneau se lit comme une surface et non comme un paragraphe. Sans elle,
+    /// un titre de section n'est qu'un texte gris de plus dans une colonne, et
+    /// c'est précisément ce qui rendait le journal de bord documentaire plutôt
+    /// que consultable.
+    ///
+    /// Des matériaux et non des couleurs : les deux thèmes et les cinq niveaux
+    /// de transparence de macOS sont alors gérés par le système, ce qu'aucune
+    /// opacité écrite à la main ne fait correctement — la leçon du `.white`
+    /// à 9 % qui ouvre ce fichier.
+    static let panel = AnyShapeStyle(.quinary)
+    static let panelHead = AnyShapeStyle(.quaternary)
+
+    /// Le creux d'une barre de proportion. Toujours visible, y compris à zéro :
+    /// une barre vide doit se voir vide, pas absente — sinon « 0 % » et « pas
+    /// mesuré » se ressemblent.
+    static let trough = AnyShapeStyle(.quaternary)
 
     /// **N'est plus utilisée pour la colonne, et le commentaire d'origine était
     /// faux.** Il promettait que `.selection` « porte déjà le contraste ». Elle
@@ -210,6 +275,19 @@ enum Motion {
     /// dans la seule surface qu'on regarde vraiment, vingt fois par heure.
     static let pulse = Animation.easeOut(duration: 1.25).repeatForever(autoreverses: false)
     static let shuttle = Animation.easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+
+    /// La respiration de la pastille rouge, pendant un enregistrement.
+    ///
+    /// Distincte de `pulse`, qui ne fait qu'aller : celle-ci revient, parce
+    /// qu'une pastille qui s'éteint et se rallume dit « en direct » là où une
+    /// pastille qui pulse dit « en cours de calcul ». Distincte de `shuttle`
+    /// aussi, plus lente : une navette de chargement doit paraître pressée, un
+    /// témoin d'enregistrement dure une heure et ne doit fatiguer personne.
+    ///
+    /// Elle vivait en clair dans `RecordingBar`, seule durée de boucle de
+    /// l'application à ne pas être ici — donc la seule qu'on ne pouvait pas
+    /// comparer aux deux autres.
+    static let breathe = Animation.easeInOut(duration: 1).repeatForever(autoreverses: true)
 
     /// La même courbe, pour `withAnimation` **au point de mutation**.
     ///

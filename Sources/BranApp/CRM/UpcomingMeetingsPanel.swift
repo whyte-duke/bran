@@ -53,7 +53,7 @@ private struct UpcomingMeetingRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: Space.small) {
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: Space.line) {
                 Text(booking.displayName)
                     .font(Type.cardBody.weight(.medium))
                     .lineLimit(1)

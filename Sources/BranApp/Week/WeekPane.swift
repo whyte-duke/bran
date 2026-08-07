@@ -220,7 +220,7 @@ struct WeekPane: View {
                 // Le fil des jalons est commun aux deux : ce qui est sorti de la
                 // journée est exactement ce qui est sorti de la semaine, en plus
                 // court.
-                LazyVStack(alignment: .leading, spacing: Space.gutter) {
+                LazyVStack(alignment: .leading, spacing: Space.stack) {
                     if loader.span == .day {
                         DayPane(model: model, day: loader.today, summary: summary, now: readAt)
                     } else {
@@ -247,17 +247,26 @@ struct WeekPane: View {
     /// affiché pendant la lecture dirait le contraire — et il le dirait à
     /// chaque lancement, sur une bibliothèque pleine.
     private var skeleton: some View {
-        VStack(alignment: .leading, spacing: Space.gutter) {
-            Text("Aujourd'hui : 4 h 08 de travail · 3 projets")
-                .font(Type.cardTitle)
-            RoundedRectangle(cornerRadius: Radius.field, style: .continuous)
-                .fill(Palette.well)
-                .frame(height: WeekMetric.chartHeight)
-            ForEach(0..<3, id: \.self) { _ in
+        VStack(alignment: .leading, spacing: Space.stack) {
+            Panel(title: loader.span.headline) {
+                VStack(alignment: .leading, spacing: Space.inset) {
+                    HeroMetric(label: "Travail attribué", value: "4 h 08")
+                    MetricRow {
+                        GridRow {
+                            MetricTile(label: "Sans vous", value: "1 h 20")
+                            MetricTile(label: "En attente", value: "18 min")
+                            MetricTile(label: "En parallèle", value: "1,6")
+                        }
+                    }
+                }
+            }
+
+            Panel(title: loader.span == .day ? "La journée" : "Le rythme") {
                 RoundedRectangle(cornerRadius: Radius.field, style: .continuous)
                     .fill(Palette.well)
-                    .frame(height: WeekMetric.rowHeight)
+                    .frame(height: loader.span == .day ? DayMetric.bandHeight : WeekMetric.chartHeight)
             }
+
             Spacer(minLength: 0)
         }
         .padding(.horizontal, Space.gutter)
@@ -269,79 +278,80 @@ struct WeekPane: View {
 
     // MARK: - 1. La ligne chiffrée
 
-    /// La réponse, en une phrase. Tout le reste de la page la détaille.
+    /// **La réponse, en un chiffre.** Elle était une phrase, et c'était le
+    /// défaut de forme de cet écran : une phrase se lit, un tableau de bord se
+    /// scanne. Le total en grand, le reste en tuiles autour.
     private var headline: some View {
-        VStack(alignment: .leading, spacing: Space.tight) {
-            Text(headlineText)
-                .font(Type.paneLead.weight(.medium))
-                .fixedSize(horizontal: false, vertical: true)
+        Panel(title: summary.span.headline, trailing: periodLabel) {
+            VStack(alignment: .leading, spacing: Space.inset) {
+                HeroMetric(
+                    label: "Travail attribué",
+                    value: WatchPane.duration(summary.workedSeconds),
+                    detail: averageDetail
+                )
 
-            if let parallelismText {
-                Text(parallelismText)
-                    .font(Type.meta)
+                MetricRow {
+                    GridRow {
+                        MetricTile(
+                            label: "Sans vous",
+                            value: WatchPane.duration(summary.machineSeconds),
+                            detail: "n'entre pas dans le total"
+                        )
+                        MetricTile(
+                            label: "En attente",
+                            value: WatchPane.duration(summary.waitingSeconds),
+                            detail: "à ne rien faire pendant qu'une voie vous attendait",
+                            tint: summary.waitingSeconds > 0 ? Palette.attention : nil
+                        )
+                        MetricTile(
+                            label: "En parallèle",
+                            value: summary.parallelism.busySeconds > 0
+                                ? summary.parallelism.average.formatted(.number.precision(.fractionLength(1)))
+                                : "—",
+                            detail: summary.parallelism.busySeconds > 0
+                                ? "voies en moyenne, \(summary.parallelism.peak) au maximum"
+                                : "aucun avancement mesuré"
+                        )
+                    }
+                }
+
+                if summary.unknownSeconds > 0 {
+                    // Le trou est dit, pas gommé : un capteur muet doit se voir.
+                    Label(
+                        "\(WatchPane.duration(summary.unknownSeconds)) non observées sur la période.",
+                        systemImage: "eye.slash"
+                    )
+                    .font(Type.metaFaint)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
-        .accessibilityElement(children: .combine)
     }
 
-    /// **Le premier chiffre est le vôtre, et il ne l'était pas.**
-    ///
-    /// La ligne annonçait `trackedSeconds`, qui additionne tout ce qui a bougé à
-    /// l'écran. Sur deux jours de journal réel, cela faisait 12 h dont 7,6 h de
-    /// fenêtres que personne ne regardait. Elle annonce désormais le travail
-    /// attribué — voir `WeekSummary.isYours` — et ce qui a tourné sans vous est
-    /// dit à part, dans la phrase du dessous. Deux chiffres qui ne s'ajoutent
-    /// pas, plutôt qu'un seul qui les mélange.
-    private var headlineText: String {
-        var parts = ["\(WatchPane.duration(summary.workedSeconds)) de travail"]
-
-        if summary.projects.isEmpty == false {
-            parts.append("\(summary.projects.count) projet\(summary.projects.count > 1 ? "s" : "")")
-        }
-        if summary.waitingSeconds > 0 {
-            parts.append("\(WatchPane.duration(summary.waitingSeconds)) d'attente")
-        }
-        if summary.unknownSeconds > 0 {
-            // Le trou est dit, pas gommé : un capteur muet doit se voir.
-            parts.append("\(WatchPane.duration(summary.unknownSeconds)) non observées")
-        }
-
-        return "\(summary.span.headline) : " + parts.joined(separator: " · ")
+    /// La moyenne par jour, qui est ce que la semaine apporte et que la journée
+    /// ne peut pas donner. Sur les jours **où il s'est passé quelque chose** :
+    /// diviser par sept un travail fait en quatre jours répond à une question
+    /// que personne ne se pose.
+    private var averageDetail: String? {
+        let active = summary.days.filter { $0.worked > 0 }
+        guard active.isEmpty == false else { return nil }
+        let average = summary.workedSeconds / Double(active.count)
+        return "\(WatchPane.duration(average)) par jour travaillé, sur \(active.count) jour\(active.count > 1 ? "s" : "")"
     }
 
-    /// Le chiffre qui casse une illusion : on croit faire tourner quatre
-    /// sessions de front, on en fait tourner beaucoup moins. Affiché seulement
-    /// quand il y a de quoi le calculer — une moyenne sur rien ne vaut rien.
-    ///
-    /// Le temps machine le précède depuis qu'il a quitté le total : sans cette
-    /// phrase, il aurait simplement disparu de la page, et une heure qu'on ne
-    /// voit plus nulle part passe pour une heure perdue.
-    private var parallelismText: String? {
-        var sentences: [String] = []
-
-        if summary.machineSeconds > 0 {
-            sentences.append(
-                "\(WatchPane.duration(summary.machineSeconds)) ont avancé sans vous, et ne sont pas comptées ci-dessus."
-            )
-        }
-
-        let parallelism = summary.parallelism
-        if parallelism.busySeconds > 0 {
-            let average = parallelism.average.formatted(.number.precision(.fractionLength(1)))
-            sentences.append(
-                "\(average) voie en parallèle en moyenne, \(parallelism.peak) au maximum, sur \(WatchPane.duration(parallelism.busySeconds)) d'avancement réel."
-            )
-        }
-
-        return sentences.isEmpty ? nil : sentences.joined(separator: " ")
+    private var periodLabel: String {
+        let from = summary.start.formatted(.dateTime.day().month(.abbreviated))
+        let to = summary.end.addingTimeInterval(-1).formatted(.dateTime.day().month(.abbreviated))
+        return "\(from) – \(to)"
     }
 
     // MARK: - 2. L'histogramme
 
     private var histogram: some View {
-        Section {
+        Panel(
+            title: "Le rythme",
+            help: "Une barre par jour, toujours — les jours vides y sont, à zéro. Un histogramme dont les jours sans rien disparaissent ment sur le rythme. Le repère marque aujourd'hui."
+        ) {
             Chart {
                 ForEach(summary.days) { day in
                     // Déclarée avant les barres : les marques se peignent dans
@@ -406,8 +416,6 @@ struct WeekPane: View {
             .frame(height: WeekMetric.chartHeight)
             .accessibilityLabel("Temps par jour")
             .accessibilityValue(histogramSummary)
-        } header: {
-            SectionTitle("Le rythme", detail: "Le repère marque aujourd'hui.")
         }
     }
 
@@ -423,14 +431,27 @@ struct WeekPane: View {
     @ViewBuilder
     private var projects: some View {
         if visibleProjects.isEmpty == false {
-            Section {
-                VStack(alignment: .leading, spacing: Space.inset) {
+            Panel(
+                title: "Sur quoi",
+                trailing: "\(visibleProjects.count)",
+                help: "Le dossier de travail, toutes branches confondues. À défaut de dossier, l'application. La barre compare au plus long de la période, pas au total."
+            ) {
+                VStack(alignment: .leading, spacing: Space.tight) {
                     ForEach(visibleProjects) { project in
-                        ProjectBar(project: project, longest: longestProject)
+                        ShareRow(
+                            name: project.name,
+                            segments: [
+                                .init(seconds: project.worked, tint: Palette.done, label: "de votre travail"),
+                                .init(seconds: project.machine, tint: Palette.machine, label: "sans vous"),
+                                .init(seconds: project.waiting, tint: Palette.attention, label: "d'attente"),
+                            ],
+                            value: WatchPane.duration(project.tracked),
+                            longest: longestProject,
+                            share: project.tracked / projectTotal,
+                            note: project.laneCount > 1 ? "\(project.laneCount) voies" : nil
+                        )
                     }
                 }
-            } header: {
-                SectionTitle("Sur quoi", detail: "Le dossier de travail, toutes branches confondues.")
             }
         }
     }
@@ -439,12 +460,23 @@ struct WeekPane: View {
         max(summary.projects.first?.tracked ?? 0, 1)
     }
 
+    /// Le dénominateur du pourcentage : le total **visible**, pour que les parts
+    /// affichées somment à cent une fois la recherche appliquée. Rapporter au
+    /// total de la période donnerait des lignes filtrées qui font 3 % chacune,
+    /// sans que rien n'explique où sont passés les 91 restants.
+    private var projectTotal: TimeInterval {
+        max(visibleProjects.reduce(0) { $0 + $1.tracked }, 1)
+    }
+
     // MARK: - 4. Le fil des jalons
 
     @ViewBuilder
     private var timeline: some View {
         if visibleTimeline.isEmpty == false {
-            Section {
+            Panel(
+                title: "Ce qui en est sorti",
+                help: "Réunions, dictées et captures, sur la même horloge que le reste."
+            ) {
                 VStack(alignment: .leading, spacing: Space.stack) {
                     ForEach(visibleTimeline) { day in
                         VStack(alignment: .leading, spacing: Space.small) {
@@ -458,8 +490,6 @@ struct WeekPane: View {
                         }
                     }
                 }
-            } header: {
-                SectionTitle("Ce qui en est sorti", detail: "Réunions, dictées et captures, sur la même horloge.")
             }
         }
     }
@@ -512,8 +542,6 @@ private enum WeekMetric {
     /// La hauteur du graphique. Assez pour qu'un écart de vingt minutes se
     /// voie, assez court pour que les projets restent au-dessus du pli.
     static let chartHeight: CGFloat = 168
-    /// L'épaisseur d'une barre de projet.
-    static let barHeight: CGFloat = 10
     /// La hauteur d'une ligne du squelette de chargement.
     static let rowHeight: CGFloat = 44
     /// Le voile qui marque aujourd'hui, et sa largeur en points.
@@ -525,97 +553,6 @@ private enum WeekMetric {
 }
 
 // MARK: - Les pièces
-
-/// Le titre d'un bloc, avec sa phrase d'explication. Elle n'est pas
-/// décorative : « 1,6 voie en parallèle » ne veut rien dire sans savoir sur
-/// quoi la moyenne est prise.
-private struct SectionTitle: View {
-    let title: String
-    let detail: String
-
-    init(_ title: String, detail: String) {
-        self.title = title
-        self.detail = detail
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Space.hair) {
-            Text(title)
-                .font(Type.groupHead)
-            Text(detail)
-                .font(Type.metaFaint)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.bottom, Space.small)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isHeader)
-    }
-}
-
-/// Un projet, sa barre et sa durée.
-///
-/// Le libellé est **au-dessus** de la barre et non à côté : une colonne de noms
-/// de largeur fixe tronque « castral-crm-backend » ou laisse un trou de deux
-/// cents points quand tous les projets s'appellent « bran ».
-private struct ProjectBar: View {
-    let project: WeekSummary.ProjectRow
-    /// Le plus long de la semaine — c'est lui qui fait le 100 %.
-    let longest: TimeInterval
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Space.tight) {
-            HStack(alignment: .firstTextBaseline, spacing: Space.small) {
-                Text(project.name)
-                    .font(Type.cardTitle)
-                    .lineLimit(1)
-
-                if project.laneCount > 1 {
-                    Text("\(project.laneCount) voies")
-                        .font(Type.metaFaint)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: Space.small)
-
-                Text(WatchPane.duration(project.tracked))
-                    .font(Type.cardBody.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            GeometryReader { proxy in
-                HStack(spacing: 0) {
-                    // Deux segments dans une seule barre : ce qui a avancé et
-                    // ce qui a attendu. Deux barres séparées obligeraient à
-                    // comparer deux longueurs pour un seul projet.
-                    Capsule()
-                        .fill(Palette.done)
-                        .frame(width: width(project.worked, in: proxy.size.width))
-                    Capsule()
-                        .fill(Palette.machine)
-                        .frame(width: width(project.machine, in: proxy.size.width))
-                    Capsule()
-                        .fill(Palette.attention)
-                        .frame(width: width(project.waiting, in: proxy.size.width))
-                    Spacer(minLength: 0)
-                }
-            }
-            .frame(height: WeekMetric.barHeight)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(project.name)
-        .accessibilityValue(
-            "\(WatchPane.duration(project.worked)) de votre travail, "
-            + "\(WatchPane.duration(project.machine)) sans vous, "
-            + "\(WatchPane.duration(project.waiting)) d'attente"
-        )
-    }
-
-    private func width(_ seconds: TimeInterval, in available: CGFloat) -> CGFloat {
-        guard longest > 0, seconds > 0 else { return 0 }
-        return max(available * CGFloat(seconds / longest), Space.tight)
-    }
-}
 
 /// Un jalon : ce qui a été produit, et quand.
 private struct MilestoneRow: View {

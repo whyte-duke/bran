@@ -115,7 +115,7 @@ struct WatchPane: View {
             ContentUnavailableView.search(text: query)
         } else {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                LazyVStack(alignment: .leading, spacing: Space.small) {
                     summary
 
                     ForEach(visible, id: \.identity.key) { lane in
@@ -126,8 +126,8 @@ struct WatchPane: View {
                         )
                     }
                 }
-                .padding(.horizontal, 26)
-                .padding(.vertical, 18)
+                .padding(.horizontal, Space.gutter)
+                .padding(.vertical, Space.stack)
             }
             .branAnimation(Motion.enter, value: controller.verdict.lanes.count)
         }
@@ -189,47 +189,52 @@ struct WatchPane: View {
     // MARK: - Résumé du jour
 
     private var summary: some View {
-        HStack(spacing: 14) {
+        MetricRow {
+            GridRow {
             // **Deux mesures, pas une.** Le journal donne le cumul du jour — ce
             // qui a déjà été attendu, et qui ne retombe jamais à zéro — et le
             // résolveur donne ce qui court à cet instant. Les additionner ici
             // est le seul endroit où « la dette d'attente d'aujourd'hui » a un
             // sens complet.
-            metric(
-                value: Self.duration(controller.store.waitSecondsToday + controller.verdict.waitingNow),
-                label: "d'attente aujourd'hui",
-                symbol: "hourglass"
-            )
+                MetricTile(
+                    label: "Attente aujourd'hui",
+                    value: Self.duration(controller.store.waitSecondsToday + controller.verdict.waitingNow),
+                    detail: "cumulée sur toutes les voies"
+                )
 
-            metric(
-                value: "\(controller.verdict.lanes.filter(\.state.deservesAttention).count)",
-                label: "voie(s) qui vous attendent",
-                symbol: "bell.badge"
-            )
+                MetricTile(
+                    label: "Vous attendent",
+                    value: "\(waitingCount)",
+                    detail: waitingCount > 0 ? "à reprendre maintenant" : "rien à reprendre",
+                    tint: waitingCount > 0 ? Palette.attention : nil
+                )
 
-            if controller.verdict.sharedSilence == true {
-                metric(value: "oui", label: "silence partagé", symbol: "moon.stars")
+                MetricTile(
+                    label: "Silence partagé",
+                    value: sharedSilenceLabel,
+                    detail: "vous ne faites rien pendant qu'une machine attend"
+                )
             }
-
-            Spacer(minLength: 0)
         }
-        .padding(.bottom, 4)
+        .padding(.bottom, Space.tight)
     }
 
-    private func metric(value: String, label: String, symbol: String) -> some View {
-        HStack(spacing: 7) {
-            Image(systemName: symbol)
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(value)
-                    .font(.system(size: 15, weight: .semibold).monospacedDigit())
-                Text(label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+    private var waitingCount: Int {
+        controller.verdict.lanes.filter(\.state.deservesAttention).count
+    }
+
+    /// **Trois réponses et non deux.** `sharedSilence` est un `Bool?`, et son
+    /// `nil` veut dire « la présence humaine n'est pas mesurable » — pas
+    /// « non ». La tuile n'apparaissait que sur `true`, si bien que les deux
+    /// autres cas se ressemblaient : on ne pouvait pas distinguer « tout va
+    /// bien » de « le capteur est muet ».
+    private var sharedSilenceLabel: String {
+        switch controller.verdict.sharedSilence {
+        case true: "oui"
+        case false: "non"
+        case nil: "?"
+        default: "?"
         }
-        .accessibilityElement(children: .combine)
     }
 
     /// « 1 h 12 » plutôt que « 4 320 s ». Une dette d'attente se lit en minutes
@@ -295,23 +300,23 @@ private struct LaneCard: View {
     }
 
     private var card: some View {
-        HStack(alignment: .top, spacing: 11) {
+        HStack(alignment: .top, spacing: Space.inset) {
             Image(systemName: lane.state.symbol)
-                .font(.system(size: 14))
+                .font(Type.cardBody)
                 .foregroundStyle(tint)
-                .frame(width: 20)
+                .frame(width: SidebarItem.iconWidth)
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 7) {
+            VStack(alignment: .leading, spacing: Space.tight) {
+                HStack(spacing: Space.small) {
                     Text(lane.identity.displayName)
-                        .font(.callout.weight(.medium))
+                        .font(Type.cardTitle)
                         .lineLimit(1)
 
                     if isNext {
                         Text("à reprendre")
-                            .font(.caption2.weight(.semibold))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
+                            .font(Type.metaFaint.weight(.semibold))
+                            .padding(.horizontal, Space.small)
+                            .padding(.vertical, Space.hair)
                             .background(.orange.opacity(0.18), in: .capsule)
                     }
 
@@ -320,14 +325,14 @@ private struct LaneCard: View {
                         // titre de fenêtre change de nom quand on change
                         // d'onglet, et l'utilisateur doit pouvoir en tenir compte.
                         Image(systemName: "questionmark.circle")
-                            .font(.caption2)
+                            .font(Type.metaFaint)
                             .foregroundStyle(.tertiary)
                             .help("Voie identifiée par le titre de sa fenêtre : elle peut changer d'identité si le titre change.")
                     }
                 }
 
                 Text(lane.because)
-                    .font(.caption)
+                    .font(Type.meta)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -335,13 +340,13 @@ private struct LaneCard: View {
 
             Spacer(minLength: 8)
 
-            VStack(alignment: .trailing, spacing: 2) {
+            VStack(alignment: .trailing, spacing: Space.hair) {
                 Text(lane.state.label)
-                    .font(.caption.weight(.medium))
+                    .font(Type.meta.weight(.medium))
                     .foregroundStyle(tint)
                 if lane.waitingFor > 0 {
                     Text("depuis \(WatchPane.duration(lane.waitingFor))")
-                        .font(.caption2.monospacedDigit())
+                        .font(Type.metaFaint.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
@@ -398,16 +403,16 @@ struct WatchStatusChip: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.small) {
             Circle()
                 .fill(color)
-                .frame(width: 6, height: 6)
+                .frame(width: DayLayout.dot, height: DayLayout.dot)
             Text(label)
-                .font(.caption)
+                .font(Type.meta)
                 .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
+        .padding(.horizontal, Space.small)
+        .padding(.vertical, Space.tight)
         .background(.quaternary.opacity(0.4), in: .capsule)
         .accessibilityElement(children: .combine)
     }

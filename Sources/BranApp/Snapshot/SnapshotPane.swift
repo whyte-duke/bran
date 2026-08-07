@@ -58,7 +58,7 @@ struct SnapshotPane: View {
 
             if case .failed(let reason) = controller.phase {
                 NoticeRow(text: reason.remedy, symbol: "exclamationmark.triangle.fill", tint: .red) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.small) {
                         if let repair = repair(for: reason) {
                             Button(repair.title) {
                                 repair.action()
@@ -124,7 +124,7 @@ struct SnapshotPane: View {
             ContentUnavailableView.search(text: query)
         } else {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
+                LazyVStack(alignment: .leading, spacing: Space.stack) {
                     ForEach(grouped, id: \.day) { group in
                         Section {
                             ForEach(group.entries) { entry in
@@ -217,7 +217,7 @@ private struct SnapshotCard: View {
             // est précisément ce qu'on vient vérifier avant de coller dans un
             // terminal.
             if isExpanded, let raw = entry.rawText, raw != entry.text {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: Space.tight) {
                     Text("Avant corrections typographiques")
                         .font(Type.metaFaint.weight(.medium))
                         .foregroundStyle(.tertiary)
@@ -304,7 +304,7 @@ private struct SnapshotCard: View {
                 .opacity(0.12)
                 .accessibilityHidden(true)
 
-            HStack(spacing: 8) {
+            HStack(spacing: Space.small) {
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.8)

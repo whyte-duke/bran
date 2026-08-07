@@ -32,7 +32,7 @@ struct RecordingBar: View {
         HStack(spacing: Space.stack) {
             indicator
 
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: Space.line) {
                 elapsedLabel
                     .font(Type.timer)
                     .monospacedDigit()
@@ -122,9 +122,7 @@ struct RecordingBar: View {
 
     private var pulseAnimation: Animation? {
         guard reduceMotion == false else { return nil }
-        return shouldPulse
-            ? .easeInOut(duration: 1).repeatForever(autoreverses: true)
-            : Motion.hover
+        return shouldPulse ? Motion.breathe : Motion.hover
     }
 
     private var titleField: some View {

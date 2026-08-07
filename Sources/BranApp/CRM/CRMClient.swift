@@ -183,7 +183,7 @@ private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @u
         task: URLSessionTask,
         didSendBodyData bytesSent: Int64,
         totalBytesSent: Int64,
-        totalBytesExpectedToSend totalBytesExpectedToSend: Int64
+        totalBytesExpectedToSend: Int64
     ) {
         guard totalBytesExpectedToSend > 0 else { return }
         onProgress(Double(totalBytesSent) / Double(totalBytesExpectedToSend))

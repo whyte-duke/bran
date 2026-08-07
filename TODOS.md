@@ -313,3 +313,35 @@ plainly that it trades the Veille section for privacy.
 **Where to start:** `Sources/BranApp/Watch/WatchStore.swift`, the `append`
 method, and `Sources/BranApp/Watch/WatchSettings.swift`, which has no privacy
 setting today.
+
+---
+
+## Extract the shared row from Dictées and Captures
+
+**What:** the two panes carry the same figures — a card header, an action strip,
+a footer of facts — written twice, with the same unnamed sub-scale of spacings
+(5, 6, 7, 9, 11 points) in both.
+
+**Why:** those ten values are the last ones in the app that sit off the 4-point
+scale. Renaming them onto it would shift layouts by one to three points with no
+visible gain and a real regression risk, because the two panes are already
+internally consistent with each other. The number is not the problem; the
+duplication is. Extract the row and the sub-scale disappears with it, replaced by
+whatever the shared component decides once.
+
+**Pros:** closes the design-system adoption gap for real instead of cosmetically.
+Any later change to a card row — a hover state, a keyboard affordance, a new
+action — lands in both sections at once instead of drifting.
+
+**Cons:** the two rows are similar, not identical: a dictation has a duration and
+a word count, a snippet has a region count and a confidence. A component that
+takes eight optional parameters is worse than two honest copies, so the
+extraction has to find the actual shared shape rather than union the two.
+
+**Depends on:** nothing. But it is worth doing right after a third section needs
+the same row, because two callers is the minimum for knowing what to share and
+three is where the shape becomes obvious.
+
+**Where to start:** `Sources/BranApp/Dictation/DictationPane.swift:234` and
+`Sources/BranApp/Snapshot/SnapshotPane.swift:210` — the same `VStack(spacing: 9)`
+in both, with the same children.
