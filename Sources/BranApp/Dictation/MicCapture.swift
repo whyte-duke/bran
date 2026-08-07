@@ -33,7 +33,25 @@ final class MicCapture: @unchecked Sendable {
 
     static let levelSlots = 56
 
-    private let engine = AVAudioEngine()
+    /// **Un moteur neuf par séance, et c'est un correctif, pas une élégance.**
+    ///
+    /// Il était `let`, donc réutilisé. Le repli sur le périphérique système —
+    /// `restartOnSystemDefault` — reconfigurait ce même moteur : retirer son tap,
+    /// l'arrêter, le redémarrer sur un autre périphérique, le tout pendant que le
+    /// thread audio temps réel pouvait être *à l'intérieur* du tap qu'on retire.
+    ///
+    /// Le 7 août 2026, ça a coûté trois crashes en trois minutes, et le journal
+    /// de bran les datait à 24 ms, 2 s et 0,4 s après la ligne « reprise sur le
+    /// système ». Les piles pointaient ailleurs — le callback du guet clavier, le
+    /// `Canvas` de l'encoche —, toutes sur `swift_task_isCurrentExecutor`
+    /// déréférençant un pointeur invalide : la signature d'une mémoire corrompue
+    /// dont la victime est le premier code qui passe, pas le coupable.
+    ///
+    /// La veille, le même binaire avait tourné dix-sept heures sans une seule
+    /// chute : le micro imposé rendait du son, le repli n'était jamais emprunté.
+    /// C'est un chemin rare, et les chemins rares sont ceux qu'on écrit une fois
+    /// puis qu'on n'exécute jamais avant le jour où ils comptent.
+    private var engine = AVAudioEngine()
     private let shared = Mutex(Shared())
     private var converter: AVAudioConverter?
     private var isRunning = false
@@ -50,6 +68,13 @@ final class MicCapture: @unchecked Sendable {
 
     func start(deviceID: AudioDeviceID?) throws {
         guard isRunning == false else { return }
+
+        // **Un moteur qui a déjà servi ne resservira pas.** Voir la déclaration :
+        // c'est le nœud d'entrée réutilisé, reconfiguré d'un périphérique à
+        // l'autre, qui a fait tomber le processus. Un `AVAudioEngine` coûte
+        // quelques centaines de microsecondes à construire ; on le paie une fois
+        // par dictée, contre un crash par repli.
+        engine = AVAudioEngine()
 
         // Choisir le micro AVANT de toucher au moteur : changer de périphérique
         // sur un moteur démarré le laisse dans un état incohérent.
@@ -108,13 +133,14 @@ final class MicCapture: @unchecked Sendable {
     /// Plutôt que de deviner quel réglage CoreAudio en est responsable, on
     /// constate le silence et on repart sur le défaut système — qui est le
     /// chemin le mieux testé de macOS.
+    /// **L'ordre des deux lignes suivantes est le correctif.** Retirer le tap
+    /// d'un moteur encore en marche, c'est le retirer pendant que le thread audio
+    /// peut être en train de l'exécuter. On arrête d'abord, on retire ensuite —
+    /// et le moteur suivant est neuf, donc l'ancien n'est plus touché du tout.
     func restartOnSystemDefault() throws {
         guard isRunning else { return }
         FeatureLog.record("micro : aucun son sur le périphérique imposé → reprise sur le système")
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        isRunning = false
-        converter = nil
+        stopEngine()
         try start(deviceID: nil)
     }
 
@@ -122,11 +148,22 @@ final class MicCapture: @unchecked Sendable {
     @discardableResult
     func stop() -> [Float] {
         guard isRunning else { return [] }
-        engine.inputNode.removeTap(onBus: 0)
+        stopEngine()
+        return shared.withLock { $0.samples }
+    }
+
+    /// L'arrêt, en un seul endroit — il était écrit deux fois, dans deux ordres
+    /// dont l'un était dangereux.
+    ///
+    /// `stop()` avant `removeTap(onBus:)` : le moteur arrêté ne rend plus la main
+    /// au thread audio, donc retirer le tap ne peut plus croiser une exécution en
+    /// cours. Dans l'autre ordre, les deux se chevauchent — et c'est la course
+    /// qui a coûté les trois crashes du 7 août.
+    private func stopEngine() {
         engine.stop()
+        engine.inputNode.removeTap(onBus: 0)
         isRunning = false
         converter = nil
-        return shared.withLock { $0.samples }
     }
 
     func discard() {
