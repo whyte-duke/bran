@@ -2,20 +2,26 @@ import BranWatch
 import Charts
 import SwiftUI
 
-/// **Le journal de bord** : ce que la semaine a été, les quatre sources
-/// réunies.
+/// **Le journal de bord** : les quatre sources réunies, sur trois portées.
 ///
-/// C'est la vue d'accueil. Elle répond dans cet ordre — et l'ordre est tout le
-/// dessin : combien de temps et sur quoi (une ligne), quel rythme (sept
-/// barres), quels projets (des barres triées), et enfin ce qui a été produit
-/// (le fil des jalons). L'œil doit avoir la réponse avant d'avoir lu le détail ;
-/// si on inverse, on obtient une liste de plus, et bran en a déjà quatre.
+/// C'est la vue d'accueil, et elle porte désormais **deux écrans** sous un seul
+/// sélecteur, parce qu'ils ne répondent pas à la même question.
+///
+/// « Aujourd'hui » dit **quand** — voir `DayPane`, qui a son propre ordre et sa
+/// propre justification. « 7 jours » et « 30 jours » disent **combien**, dans
+/// l'ordre d'origine : la réponse en une ligne, le rythme en sept barres, les
+/// projets en barres triées, et ce qui en est sorti.
+///
+/// Le fil des jalons est commun aux trois : ce qui est sorti d'une journée est
+/// exactement ce qui est sorti d'une semaine, en plus court.
 ///
 /// ```
 /// ┌──────────────────────────────────────────────────┐
-/// │  Semaine                        [7 j][30 j]      │
-/// │  Cette semaine : 31 h suivies · 4 projets ·      │
-/// │  47 min d'attente · 1,6 voie en parallèle        │
+/// │  Journal              [Auj.][7 j][30 j]          │
+/// │  Cette semaine : 21 h de travail · 4 projets ·   │
+/// │  47 min d'attente                                │
+/// │  9 h ont avancé sans vous, et ne sont pas        │
+/// │  comptées ci-dessus.                             │
 /// │  ▁▃█▅▂▇█   v m m j v s d(auj.)                   │
 /// │  crm      ████████████████  12 h 40              │
 /// │  bran     ██████████         8 h 10              │
@@ -41,6 +47,19 @@ struct WeekPane: View {
     }
     @Bindable var model: AppModel
     @Binding var query: String
+
+    /// **L'instant de lecture, et il vieillit.**
+    ///
+    /// « Dernière pause il y a 42 min » et le repère « maintenant » de la
+    /// timeline sont des durées relatives à l'ouverture de la page : sans un
+    /// rafraîchissement, la page laissée ouverte pendant deux heures continue
+    /// d'annoncer 42 minutes et pose le trait vertical là où il était à midi.
+    ///
+    /// Une minute de cadence, et pas une seconde : le chiffre est affiché en
+    /// minutes, donc réveiller la vue plus souvent redessinerait soixante fois
+    /// la même phrase. C'est aussi pour ça que ce n'est pas un `TimelineView` —
+    /// il redessinerait toute la page, blocs et pistes compris.
+    @State private var readAt = Date.now
 
     private var loader: WeekLoader { model.week }
     private var summary: WeekSummary { loader.summary }
@@ -76,6 +95,22 @@ struct WeekPane: View {
         // s'écrit toutes les quatre secondes, et relire sept fichiers à chaque
         // battement pour déplacer une barre d'un pixel serait absurde.
         .task(id: reloadKey) { await load() }
+        // Le battement des durées relatives. Il vit ici plutôt que dans
+        // `DayPane` pour une raison qui compte : la tâche est annulée quand la
+        // section disparaît, donc rien ne bat pendant qu'on lit ses dictées.
+        .task {
+            while Task.isCancelled == false {
+                try? await Task.sleep(for: .seconds(60))
+                guard Task.isCancelled == false else { return }
+                readAt = .now
+                // Minuit : la page ne parle plus de la bonne journée, et le
+                // journal a changé de fichier. C'est le seul moment où le
+                // battement doit faire plus que rafraîchir une phrase.
+                if loader.span == .day, Calendar.current.isDateInToday(loader.today.start) == false {
+                    await load()
+                }
+            }
+        }
     }
 
     private var reloadKey: String {
@@ -165,10 +200,23 @@ struct WeekPane: View {
             ContentUnavailableView.search(text: query)
         } else {
             ScrollView {
+                // **Deux écrans sous un seul sélecteur de portée.** « Aujourd'hui »
+                // ne répond pas à la même question que « 7 jours » : l'un dit
+                // *quand*, l'autre dit *combien*, et empiler un histogramme
+                // d'une seule barre au-dessus d'une liste de projets aurait
+                // donné une semaine amputée plutôt qu'une journée.
+                //
+                // Le fil des jalons est commun aux deux : ce qui est sorti de la
+                // journée est exactement ce qui est sorti de la semaine, en plus
+                // court.
                 LazyVStack(alignment: .leading, spacing: Space.gutter) {
-                    headline
-                    histogram
-                    projects
+                    if loader.span == .day {
+                        DayPane(model: model, day: loader.today, summary: summary, now: readAt)
+                    } else {
+                        headline
+                        histogram
+                        projects
+                    }
                     timeline
                 }
                 .padding(.horizontal, Space.gutter)
@@ -189,7 +237,7 @@ struct WeekPane: View {
     /// chaque lancement, sur une bibliothèque pleine.
     private var skeleton: some View {
         VStack(alignment: .leading, spacing: Space.gutter) {
-            Text("Cette semaine : 31 h suivies · 4 projets")
+            Text("Aujourd'hui : 4 h 08 de travail · 3 projets")
                 .font(Type.cardTitle)
             RoundedRectangle(cornerRadius: Radius.field, style: .continuous)
                 .fill(Palette.well)

@@ -19,6 +19,7 @@ final class WatchSettings {
         static let busyRatioMeasured = "bran.watch.busyRatioMeasured"
         static let retentionDays = "bran.watch.retentionDays"
         static let showsOverlay = "bran.watch.showsOverlay"
+        static let dailyTargetHours = "bran.watch.dailyTargetHours"
     }
 
     var isEnabled: Bool { didSet { defaults.set(isEnabled, forKey: Key.enabled) } }
@@ -67,6 +68,23 @@ final class WatchSettings {
     /// Le panneau d'attention, au-dessus de tout.
     var showsOverlay: Bool { didSet { defaults.set(showsOverlay, forKey: Key.showsOverlay) } }
 
+    /// **La journée de référence, en heures.** Le dénominateur de l'écran
+    /// Aujourd'hui.
+    ///
+    /// « 4 h 08 de travail » ne veut rien dire tout seul. « 4 h 08, soit 68 %
+    /// d'une journée de 6 h » veut dire quelque chose — et le jour où la barre
+    /// affiche 140 %, c'est ce 140 % qui est l'information, pas les heures.
+    ///
+    /// Six heures par défaut, et pas huit. Huit heures est la durée d'une
+    /// présence au bureau, pas d'un travail mesuré : personne ne fait huit
+    /// heures de travail attribué dans une journée de huit heures, et fixer un
+    /// objectif qu'on n'atteint jamais transforme un instrument de mesure en
+    /// reproche quotidien.
+    ///
+    /// Zéro éteint la comparaison : la phrase retombe alors sur les heures
+    /// seules, ce qui est la bonne sortie pour qui ne veut pas d'objectif.
+    var dailyTargetHours: Int { didSet { defaults.set(dailyTargetHours, forKey: Key.dailyTargetHours) } }
+
     private let defaults = UserDefaults.standard
 
     init() {
@@ -89,6 +107,7 @@ final class WatchSettings {
         busyRatioMeasured = defaults.object(forKey: Key.busyRatioMeasured) as? Bool ?? false
         retentionDays = defaults.object(forKey: Key.retentionDays) as? Int ?? 30
         showsOverlay = defaults.object(forKey: Key.showsOverlay) as? Bool ?? true
+        dailyTargetHours = defaults.object(forKey: Key.dailyTargetHours) as? Int ?? 6
     }
 
     /// Les seuils du résolveur.

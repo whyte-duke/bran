@@ -191,6 +191,14 @@ public struct WeekSummary: Equatable, Sendable {
 /// vides, ce qui se lit « vous n'avez rien fait » alors que ça veut dire
 /// « la semaine commence ».
 public enum WeekSpan: String, Sendable, Equatable, CaseIterable, Identifiable, Codable {
+    /// **Aujourd'hui**, et c'est désormais la portée par défaut.
+    ///
+    /// Elle manquait, et son absence décidait de tout le reste : sans elle, la
+    /// plus petite chose que bran savait dire était « ces sept derniers jours ».
+    /// Or la question qu'on se pose en ouvrant la fenêtre n'est pas « qu'ai-je
+    /// fait cette semaine », c'est « où en est ma journée » — et une semaine ne
+    /// répond jamais à ça, parce qu'une moyenne ne dit pas quand.
+    case day
     case week
     case month
 
@@ -198,6 +206,7 @@ public enum WeekSpan: String, Sendable, Equatable, CaseIterable, Identifiable, C
 
     public var days: Int {
         switch self {
+        case .day: 1
         case .week: 7
         case .month: 30
         }
@@ -205,6 +214,7 @@ public enum WeekSpan: String, Sendable, Equatable, CaseIterable, Identifiable, C
 
     public var label: String {
         switch self {
+        case .day: "Aujourd'hui"
         case .week: "7 jours"
         case .month: "30 jours"
         }
@@ -213,6 +223,7 @@ public enum WeekSpan: String, Sendable, Equatable, CaseIterable, Identifiable, C
     /// L'amorce de la ligne chiffrée. « Cette semaine : 31 h suivies… »
     public var headline: String {
         switch self {
+        case .day: "Aujourd'hui"
         case .week: "Cette semaine"
         case .month: "Ce mois-ci"
         }

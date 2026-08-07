@@ -110,6 +110,10 @@ final class WatchController {
 
     private var observers: [any NSObjectProtocol] = []
 
+    /// Le compteur du battement journalisé. Voir `observe`.
+    private var heartbeat = 0
+    private static let heartbeatEvery = 15
+
     init(settings: WatchSettings, store: WatchStore) {
         self.settings = settings
         self.store = store
@@ -126,6 +130,8 @@ final class WatchController {
 
     func setEnabled(_ enabled: Bool) {
         settings.isEnabled = enabled
+
+        FeatureLog.record("veille — \(enabled ? "démarrage" : "arrêt") (fenêtres=\(settings.watchesWindows) tic=\(settings.tickInterval)s)")
 
         guard enabled else {
             loop?.cancel()
@@ -326,6 +332,27 @@ final class WatchController {
         verdict = fresh
         lastTickAt = now
         onVerdict?(fresh)
+
+        // **Un tic sur quinze, dans le journal des fonctions.**
+        //
+        // Le veilleur n'écrivait rien nulle part tant qu'aucun intervalle ne se
+        // fermait — et comme un intervalle ne se ferme qu'au changement d'état,
+        // un veilleur parfaitement muet et un veilleur mort produisaient
+        // exactement le même dossier. Diagnostiquer l'un des deux demandait de
+        // le lire au débogueur.
+        //
+        // Une minute de cadence à quatre secondes de tic : assez pour voir
+        // qu'il respire, assez rare pour ne pas noyer les autres fonctions dans
+        // un journal plafonné à deux cents lignes.
+        heartbeat += 1
+        if heartbeat % Self.heartbeatEvery == 0 {
+            FeatureLog.record(
+                "veille — \(fresh.lanes.count) voie(s), "
+                + "\(fresh.lanes.filter(\.state.deservesAttention).count) en attente, "
+                + "présence=\(human.idleSeconds.map { "inactif \(Int($0)) s" } ?? "capteur muet")"
+                + (screenProblem.map { ", \($0)" } ?? "")
+            )
+        }
 
         let sources = Dictionary(
             uniqueKeysWithValues: (certain + windows).map { observation in

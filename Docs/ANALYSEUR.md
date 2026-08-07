@@ -162,6 +162,42 @@ la définition ne se compare à rien.
 
 ---
 
+## 3 bis. La décision qui commande le reste : ce qui compte comme du travail
+
+Un audit en dix-neuf agents a mesuré la réponse implicite de l'application : le
+temps travaillé était **toute fenêtre visible dont plus de 1 % des blocs de
+luminance avaient bougé**. Sur deux jours de journal réel, 7,6 h des 12,1 h
+affichées venaient de là. « Téléchargements » (123 min) et « empty project »
+(120 min) passaient devant le dossier client (89 min).
+
+Tout ce que ce document propose de construire hérite de ce chiffre : le
+dénominateur « 68 % d'une journée de 6 h », le ratio pause/travail, la
+répartition par catégorie, la comparaison au mois dernier. Et l'historique
+devient incomparable le jour où on le corrige.
+
+**La règle retenue.** Le travail est ce qu'un capteur certain rapporte, ou ce
+que vous aviez devant vous pendant que le système vous voyait actif. Deux façons
+d'y répondre oui, qui ne se recouvrent pas :
+
+1. Une session d'agent qui appelle un outil avance parce que vous la lui avez
+   demandée, même si vous êtes ailleurs. C'est le travail que vous avez lancé.
+2. Une fenêtre que vous teniez. C'est le travail que vous faisiez.
+
+Le reste est du mouvement : un lecteur vidéo, une barre de progression, un fil
+qui se rafraîchit. Affiché à part, sous le libellé « sans vous », **jamais
+ajouté au total**.
+
+`WatchEvent.fg` porte l'information. `HumanFocus` la mesurait déjà à chaque
+battement et la jetait ; le résolveur en tirait un booléen local. Il ne manquait
+qu'un champ.
+
+**Le champ est `Optional`, et ce n'est pas un détail de style.** La synthèse
+`Codable` de Swift n'emploie pas les valeurs par défaut : un champ non optionnel
+ajouté à `WatchEvent` rendrait illisible chaque ligne déjà écrite, et les deux
+lecteurs avalent l'échec de décodage en silence. Un mois d'historique
+disparaîtrait sans un message. La même contrainte vaut pour le champ catégorie
+de la section suivante.
+
 ## 4. Les catégories
 
 ### La règle avant la liste
@@ -203,10 +239,18 @@ première existe déjà dans `WatchEvent` :
 - Identifiant de paquet dans une table connue (Mail, Messages, Slack, Discord)
   → **Communication**.
 
-**Estimation de couverture par règles seules : 60 à 75 %** d'une journée type du
-propriétaire, qui passe l'essentiel de son temps dans des sessions d'agent sur
-des dossiers git. Le reste est du navigateur, et c'est précisément là que le
-titre de fenêtre ne suffit pas.
+**Couverture réelle par la règle git seule : 38 %.** Cette estimation était
+d'abord de 60 à 75 %, sur l'intuition que le propriétaire passe l'essentiel de
+son temps dans des sessions d'agent. Un recomptage sur le journal réel la
+contredit : 45 lignes sur 536 portent un `cwd`, soit 4,53 h sur 12,14 h. Le
+reste dépend de la table d'identifiants de paquet et du domaine de l'onglet —
+donc du capteur 3 de la section 7, qui devient un prérequis des catégories et
+non un confort.
+
+Depuis, le dénominateur lui-même a changé : le total ne compte plus que le
+travail attribué (voir section 3 bis), ce qui remonte mécaniquement la part
+couverte par les règles. À remesurer une fois quelques jours de journal écrits
+avec `WatchEvent.fg`.
 
 ### Ce que l'IA fait, et ce qu'elle n'a pas le droit de faire
 

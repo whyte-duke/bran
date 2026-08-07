@@ -324,7 +324,7 @@ enum LibraryPane: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .week: "Semaine"
+        case .week: "Journal"
         case .meetings: "Réunions"
         case .dictation: "Dictées"
         case .snapshots: "Captures"
@@ -346,7 +346,9 @@ enum LibraryPane: String, CaseIterable, Identifiable {
 
     var subtitle: String {
         switch self {
-        case .week: "Ce que vous avez fait ces sept derniers jours, les quatre sources réunies."
+        // Ni « sept jours » ni « cette semaine » : la portée est un
+        // sélecteur, et le sous-titre mentait déjà en portée 30 jours.
+        case .week: "Où en est votre journée, et ce que la semaine a été."
         case .meetings: "Vos enregistrements de réunions, stockés sur ce Mac."
         case .dictation: "Vos transcriptions, calculées et gardées sur ce Mac."
         case .snapshots: "Le texte lu à l'écran, sans rien envoyer nulle part."

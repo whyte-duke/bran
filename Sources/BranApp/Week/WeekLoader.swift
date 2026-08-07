@@ -32,8 +32,17 @@ final class WeekLoader {
     private(set) var phase: Phase = .loading
     private(set) var summary: WeekSummary = .empty
 
+    /// La journée, à l'heure près. Calculée **seulement en portée `.day`** : sur
+    /// trente jours, les blocs et les pistes n'ont personne pour les lire, et
+    /// les calculer coûterait un balayage de plus à chaque rafraîchissement.
+    private(set) var today: DaySummary = .empty
+
     /// La portée demandée. La vue la change, `load` la relit.
-    var span: WeekSpan = .week
+    ///
+    /// **Le jour par défaut**, et c'est le changement de forme de la section.
+    /// La question qu'on se pose en ouvrant la fenêtre est « où en est ma
+    /// journée », pas « qu'ai-je fait cette semaine ».
+    var span: WeekSpan = .day
 
     private let folder: @MainActor () -> URL
 
@@ -66,6 +75,14 @@ final class WeekLoader {
             span: span,
             calendar: calendar
         )
+        today = span == .day
+            ? DaySummary.make(
+                events: harvest.events,
+                presence: harvest.presence,
+                now: now,
+                calendar: calendar
+            )
+            : .empty
         phase = harvest.problem.map(Phase.failed) ?? .ready
     }
 
@@ -81,6 +98,9 @@ final class WeekLoader {
 
     private struct Harvest: Sendable {
         let events: [WatchEvent]
+        /// Les intervalles de présence, dans le même fichier et lus au même
+        /// passage. Voir `PresenceEvent` pour la cohabitation des deux formes.
+        let presence: [PresenceEvent]
         let problem: String?
     }
 
@@ -97,6 +117,7 @@ final class WeekLoader {
         decoder.dateDecodingStrategy = .secondsSince1970
 
         var events: [WatchEvent] = []
+        var presence: [PresenceEvent] = []
         var problem: String?
 
         for day in days {
@@ -106,17 +127,23 @@ final class WeekLoader {
             do {
                 let text = try String(contentsOf: url, encoding: .utf8)
                 for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-                    guard let data = line.data(using: .utf8),
-                          let event = try? decoder.decode(WatchEvent.self, from: data)
-                    else { continue }
-                    events.append(event)
+                    guard let data = line.data(using: .utf8) else { continue }
+                    // L'ordre compte : `PresenceEvent` exige son discriminant,
+                    // `WatchEvent` ne le connaît pas. Essayer le plus strict
+                    // d'abord évite qu'une ligne de présence soit décodée à
+                    // moitié en voie. Voir `WatchStore.readDay`, même règle.
+                    if let event = try? decoder.decode(PresenceEvent.self, from: data) {
+                        presence.append(event)
+                    } else if let event = try? decoder.decode(WatchEvent.self, from: data) {
+                        events.append(event)
+                    }
                 }
             } catch {
                 problem = "Journal du \(day) illisible : \(error.localizedDescription)"
             }
         }
 
-        return Harvest(events: events, problem: problem)
+        return Harvest(events: events, presence: presence, problem: problem)
     }
 }
 
