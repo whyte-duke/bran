@@ -219,3 +219,97 @@ a change that can be checked from a build alone.
 `.defaultLaunchBehavior(.presented)` on the `library` window, and
 `Sources/BranApp/LoginItemService.swift`, whose doc comment now names this as the
 open question.
+
+---
+
+## Persist the day summary before retention eats the history
+
+**What:** write one immutable per-day summary — a few hundred bytes: attributed
+work, machine time, waiting, breaks, context switches, top projects — at the day
+rollover, in a file the retention policy never purges.
+
+**Why:** the month view can show 30 days, but it cannot show *last* month next to
+this one, and that comparison is the only thing a month view adds over a week
+view. `WatchRetention` deletes the detail at 30 days by default, so the trend can
+never exist. Every day that passes without this is a day of history that cannot
+be recovered later.
+
+**Pros:** unlocks "Focus 56%, last month 62%, change ↓6%", which is what makes a
+month view worth opening. Cheap: measured at 257 bytes per journal line today, a
+rolled summary is smaller than a single day's raw log.
+
+**Cons:** the summary's shape depends on decisions not yet made — categories in
+particular. Writing it too early means either migrating it or carrying a version
+that answers a question nobody asks any more.
+
+**Depends on:** the category taxonomy (`Docs/ANALYSEUR.md` section 4), because a
+summary without categories would need rewriting the day they land.
+
+**Where to start:** `Sources/BranApp/Watch/WatchController.swift`, the day-change
+branch in `tick()` — it already flushes, reloads and purges there.
+
+---
+
+## Read the active tab's domain through AXUIElement
+
+**What:** read the frontmost browser window's address bar via the accessibility
+API, and put the domain in `WatchEvent` so a browser lane is identified by site
+rather than by window title.
+
+**Why:** measured on the real journal, the git rule categorises 38% of tracked
+time — 45 lines out of 536 carry a `cwd`. Almost all the rest is a browser, and a
+window title does not give a domain: "Inbox — unread" could be work or not, and
+`hub.castral.fr` is indistinguishable from `youtube.com` once the title is
+stripped. Without the domain, category rules cannot cover the majority of the
+day, and the AI would be asked to guess from exactly the signal that is missing.
+
+bran already holds the Accessibility permission — dictation cannot work without
+it (`Dictation/HotkeyMonitor.swift`, `isTrusted`). So this costs **no new TCC
+prompt**. The AppleScript alternative would need the Automation permission, with
+its own dialog.
+
+**Pros:** unblocks categories for the majority of tracked time. No new
+permission. Also fixes lane identity for browser tabs, which is currently the
+`.fragile` precision case.
+
+**Cons:** the traversal has to be written from scratch. `LaneReturn.accessibleWindows`
+reads `kAXWindowsAttribute` and titles, with no recursive descent and no
+`AXWebArea` handling; only `AXUIElementSetMessagingTimeout` is reusable. Each
+browser exposes its address bar differently, and Safari, Chrome and Arc will each
+need a probe.
+
+**Depends on:** nothing technically. But it should land before the category
+rules, otherwise those rules get written against a signal that is about to
+change.
+
+**Where to start:** `Sources/BranWindows/`, alongside `LaneReturn.swift`, and
+`Sources/BranApp/Watch/WindowSampler.swift` where the identity is built.
+
+---
+
+## Offer a "do not log window titles" setting
+
+**What:** a switch in the Veille settings that stops `WatchEvent.name` from being
+written to disk, keeping only the lane key and the state.
+
+**Why:** the watcher journal writes raw window titles. Counted on two days of the
+owner's real journal: 165 distinct names, including three PDFs named after
+individuals (internship agreements), several search queries, and a fragment of an
+OAuth URL. `WatchRetention` exists precisely because of this and its comment says
+so — "you can delete a folder, you cannot un-write it" — but deleting after 30
+days is not the same as never writing.
+
+The presence journal added in this branch needs no such switch: it carries four
+fields, three of which are instants, and no title at all.
+
+**Pros:** makes the journal safe to keep for a year, which is what a month-over-
+month comparison wants. Costs one `if` at the write site.
+
+**Cons:** the week view groups projects by folder, and falls back to the
+application when there is no folder — both survive. But the lane list in Veille
+becomes unreadable, since it names lanes by title. The setting would have to say
+plainly that it trades the Veille section for privacy.
+
+**Where to start:** `Sources/BranApp/Watch/WatchStore.swift`, the `append`
+method, and `Sources/BranApp/Watch/WatchSettings.swift`, which has no privacy
+setting today.

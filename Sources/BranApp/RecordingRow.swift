@@ -90,12 +90,36 @@ struct RecordingRow: View {
         .foregroundStyle(.secondary)
     }
 
+    /// **Les deux choses qui manquaient étaient exactement les deux qui
+    /// comptent.**
+    ///
+    /// `children: .combine` rassemblait la ligne, puis cette description la
+    /// remplaçait par titre, durée et poids — en perdant l'avertissement
+    /// « interrompue » et l'état CRM. Or ce sont les seuls éléments qui
+    /// appellent une action : un enregistrement interrompu mérite qu'on vérifie
+    /// le fichier, et un envoi en échec mérite qu'on le relance. Le reste est du
+    /// contexte.
+    ///
+    /// L'« interrompue » était par-dessus le marché posé en `.iconOnly` : une
+    /// icône seule, sans étiquette, donc muette pour tout le monde.
     private var accessibilityDescription: String {
         if let progress {
             let percent = (progress * 100).formatted(.number.precision(.fractionLength(0)))
             return "\(recording.displayTitle), compression en cours, \(percent) pour cent"
         }
-        return "\(recording.displayTitle), \(recording.durationDescription), \(recording.sizeDescription)"
+
+        var parts = [
+            recording.displayTitle,
+            recording.durationDescription,
+            recording.sizeDescription,
+        ]
+        if recording.wasInterrupted {
+            parts.append("session interrompue, jamais close proprement")
+        }
+        if let stage = recording.crmBadge {
+            parts.append(stage.text)
+        }
+        return parts.joined(separator: ", ")
     }
 }
 

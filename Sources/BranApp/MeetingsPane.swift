@@ -66,6 +66,21 @@ struct MeetingsPane: View {
 
                 if isLoadingLibrary {
                     skeleton
+                } else if let problem = model.store.problem {
+                    // **Avant le vide, et c'est tout le correctif.** Un dossier
+                    // illisible affichait « Aucun enregistrement » : quarante
+                    // réunions intactes sur le disque, et un écran qui ressemble
+                    // à une perte de données. On dit ce qui bloque, et on offre
+                    // de réessayer — un volume qu'on remonte doit suffire.
+                    ContentUnavailableView {
+                        Label("Enregistrements introuvables", systemImage: "externaldrive.badge.xmark")
+                    } description: {
+                        Text(problem)
+                    } actions: {
+                        Button("Réessayer") { Task { await model.store.reload() } }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 320)
                 } else if model.store.recordings.isEmpty {
                     ContentUnavailableView(
                         "Aucun enregistrement",

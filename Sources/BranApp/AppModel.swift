@@ -264,6 +264,11 @@ public final class AppModel {
     /// Sert à deux endroits : l'intitulé de l'entrée de menu, et la décision
     /// d'ouvrir l'accueil au lancement. Un accueil qui ne s'ouvre jamais
     /// n'accueille personne, et c'est exactement ce qui se passait.
+    /// L'accueil a-t-il déjà été montré **pendant ce lancement**. Voir
+    /// `LibraryView`, où la règle est écrite : une fois, pas à chaque création
+    /// de fenêtre.
+    var hasShownWelcome = false
+
     var isFullyReady: Bool {
         permissions.canRecord
             && HotkeyMonitor.isTrusted

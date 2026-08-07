@@ -38,9 +38,20 @@ struct WeekPane: View {
     /// graduations affichaient « 0 h », « 0 h », « 0 h », « 0 h ». Un axe qui
     /// répète le même zéro ne dit rien, et pire, il donne à croire qu'on n'a
     /// rien fait alors que les barres, elles, sont bien là.
+    /// **Et la graduation ne ment plus sur elle-même.** Elle arrondissait à
+    /// l'entier : sur un axe gradué toutes les 1,5 h — ce que Swift Charts
+    /// choisit tout seul dès que le maximum est bas — les repères 1,5 et 2
+    /// s'écrivaient tous les deux « 2 h ». Deux étiquettes identiques à des
+    /// hauteurs différentes, sur le seul graphique qui porte des heures.
+    ///
+    /// Une décimale seulement quand elle change quelque chose : « 2 h » reste
+    /// « 2 h », il n'y a aucune raison d'écrire « 2,0 h » partout pour corriger
+    /// un cas sur quatre.
     static func axisLabel(hours: Double) -> String {
         if hours >= 1 {
-            return "\(hours.formatted(.number.precision(.fractionLength(0)))) h"
+            let whole = hours.rounded() == hours
+            let digits = whole ? 0 : 1
+            return "\(hours.formatted(.number.precision(.fractionLength(digits)))) h"
         }
         let minutes = (hours * 60).rounded()
         return minutes == 0 ? "0" : "\(minutes.formatted(.number.precision(.fractionLength(0)))) min"
@@ -612,6 +623,14 @@ private struct MilestoneRow: View {
 
     @State private var isHovering = false
 
+    private var spokenValue: String {
+        var parts = [marker.at.formatted(date: .omitted, time: .shortened)]
+        if let duration = marker.duration, duration > 0 {
+            parts.append(WatchPane.duration(duration))
+        }
+        return parts.joined(separator: ", ")
+    }
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.small) {
             Image(systemName: marker.kind.symbol)
@@ -638,7 +657,14 @@ private struct MilestoneRow: View {
         }
         .branCard(isHovering: isHovering)
         .onHover { isHovering = $0 }
+        // **L'étiquette explicite écrasait l'heure et la durée.**
+        // `children: .combine` rassemble les quatre textes, puis un
+        // `accessibilityLabel` remplace le tout : VoiceOver lisait « dictée :
+        // rappeler le client » sans jamais dire quand ni combien de temps. Or le
+        // fil des jalons est chronologique — l'heure est la moitié de ce qu'il
+        // raconte. Le libellé nomme, la valeur chiffre.
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(marker.kind.label) : \(marker.title)")
+        .accessibilityValue(spokenValue)
     }
 }

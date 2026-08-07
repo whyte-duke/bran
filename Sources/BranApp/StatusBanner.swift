@@ -50,8 +50,19 @@ struct StatusBanner: View {
         model.pendingMeeting != nil ? "Réunion détectée" : "Échec"
     }
 
+    /// **Une réunion détectée passe devant un échec passé.**
+    ///
+    /// L'échec était testé en premier et sortait aussitôt. Or `lastFailure` est
+    /// rémanent : un problème réseau à 10 h masquait à 14 h la seule chose qu'on
+    /// veut lire avant d'appuyer sur « Enregistrer » — à quel rendez-vous du CRM
+    /// cette réunion est rattachée. Le titre disait « Réunion détectée » et la
+    /// ligne du dessous parlait d'autre chose, ce que personne ne relit deux
+    /// fois avant de cliquer.
+    ///
+    /// L'échec n'est pas perdu : sans réunion détectée, le bandeau est
+    /// justement là pour lui, et le titre le dit.
     private var subline: String {
-        if let failure = model.lastFailure { return failure }
+        if model.pendingMeeting == nil, let failure = model.lastFailure { return failure }
 
         if let booking = model.linkedBooking {
             return "Rattaché à « \(booking.displayName) » — rien n'est enregistré tant que vous ne l'avez pas demandé."

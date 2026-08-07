@@ -81,7 +81,18 @@ struct LibraryView: View {
             // ne le signale.
             model.permissions.refresh()
             FeatureLog.record("accueil — prêt=\(model.isFullyReady) \(model.readinessDescription)")
-            if model.isFullyReady == false {
+            // **Une fois par lancement, pas à chaque fois que la fenêtre
+            // apparaît.** Cette tâche se relance à chaque création de la
+            // fenêtre : la fermer et rouvrir bran avec ⌘O ramenait l'accueil
+            // devant, sans aucun moyen de le refuser. Quelqu'un qui a
+            // délibérément laissé la dictée sans son modèle — ce qui est un
+            // choix légitime, l'enregistrement marche sans — se le voyait
+            // reprocher à chaque ouverture.
+            //
+            // L'écran reste atteignable en permanence par « Autorisations » au
+            // bas de la colonne : c'est ce qui rend ce silence sûr.
+            if model.isFullyReady == false, model.hasShownWelcome == false {
+                model.hasShownWelcome = true
                 WindowPresenter.bringToFront("permissions", using: openWindow)
             }
 

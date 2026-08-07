@@ -34,19 +34,52 @@ final class RecordingStore {
         isScanning = true
         defer { isScanning = false }
 
-        let found = await Self.scan(root: root)
-        recordings = found.sorted { $0.metadata.startedAt > $1.metadata.startedAt }
+        let scan = await Self.scan(root: root)
+        recordings = scan.recordings.sorted { $0.metadata.startedAt > $1.metadata.startedAt }
+        problem = scan.problem
     }
+
+    /// **Ce qui empêche de lire le dossier, quand quelque chose l'empêche.**
+    ///
+    /// `DictationStore` et `WatchStore` en ont un depuis toujours ; celui-ci
+    /// n'en avait pas, et son `try?` rendait un tableau vide. Un volume externe
+    /// démonté, un dossier renommé, une autorisation retirée : quarante réunions
+    /// intactes sur le disque, et l'écran qui annonce « Aucun enregistrement ».
+    /// C'est la pire forme d'un défaut de lecture — elle ressemble à une perte
+    /// de données, et on cherche le problème là où il n'est pas.
+    private(set) var problem: String?
 
     /// Suffixe des morceaux intermédiaires — `<uuid>-seg000.mp4`. Ils ne sont
     /// jamais des entrées de bibliothèque : ce sont les pièces détachées d'une
     /// session, pas des enregistrements.
     private nonisolated static let segmentMarker = "-seg"
 
-    private nonisolated static func scan(root: URL) async -> [Recording] {
+    struct Scan: Sendable {
+        let recordings: [Recording]
+        let problem: String?
+    }
+
+    private nonisolated static func scan(root: URL) async -> Scan {
         let manager = FileManager.default
         let path = root.path(percentEncoded: false)
-        guard let names = try? manager.contentsOfDirectory(atPath: path) else { return [] }
+
+        let names: [String]
+        do {
+            names = try manager.contentsOfDirectory(atPath: path)
+        } catch {
+            // Un dossier absent est **normal** : c'est le premier lancement,
+            // avant le premier enregistrement. Tout le reste — volume démonté,
+            // droits retirés, chemin devenu un fichier — est un problème, et il
+            // doit se dire. C'est la même distinction que `WeekLoader.harvest`
+            // fait entre un jour sans veille et un journal refusé.
+            let cocoa = error as NSError
+            let missing = cocoa.domain == NSCocoaErrorDomain
+                && cocoa.code == NSFileReadNoSuchFileError
+            return Scan(
+                recordings: [],
+                problem: missing ? nil : "Dossier des enregistrements illisible : \(error.localizedDescription)"
+            )
+        }
 
         let finals = names.filter { $0.hasSuffix(".mp4") && $0.contains(segmentMarker) == false }
         let segments = names.filter { $0.hasSuffix(".mp4") && $0.contains(segmentMarker) }
@@ -107,7 +140,7 @@ final class RecordingStore {
             )
         }
 
-        return found
+        return Scan(recordings: found, problem: nil)
     }
 
     private nonisolated static func loadMetadata(root: URL, identifier: UUID?) -> RecordingMetadata? {

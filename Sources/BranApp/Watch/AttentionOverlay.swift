@@ -197,7 +197,19 @@ final class AttentionOverlay {
     /// dû fermer pour la dictée, et il se ferme de la même façon — une annonce
     /// système, qui coûte une ligne.
     private func announce() {
-        let text = "Voie en attente : \(content.name), \(content.detail). Cliquez la pilule pour y revenir."
+        // **L'annonce prescrivait un clic, et le clic est le seul déclencheur
+        // qui existe.** Pour quelqu'un qui n'utilise pas la souris, la phrase
+        // désignait donc une capsule flottante hors de la hiérarchie
+        // d'accessibilité, sur un panneau qui ne prend jamais le focus : une
+        // instruction impossible à suivre, ce qui est pire que pas
+        // d'instruction du tout.
+        //
+        // Elle indique maintenant le chemin qui, lui, marche au clavier : la
+        // fenêtre bran, section Veille, où chaque voie est depuis peu un vrai
+        // bouton. Le clic reste mentionné parce qu'il reste le geste le plus
+        // court pour qui a une souris.
+        let text = "Voie en attente : \(content.name), \(content.detail). "
+            + "Cliquez la pilule pour y revenir, ou ouvrez bran, section Veille."
         guard text != lastAnnouncement else { return }
         lastAnnouncement = text
         NSAccessibility.post(
