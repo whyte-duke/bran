@@ -91,6 +91,19 @@ final class AttentionOverlay {
     // MARK: - Présentation
 
     private func show() {
+        // **Le repli en cours est annulé ici, et il ne l'était nulle part.**
+        //
+        // La déclaration de `collapseTask` promet pourtant « annulé dès qu'on
+        // réaffiche » depuis le premier jour. Seuls `hide()` et `dismiss()`
+        // l'annulaient — c'est-à-dire les deux chemins qui n'en ont pas besoin.
+        // Une voie qui repasse en attente moins de 300 ms après avoir cessé de
+        // l'être — ce qui arrive à chaque tic pendant qu'un agent alterne entre
+        // deux outils — se faisait donc retirer par la tâche de la fois d'avant,
+        // juste après avoir été affichée. La pilule clignotait, et le geste de
+        // retour disparaissait sous le curseur.
+        collapseTask?.cancel()
+        collapseTask = nil
+
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
             ?? NSScreen.main
         else { return }

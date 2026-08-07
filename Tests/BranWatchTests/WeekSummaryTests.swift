@@ -41,12 +41,15 @@ struct WeekSummaryTests {
         from: Date,
         to: Date,
         d: TimeInterval? = nil,
-        cwd: String? = "/Users/x/castral/crm"
+        cwd: String? = "/Users/x/castral/crm",
+        src: WatchEvent.Source = .certain,
+        fg: Bool? = nil
     ) -> WatchEvent {
         WatchEvent(
             lane: lane, name: name, p: 2, state: state,
             from: from, to: to, d: d ?? to.timeIntervalSince(from),
-            src: .certain, why: "test", cwd: cwd, branch: "main"
+            src: src, why: "test", cwd: cwd, branch: "main",
+            fg: fg
         )
     }
 
@@ -168,6 +171,80 @@ struct WeekSummaryTests {
 
         #expect(result.projects[0].key == "autre-chose")
         #expect(result.projects[0].name == "autre")
+    }
+
+    // MARK: - Ce qui compte comme du travail
+
+    /// **La décision la plus importante du produit, verrouillée ici.**
+    ///
+    /// Avant, le total comptait toute fenêtre dont plus de 1 % des blocs de
+    /// luminance avaient bougé. Sur deux jours de journal réel, 7,6 h des 12,1 h
+    /// annoncées venaient de là, et « Téléchargements » passait devant le
+    /// dossier client. Un lecteur vidéo, une barre de progression ou un fil qui
+    /// se rafraîchit ne sont pas votre journée de travail.
+    @Test("Une fenêtre qui bouge sans vous n'entre pas dans le total")
+    func fenetreQuiBougeSansVousNEntrePas() {
+        let result = summary([
+            event(lane: "win:x:video", name: "video", from: date(6, 9), to: date(6, 12),
+                  cwd: nil, src: .pixels, fg: false)
+        ])
+
+        #expect(result.workedSeconds == 0)
+        #expect(result.machineSeconds == 10800)
+        #expect(result.days.first(where: \.isToday)?.machine == 10800)
+    }
+
+    @Test("Une fenêtre que vous teniez est votre travail")
+    func fenetreTenueEstVotreTravail() {
+        let result = summary([
+            event(lane: "win:x:editeur", name: "editeur", from: date(6, 9), to: date(6, 12),
+                  cwd: nil, src: .pixels, fg: true)
+        ])
+
+        #expect(result.workedSeconds == 10800)
+        #expect(result.machineSeconds == 0)
+    }
+
+    /// Une session d'agent avance parce que vous la lui avez demandée, même si
+    /// vous êtes ailleurs. C'est le travail que vous avez lancé, et le capteur
+    /// certain suffit à le dire.
+    @Test("Un capteur certain compte, même sans vous devant")
+    func capteurCertainCompteSansVous() {
+        let result = summary([
+            event(from: date(6, 9), to: date(6, 12), src: .certain, fg: false)
+        ])
+
+        #expect(result.workedSeconds == 10800)
+        #expect(result.machineSeconds == 0)
+    }
+
+    /// Un journal écrit avant `WatchEvent.fg` ne peut pas trancher. Sous-estimer
+    /// le passé est le bon sens de l'erreur : gonfler mars ferait croire à une
+    /// baisse en avril qui n'a pas eu lieu.
+    @Test("Un journal sans le champ ne gonfle pas le passé")
+    func journalAncienNeGonflePas() {
+        let result = summary([
+            event(lane: "win:x:vieux", name: "vieux", from: date(6, 9), to: date(6, 10),
+                  cwd: nil, src: .pixels, fg: nil)
+        ])
+
+        #expect(result.workedSeconds == 0)
+        #expect(result.machineSeconds == 3600)
+    }
+
+    /// Les deux parts vivent dans la même ligne de projet, et ne s'ajoutent
+    /// jamais : un projet essentiellement « sans vous » est un projet que vous
+    /// surveillez, pas un projet sur lequel vous travaillez.
+    @Test("Un projet porte les deux parts séparément")
+    func projetPorteLesDeuxParts() {
+        let result = summary([
+            event(from: date(6, 9), to: date(6, 10), src: .certain, fg: true),
+            event(from: date(6, 10), to: date(6, 12), src: .pixels, fg: false),
+        ])
+
+        #expect(result.projects.count == 1)
+        #expect(result.projects[0].worked == 3600)
+        #expect(result.projects[0].machine == 7200)
     }
 
     // MARK: - Le temps non observé

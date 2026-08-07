@@ -274,6 +274,27 @@ private struct LaneCard: View {
     @State private var isHovering = false
 
     var body: some View {
+        // **Un vrai bouton, et pas un `onTapGesture`.** La carte se disait déjà
+        // bouton pour VoiceOver — traits et action par défaut — mais elle
+        // n'était pas un contrôle : rien ne pouvait la recevoir au clavier, donc
+        // le geste de retour, qui *est* le produit, n'existait qu'à la souris.
+        // Un `Button` porte le focus, la barre d'espace, le retour chariot et
+        // l'anneau de mise au point, et il rend inutiles les trois modificateurs
+        // d'accessibilité qui essayaient d'imiter tout ça.
+        Button(action: onReturn) { card }
+            .buttonStyle(.plain)
+            .onHover { hovering in
+                isHovering = hovering
+                setCursor(hovering)
+            }
+            // Une carte peut disparaître sous le curseur — un verdict qui change
+            // suffit — et `onHover(false)` n'arrive alors jamais. Sans ce rappel,
+            // la main resterait sur la pile des curseurs.
+            .onDisappear { setCursor(false) }
+            .accessibilityHint("Revient sur cette voie")
+    }
+
+    private var card: some View {
         HStack(alignment: .top, spacing: 11) {
             Image(systemName: lane.state.symbol)
                 .font(.system(size: 14))

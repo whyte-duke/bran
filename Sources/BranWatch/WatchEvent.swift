@@ -45,6 +45,32 @@ public struct WatchEvent: Equatable, Sendable, Codable {
     public let cwd: String?
     public let branch: String?
 
+    /// **L'humain était-il aux commandes de cette voie pendant cet intervalle ?**
+    ///
+    /// C'est le champ qui répond à la question la plus importante du produit :
+    /// qu'est-ce qui compte comme du travail. Sans lui, la réponse implicite
+    /// était « toute fenêtre visible dont plus de 1 % des blocs de luminance ont
+    /// bougé » — mesuré sur deux jours de journal réel, 7,6 h sur 12,1 h, si
+    /// bien que « Téléchargements » et « empty project » passaient devant le
+    /// dossier client.
+    ///
+    /// `HumanFocus` mesure déjà l'information à chaque battement, et
+    /// `WatchResolver` en tire un booléen local qu'il jette aussitôt. Elle ne
+    /// manquait qu'au journal.
+    ///
+    /// Vrai dès que la voie a été au premier plan **une fois** pendant
+    /// l'intervalle, l'humain étant présent au même moment. Pas « pendant tout
+    /// l'intervalle » : personne ne regarde une fenêtre en continu pendant
+    /// quarante minutes, et exiger la continuité rendrait le champ toujours faux.
+    ///
+    /// **Optional, et ce n'est pas un détail de style.** La synthèse `Codable`
+    /// de Swift n'emploie pas les valeurs par défaut : un champ non optionnel
+    /// ajouté ici rendrait illisible chaque ligne déjà écrite, et les deux
+    /// lecteurs avalent l'échec de décodage en silence — un mois d'historique
+    /// disparaîtrait sans un message. `nil` veut donc dire « journal antérieur à
+    /// ce champ », ce qui n'est ni vrai ni faux et doit se lire comme tel.
+    public private(set) var fg: Bool?
+
     public enum Source: String, Sendable, Codable {
         case certain, pixels, aucun
     }
@@ -53,8 +79,10 @@ public struct WatchEvent: Equatable, Sendable, Codable {
         lane: String, name: String, p: Int, state: LaneState,
         from: Date, to: Date, d: TimeInterval,
         src: Source, why: String,
-        cwd: String? = nil, branch: String? = nil
+        cwd: String? = nil, branch: String? = nil,
+        fg: Bool? = nil
     ) {
+        self.fg = fg
         self.lane = lane
         self.name = name
         self.p = p
@@ -68,9 +96,15 @@ public struct WatchEvent: Equatable, Sendable, Codable {
         self.branch = branch
     }
 
-    mutating func extend(to instant: Date, by elapsed: TimeInterval) {
+    mutating func extend(to instant: Date, by elapsed: TimeInterval, foreground: Bool) {
         to = instant
         d += elapsed
+        // Un « oui » ne se reprend pas : la voie a bien été au premier plan
+        // pendant cet intervalle, même si elle ne l'est plus au battement
+        // suivant. Et `nil` ne devient `false` que si l'on a vraiment observé —
+        // ici on observe toujours, donc le `nil` d'un journal relu n'est jamais
+        // écrasé, puisqu'on ne relit pas pour étendre.
+        fg = (fg ?? false) || foreground
     }
 }
 
@@ -99,23 +133,45 @@ public struct WatchLedger: Sendable {
         lane: Lane,
         at instant: Date,
         elapsed: TimeInterval,
-        source: WatchEvent.Source
+        source: WatchEvent.Source,
+        foreground: Bool = false
     ) -> WatchEvent? {
         let key = lane.identity.key
 
         if var current = open[key] {
             let onTime = instant.timeIntervalSince(current.lastSeen) <= pulse
             if current.event.state == lane.state, onTime {
-                current.event.extend(to: instant, by: elapsed)
+                current.event.extend(to: instant, by: elapsed, foreground: foreground)
                 current.lastSeen = instant
                 open[key] = current
                 return nil
             }
-            open[key] = (start(lane, at: instant, source: source), instant)
+
+            // **Le battement de la transition appartient à l'intervalle qui se
+            // ferme, pas à celui qui s'ouvre.**
+            //
+            // Il n'appartenait à aucun des deux. L'intervalle sortant se fermait
+            // sur son avant-dernier battement et le nouveau s'ouvrait à `d = 0` :
+            // chaque changement d'état perdait un tic. Deux cents intervalles par
+            // jour, c'est un quart d'heure évaporé sans que rien ne le dise ;
+            // et un état qui ne dure qu'un seul battement — le cas exact d'une
+            // voie qui alterne — s'écrivait avec une durée de zéro. Une journée
+            // entière pouvait ainsi valoir zéro seconde dans le journal.
+            //
+            // Il revient au sortant parce que c'est lui qui l'a vécu : entre les
+            // deux battements, l'état observé était l'ancien. Le nouveau, lui,
+            // commence à l'instant présent et n'a encore rien duré.
+            //
+            // La propriété que ça rétablit, et que le test vérifie : la somme des
+            // durées écrites vaut la somme des `elapsed` fournis.
+            if onTime {
+                current.event.extend(to: instant, by: elapsed, foreground: foreground)
+            }
+            open[key] = (start(lane, at: instant, source: source, foreground: foreground), instant)
             return current.event
         }
 
-        open[key] = (start(lane, at: instant, source: source), instant)
+        open[key] = (start(lane, at: instant, source: source, foreground: foreground), instant)
         return nil
     }
 
@@ -136,7 +192,12 @@ public struct WatchLedger: Sendable {
         return events.sorted { $0.from < $1.from }
     }
 
-    private func start(_ lane: Lane, at instant: Date, source: WatchEvent.Source) -> WatchEvent {
+    private func start(
+        _ lane: Lane,
+        at instant: Date,
+        source: WatchEvent.Source,
+        foreground: Bool
+    ) -> WatchEvent {
         WatchEvent(
             lane: lane.identity.key,
             name: lane.identity.displayName,
@@ -148,7 +209,8 @@ public struct WatchLedger: Sendable {
             src: source,
             why: lane.because,
             cwd: lane.identity.workingDirectory,
-            branch: lane.identity.branch
+            branch: lane.identity.branch,
+            fg: foreground
         )
     }
 }

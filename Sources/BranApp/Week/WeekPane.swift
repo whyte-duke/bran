@@ -227,8 +227,16 @@ struct WeekPane: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// **Le premier chiffre est le vôtre, et il ne l'était pas.**
+    ///
+    /// La ligne annonçait `trackedSeconds`, qui additionne tout ce qui a bougé à
+    /// l'écran. Sur deux jours de journal réel, cela faisait 12 h dont 7,6 h de
+    /// fenêtres que personne ne regardait. Elle annonce désormais le travail
+    /// attribué — voir `WeekSummary.isYours` — et ce qui a tourné sans vous est
+    /// dit à part, dans la phrase du dessous. Deux chiffres qui ne s'ajoutent
+    /// pas, plutôt qu'un seul qui les mélange.
     private var headlineText: String {
-        var parts = ["\(WatchPane.duration(summary.trackedSeconds)) suivies"]
+        var parts = ["\(WatchPane.duration(summary.workedSeconds)) de travail"]
 
         if summary.projects.isEmpty == false {
             parts.append("\(summary.projects.count) projet\(summary.projects.count > 1 ? "s" : "")")
@@ -247,11 +255,28 @@ struct WeekPane: View {
     /// Le chiffre qui casse une illusion : on croit faire tourner quatre
     /// sessions de front, on en fait tourner beaucoup moins. Affiché seulement
     /// quand il y a de quoi le calculer — une moyenne sur rien ne vaut rien.
+    ///
+    /// Le temps machine le précède depuis qu'il a quitté le total : sans cette
+    /// phrase, il aurait simplement disparu de la page, et une heure qu'on ne
+    /// voit plus nulle part passe pour une heure perdue.
     private var parallelismText: String? {
+        var sentences: [String] = []
+
+        if summary.machineSeconds > 0 {
+            sentences.append(
+                "\(WatchPane.duration(summary.machineSeconds)) ont avancé sans vous, et ne sont pas comptées ci-dessus."
+            )
+        }
+
         let parallelism = summary.parallelism
-        guard parallelism.busySeconds > 0 else { return nil }
-        let average = parallelism.average.formatted(.number.precision(.fractionLength(1)))
-        return "\(average) voie en parallèle en moyenne, \(parallelism.peak) au maximum, sur \(WatchPane.duration(parallelism.busySeconds)) d'avancement réel."
+        if parallelism.busySeconds > 0 {
+            let average = parallelism.average.formatted(.number.precision(.fractionLength(1)))
+            sentences.append(
+                "\(average) voie en parallèle en moyenne, \(parallelism.peak) au maximum, sur \(WatchPane.duration(parallelism.busySeconds)) d'avancement réel."
+            )
+        }
+
+        return sentences.isEmpty ? nil : sentences.joined(separator: " ")
     }
 
     // MARK: - 2. L'histogramme
@@ -275,6 +300,15 @@ struct WeekPane: View {
                     )
                     .foregroundStyle(by: .value("État", Legend.worked))
 
+                    // Empilée juste au-dessus du travail, et distincte de lui :
+                    // c'est la seule façon de voir d'un coup d'œil une journée
+                    // où les machines ont beaucoup tourné et vous peu.
+                    BarMark(
+                        x: .value("Jour", day.date, unit: .day),
+                        y: .value("Heures", day.machine / 3600)
+                    )
+                    .foregroundStyle(by: .value("État", Legend.machine))
+
                     BarMark(
                         x: .value("Jour", day.date, unit: .day),
                         y: .value("Heures", day.waiting / 3600)
@@ -290,6 +324,7 @@ struct WeekPane: View {
             }
             .chartForegroundStyleScale([
                 Legend.worked: Palette.done,
+                Legend.machine: Palette.machine,
                 Legend.waiting: Palette.attention,
                 Legend.unknown: Palette.asleep,
             ])
@@ -399,7 +434,10 @@ struct WeekPane: View {
     }
 
     private enum Legend {
-        static let worked = "avancé"
+        static let worked = "votre travail"
+        /// « sans vous » et non « machine » : le libellé doit dire ce que ça
+        /// change pour la personne qui lit, pas d'où vient la mesure.
+        static let machine = "sans vous"
         static let waiting = "en attente"
         static let unknown = "non observé"
     }
@@ -495,6 +533,9 @@ private struct ProjectBar: View {
                         .fill(Palette.done)
                         .frame(width: width(project.worked, in: proxy.size.width))
                     Capsule()
+                        .fill(Palette.machine)
+                        .frame(width: width(project.machine, in: proxy.size.width))
+                    Capsule()
                         .fill(Palette.attention)
                         .frame(width: width(project.waiting, in: proxy.size.width))
                     Spacer(minLength: 0)
@@ -505,7 +546,9 @@ private struct ProjectBar: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(project.name)
         .accessibilityValue(
-            "\(WatchPane.duration(project.worked)) d'avancement, \(WatchPane.duration(project.waiting)) d'attente"
+            "\(WatchPane.duration(project.worked)) de votre travail, "
+            + "\(WatchPane.duration(project.machine)) sans vous, "
+            + "\(WatchPane.duration(project.waiting)) d'attente"
         )
     }
 

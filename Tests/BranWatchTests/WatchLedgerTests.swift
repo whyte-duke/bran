@@ -44,8 +44,44 @@ struct WatchLedgerTests {
         )
 
         #expect(ferme?.state == .working)
-        #expect(ferme?.d == 2)
-        #expect(ferme?.to == t0.addingTimeInterval(2))
+        // **Le battement de la transition appartient à l'intervalle qui se
+        // ferme.** Ce test verrouillait l'inverse — `d == 2`, borne haute à
+        // t0+2 — c'est-à-dire la perte d'un tic à chaque changement d'état. Sur
+        // deux cents intervalles par jour, un quart d'heure évaporé ; et un état
+        // qui ne durait qu'un battement s'écrivait avec une durée de zéro.
+        #expect(ferme?.d == 4)
+        #expect(ferme?.to == t0.addingTimeInterval(4))
+    }
+
+    /// **La propriété qui manquait, et qui aurait attrapé le défaut seule.**
+    ///
+    /// Rien ne se perd : la somme des durées écrites vaut la somme des durées
+    /// fournies. Un test qui vérifie un intervalle à la fois ne peut pas voir
+    /// une fuite qui vit exactement entre deux intervalles.
+    @Test("Rien ne se perd entre deux intervalles")
+    func rienNeSePerd() {
+        var ledger = WatchLedger(tickInterval: 2)
+        let etats: [LaneState] = [.working, .working, .waiting, .working, .waiting, .waiting]
+
+        var ecrit: TimeInterval = 0
+        var fourni: TimeInterval = 0
+
+        for (index, etat) in etats.enumerated() {
+            // Le tout premier battement ouvre l'intervalle : il n'y a pas
+            // encore d'intervalle à qui verser son temps, et c'est la seule
+            // exception admise.
+            let elapsed: TimeInterval = 2
+            if index > 0 { fourni += elapsed }
+            if let ferme = ledger.beat(
+                lane: lane(etat), at: t0.addingTimeInterval(Double(index) * 2),
+                elapsed: elapsed, source: .certain
+            ) {
+                ecrit += ferme.d
+            }
+        }
+
+        ecrit += ledger.flush().reduce(0) { $0 + $1.d }
+        #expect(ecrit == fourni)
     }
 
     /// Sans tolérance, une capture lente couperait une seule période de travail

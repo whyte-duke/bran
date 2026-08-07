@@ -276,6 +276,13 @@ public struct PresenceLedger: Sendable {
             return nil
         }
 
+        // Le battement de la transition revient à l'intervalle qui se ferme :
+        // même règle et même raison que `WatchLedger.beat`, où elle est écrite
+        // en entier. Ici elle compte double, parce qu'une pause de cinq minutes
+        // pile ne doit pas rater son seuil pour un tic manquant.
+        if onTime {
+            current.event.extend(to: instant, by: elapsed)
+        }
         open = (PresenceEvent(presence: presence, from: instant, to: instant, d: 0), instant)
         return current.event
     }

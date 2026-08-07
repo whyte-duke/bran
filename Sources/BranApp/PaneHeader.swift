@@ -61,12 +61,23 @@ struct SearchField: View {
                 .focused($isFocused)
                 .accessibilityLabel("Rechercher")
                 .accessibilityHint(prompt)
-                // Échap vide le champ, puis rend le clavier au contenu. Deux
-                // gestes en un, dans l'ordre où on les veut : une recherche
-                // qu'on abandonne laisse une liste filtrée, sinon.
+                // Échap vide le champ, **puis rend le clavier au contenu**. Le
+                // commentaire d'origine promettait déjà les deux gestes ; le
+                // second n'était pas écrit, si bien qu'on restait prisonnier du
+                // champ de recherche et qu'il fallait la souris pour en sortir.
+                // C'est exactement le geste que quelqu'un qui n'utilise pas la
+                // souris attend d'Échap.
+                //
+                // Deux frappes, dans cet ordre : la première vide, la seconde
+                // rend le focus. Tout faire d'un coup enlèverait la liste
+                // filtrée sous les yeux de qui voulait seulement la garder.
                 .onKeyPress(.escape) {
-                    guard text.isEmpty == false else { return .ignored }
-                    text = ""
+                    if text.isEmpty == false {
+                        text = ""
+                        return .handled
+                    }
+                    guard isFocused else { return .ignored }
+                    isFocused = false
                     return .handled
                 }
 

@@ -301,7 +301,16 @@ final class WatchController {
         // `human` a déjà été relevé en tête de tic, avant l'arbitrage du
         // silence : le relever une seconde fois ici donnerait deux mesures d'un
         // même battement, et c'est celle du journal de présence qui ferait foi.
-        focus.update(uptime: uptime, human: human, within: settings.tickInterval * 2)
+        // **La fenêtre d'activité est celle du résolveur, pas deux tics.**
+        //
+        // Elle valait `tickInterval * 2`, soit huit secondes : lire un
+        // paragraphe pendant vingt secondes suffisait à ne plus « toucher » la
+        // fenêtre qu'on avait sous les yeux, et la voie glissait vers l'attente
+        // alors que l'utilisateur était devant. `humanIdleAfter` est déjà la
+        // définition que bran donne de « l'humain est absent » — deux minutes —
+        // et il n'y a aucune raison d'en avoir une seconde, plus sévère, cachée
+        // ici.
+        focus.update(uptime: uptime, human: human, within: settings.thresholds.humanIdleAfter)
 
         let windows = watchWindows(certain: certain, keys: certainKeys, uptime: uptime)
 
@@ -324,7 +333,13 @@ final class WatchController {
             }
         )
         store.record(
-            fresh.lanes.map { LaneRecord(lane: $0, source: sources[$0.identity.key] ?? .aucun) },
+            fresh.lanes.map { lane in
+                LaneRecord(
+                    lane: lane,
+                    source: sources[lane.identity.key] ?? .aucun,
+                    foreground: focus.current == lane.identity.key
+                )
+            },
             at: now,
             elapsed: elapsed
         )
@@ -451,7 +466,14 @@ final class WatchController {
                     measurements.map { ($0.identity.key, $0) },
                     uniquingKeysWith: { first, _ in first }
                 )
-                self.pixelsAt = uptime
+                // **L'instant de la réponse, pas celui de la demande.** La
+                // version précédente rangeait ici `uptime`, qui est le paramètre
+                // capturé au moment du lancement : une mesure naissait donc
+                // avec l'âge de sa propre capture. Combiné à un seuil de
+                // péremption égal au budget, ça la rendait périmée à la seconde
+                // où elle arrivait. Les deux moitiés du défaut sont corrigées,
+                // et il fallait les deux.
+                self.pixelsAt = self.uptime
                 self.samplingSince = nil
                 self.isSampling = false
             }

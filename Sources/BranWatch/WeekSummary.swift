@@ -34,7 +34,35 @@ public struct WeekSummary: Equatable, Sendable {
     /// heures n'est pas trois heures de travail, et les compter gonflerait le
     /// seul chiffre que l'utilisateur va citer.
     public let trackedSeconds: TimeInterval
+
+    /// Le temps de travail **attribué** : une session d'agent qui avance, ou une
+    /// fenêtre que l'humain tenait. C'est le chiffre principal de tous les
+    /// écrans, et c'est celui qui a changé de définition.
+    ///
+    /// Avant, il comptait toute fenêtre visible dont plus de 1 % des blocs de
+    /// luminance avaient bougé. Sur deux jours de journal réel, 7,6 h des 12,1 h
+    /// annoncées venaient de là : « Téléchargements » (123 min) et « empty
+    /// project » (120 min) passaient devant le dossier client (89 min). Un
+    /// dénominateur, un ratio pause/travail, une répartition par catégorie et
+    /// une comparaison au mois dernier bâtis là-dessus héritent tous de la même
+    /// erreur — et l'historique devient incomparable le jour où on la corrige.
+    ///
+    /// Voir `WatchEvent.fg`.
     public let workedSeconds: TimeInterval
+
+    /// Le temps où **une machine avançait sans vous**, séparé et jamais ajouté
+    /// au total.
+    ///
+    /// Ce n'est pas du déchet : trois agents qui compilent pendant que vous
+    /// relisez une documentation, c'est exactement ce qu'on veut. Mais ce n'est
+    /// pas votre journée de travail, et les mélanger fabrique des journées de
+    /// dix-neuf heures.
+    ///
+    /// Un journal antérieur à `WatchEvent.fg` n'a pas de quoi trancher : ses
+    /// intervalles de pixels tombent ici plutôt que dans `workedSeconds`, ce qui
+    /// sous-estime le passé au lieu de le surestimer. C'est le bon sens de
+    /// l'erreur pour une mesure qu'on va comparer d'un mois sur l'autre.
+    public let machineSeconds: TimeInterval
 
     /// **La dette d'attente de la semaine, cumulée.** À ne pas confondre avec
     /// `WatchVerdict.waitingNow`, qui est instantané et retombe à zéro dès
@@ -76,7 +104,8 @@ public struct WeekSummary: Equatable, Sendable {
     public static let empty = WeekSummary(
         start: .distantPast, end: .distantPast, span: .week,
         days: [], projects: [],
-        trackedSeconds: 0, workedSeconds: 0, waitingSeconds: 0, unknownSeconds: 0,
+        trackedSeconds: 0, workedSeconds: 0, machineSeconds: 0,
+        waitingSeconds: 0, unknownSeconds: 0,
         parallelism: .none, timeline: []
     )
 
@@ -90,13 +119,16 @@ public struct WeekSummary: Equatable, Sendable {
         /// pas, et personne ne s'en apercevrait avant un changement d'heure.
         public let key: String
         public let date: Date
+        /// Le travail attribué : voir `WeekSummary.workedSeconds`.
         public let worked: TimeInterval
+        /// Ce qui a avancé sans vous : voir `WeekSummary.machineSeconds`.
+        public let machine: TimeInterval
         public let waiting: TimeInterval
         public let unknown: TimeInterval
         public let isToday: Bool
 
         public var id: String { key }
-        public var total: TimeInterval { worked + waiting + unknown }
+        public var total: TimeInterval { worked + machine + waiting + unknown }
     }
 
     /// Un projet, tel que la semaine l'a vu.
@@ -105,6 +137,10 @@ public struct WeekSummary: Equatable, Sendable {
         public let key: String
         public let name: String
         public let worked: TimeInterval
+        /// La part qui a avancé sans vous. Un projet dont c'est l'essentiel est
+        /// un projet que vous surveillez, pas un projet sur lequel vous
+        /// travaillez, et la barre a le droit de le dire.
+        public let machine: TimeInterval
         public let waiting: TimeInterval
         /// Combien de voies distinctes ont porté ce projet dans la semaine.
         public let laneCount: Int
@@ -258,10 +294,11 @@ extension WeekSummary {
 
         // Un accumulateur par jour, indexé par clé — la même clé que le nom de
         // fichier du journal.
-        var perDay: [String: (worked: TimeInterval, waiting: TimeInterval, unknown: TimeInterval)] = [:]
-        var perProject: [String: (name: String, worked: TimeInterval, waiting: TimeInterval, lanes: Set<String>)] = [:]
+        var perDay: [String: (worked: TimeInterval, machine: TimeInterval, waiting: TimeInterval)] = [:]
+        var perProject: [String: (name: String, worked: TimeInterval, machine: TimeInterval, waiting: TimeInterval, lanes: Set<String>)] = [:]
 
         var worked: TimeInterval = 0
+        var machine: TimeInterval = 0
         var waiting: TimeInterval = 0
 
         var workingSpans: [(from: Date, to: Date)] = []
@@ -277,8 +314,11 @@ extension WeekSummary {
             // semaine affichée.
             guard let clipped = clip(event, from: start, to: end) else { continue }
 
+            let yours = isYours(event)
+
             switch event.state {
-            case .working: worked += clipped.seconds
+            case .working:
+                if yours { worked += clipped.seconds } else { machine += clipped.seconds }
             case .waiting: waiting += clipped.seconds
             case .unknown:
                 if clipped.to > clipped.from {
@@ -299,7 +339,8 @@ extension WeekSummary {
                 }
                 var bucket = perDay[slice.key] ?? (0, 0, 0)
                 switch event.state {
-                case .working: bucket.worked += slice.seconds
+                case .working:
+                    if yours { bucket.worked += slice.seconds } else { bucket.machine += slice.seconds }
                 case .waiting: bucket.waiting += slice.seconds
                 case .unknown, .stale, .abandoned: continue
                 }
@@ -313,8 +354,12 @@ extension WeekSummary {
             guard event.state == .working || event.state == .waiting else { continue }
 
             let key = projectKey(for: event)
-            var row = perProject[key] ?? (projectName(for: event), 0, 0, [])
-            if event.state == .working { row.worked += clipped.seconds } else { row.waiting += clipped.seconds }
+            var row = perProject[key] ?? (projectName(for: event), 0, 0, 0, [])
+            switch (event.state, yours) {
+            case (.working, true): row.worked += clipped.seconds
+            case (.working, false): row.machine += clipped.seconds
+            default: row.waiting += clipped.seconds
+            }
             row.lanes.insert(event.lane)
             perProject[key] = row
         }
@@ -325,6 +370,7 @@ extension WeekSummary {
                 key: day.key,
                 date: day.start,
                 worked: bucket.worked,
+                machine: bucket.machine,
                 waiting: bucket.waiting,
                 unknown: union(of: unknownPerDay[day.key] ?? []),
                 isToday: day.key == todayKey
@@ -341,6 +387,7 @@ extension WeekSummary {
                 key: key,
                 name: value.name,
                 worked: value.worked,
+                machine: value.machine,
                 waiting: value.waiting,
                 laneCount: value.lanes.count
             ))
@@ -359,11 +406,36 @@ extension WeekSummary {
             projects: rows,
             trackedSeconds: worked + waiting,
             workedSeconds: worked,
+            machineSeconds: machine,
             waitingSeconds: waiting,
             unknownSeconds: union(of: unknownSpans),
             parallelism: concurrency(of: workingSpans),
             timeline: timeline(of: markers, from: start, to: end, calendar: calendar)
         )
+    }
+
+    /// **Est-ce que ce temps est le vôtre ?**
+    ///
+    /// La question que le produit devait trancher, en trois lignes. Deux façons
+    /// d'y répondre oui, et elles ne se recouvrent pas :
+    ///
+    /// 1. **Un capteur certain.** Une session d'agent qui appelle un outil ne
+    ///    ment pas : elle avance parce que vous la lui avez demandée, même si
+    ///    vous êtes ailleurs. C'est le travail que vous avez lancé.
+    /// 2. **Vous étiez dessus.** Une fenêtre que vous teniez pendant que le
+    ///    système vous voyait actif. C'est le travail que vous faisiez.
+    ///
+    /// Tout le reste — une fenêtre dont des pixels bougent sans que personne ne
+    /// la regarde — est du mouvement, pas du travail. Un lecteur vidéo, une
+    /// barre de progression, une horloge, un fil qui se rafraîchit.
+    ///
+    /// **Le cas `nil` est délibérément compté comme « pas le vôtre ».** Un
+    /// journal écrit avant `WatchEvent.fg` n'a pas de quoi trancher, et il vaut
+    /// mieux sous-estimer une semaine passée que la surestimer : le jour où on
+    /// compare mars à février, une erreur qui gonfle le passé fait croire à une
+    /// baisse qui n'a pas eu lieu.
+    static func isYours(_ event: WatchEvent) -> Bool {
+        event.src == .certain || event.fg == true
     }
 
     // MARK: - Découpage du temps

@@ -86,7 +86,11 @@ struct PresenceTests {
 
         let closed = ledger.beat(.idle, at: t0.addingTimeInterval(8), elapsed: 4)
         #expect(closed?.presence == .present)
-        #expect(closed?.d == 4)
+        // Le battement de la transition revient à l'intervalle qui se ferme :
+        // deux extensions de quatre secondes. Ici la règle compte double —
+        // une pause de cinq minutes pile ne doit pas rater son seuil pour un
+        // tic manquant.
+        #expect(closed?.d == 8)
     }
 
     /// Un battement en retard coupe l'intervalle : sans ça, une application

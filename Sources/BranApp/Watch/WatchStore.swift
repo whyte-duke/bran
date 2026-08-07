@@ -9,6 +9,9 @@ import Observation
 struct LaneRecord: Sendable {
     let lane: Lane
     let source: WatchEvent.Source
+    /// L'humain tenait-il cette voie à ce battement. Voir `WatchEvent.fg` :
+    /// c'est ce champ qui décide de ce qui compte comme du travail.
+    let foreground: Bool
 }
 
 /// **Le journal du veilleur : un fichier par jour, en ajout continu.**
@@ -168,7 +171,8 @@ final class WatchStore {
                 lane: record.lane,
                 at: now,
                 elapsed: elapsed,
-                source: record.source
+                source: record.source,
+                foreground: record.foreground
             ) {
                 write(closed)
             }

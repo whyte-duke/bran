@@ -27,6 +27,15 @@ final class HumanFocus {
 
     private var touched: [String: Duration] = [:]
 
+    /// La voie que l'humain tenait **à ce battement-ci**, ou `nil`.
+    ///
+    /// C'est la valeur que `WatchController` verse dans `WatchEvent.fg`, et
+    /// c'était jusqu'ici la plus chère du veilleur à être jetée : elle se
+    /// calculait à chaque tic, servait à un booléen local du résolveur, et
+    /// disparaissait. Le journal n'en gardait rien, donc aucun total ne pouvait
+    /// distinguer une heure de travail d'une heure de fenêtre animée.
+    private(set) var current: String?
+
     init() {}
 
     /// À appeler une fois par tic, avant de résoudre.
@@ -34,9 +43,11 @@ final class HumanFocus {
     /// - Parameter human: l'inactivité clavier-souris. Une fenêtre au premier
     ///   plan devant un humain parti déjeuner n'est pas « touchée ».
     func update(uptime: Duration, human: HumanPresence, within: TimeInterval) {
+        current = nil
         guard let idle = human.idleSeconds, idle <= within else { return }
         guard let identity = Self.frontmostLane() else { return }
         touched[identity.key] = uptime
+        current = identity.key
     }
 
     /// Depuis quand l'humain n'a pas touché cette voie. **`nil` quand il ne l'a
@@ -72,6 +83,7 @@ final class HumanFocus {
 
     func forget() {
         touched.removeAll()
+        current = nil
     }
 
     /// La voie de la fenêtre au premier plan.

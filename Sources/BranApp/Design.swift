@@ -142,6 +142,16 @@ enum Palette {
     static let attention = Color.orange
     static let broken = Color.red
     static let asleep = Color.secondary
+
+    /// Ce qui a avancé **sans l'utilisateur** : une machine qui tourne pendant
+    /// qu'il fait autre chose.
+    ///
+    /// Ni `done` ni `asleep`, et c'est tout le sujet. Le vert dirait « c'est
+    /// votre travail », le gris dirait « il ne s'est rien passé » ; ici il s'est
+    /// passé quelque chose de réel, qui n'est simplement pas à mettre à votre
+    /// crédit. Le bleu est la seule couleur d'état qui ne portait encore aucun
+    /// sens dans l'application, donc la seule qui n'en contredise pas un autre.
+    static let machine = Color.blue
 }
 
 // MARK: - Mouvement
