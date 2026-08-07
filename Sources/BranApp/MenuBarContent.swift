@@ -24,6 +24,10 @@ struct MenuBarContent: View {
 
         Divider()
 
+        AwakeMenu(awake: model.awake)
+
+        Divider()
+
         dictationItems
 
         Text(model.statusSummary)
@@ -64,6 +68,14 @@ struct MenuBarContent: View {
 
         Divider()
 
+        // La consommation, **ici et plus dans un second élément de barre de
+        // menus**. Voir `ResourceLines` pour ce que ce déménagement coûte et
+        // pourquoi il a quand même été fait.
+        if model.meter.showsInMenuBar {
+            ResourceLines(meter: model.meter)
+            Divider()
+        }
+
         // Toujours présent. La version précédente ne le montrait que si
         // l'enregistrement était impossible : quelqu'un dont l'enregistrement
         // marchait n'avait donc aucun moyen de découvrir la dictée ni la
@@ -103,9 +115,29 @@ struct MenuBarContent: View {
     }
 }
 
+/// **Un seul élément de barre de menus, donc deux emplacements à arbitrer.**
+///
+/// Cinq états veulent s'y montrer — dictée, enregistrement, réunion proposée,
+/// éveil, consommation — et il y a une icône et un texte. La règle est écrite
+/// une fois, ici, et elle tient en trois lignes :
+///
+/// 1. **L'icône porte l'état le plus urgent** : un événement court d'abord (la
+///    dictée dure dix secondes, l'enregistrement une heure), une proposition
+///    ensuite, un mode permanent en dernier.
+/// 2. **Le texte porte une seule chose**, dans le même ordre, et retombe sur la
+///    consommation au repos — l'endroit d'où elle vient.
+/// 3. **Un mode permanent que l'icône ne montre pas est dit en toutes lettres**
+///    par le texte. C'est ce qui empêche l'éveil de devenir invisible pendant un
+///    enregistrement, c'est-à-dire exactement quand on l'a allumé.
 extension AppModel {
-    /// L'icône doit dire d'un coup d'œil si on enregistre. C'est le seul retour
-    /// visuel permanent tant que l'overlay n'existe pas.
+
+    /// Le symbole de l'éveil, nommé parce que le libellé a besoin de savoir si
+    /// c'est **lui** qui est affiché : si oui, le répéter dans le texte serait
+    /// dire deux fois la même chose dans quinze points de large.
+    static let awakeSymbol = "cup.and.saucer.fill"
+
+    /// L'icône doit dire d'un coup d'œil si on enregistre — et, depuis l'éveil,
+    /// si le Mac est tenu réveillé.
     var menuBarSymbol: String {
         // La dictée passe devant : elle dure quelques secondes, l'enregistrement
         // dure une heure. C'est l'événement court qui a besoin d'un retour
@@ -117,31 +149,60 @@ extension AppModel {
         case .idle, .pasting, .failed: break
         }
 
-        return switch engine.state {
-        case .recording, .finalizing: "record.circle.fill"
-        case .paused: "pause.circle.fill"
-        case .starting: "record.circle"
-        case .failed: "exclamationmark.triangle.fill"
-        case .idle: pendingMeeting != nil ? "bell.badge" : "eye"
+        switch engine.state {
+        case .recording, .finalizing: return "record.circle.fill"
+        case .paused: return "pause.circle.fill"
+        case .starting: return "record.circle"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .idle: break
         }
+
+        // La cloche avant la tasse : une proposition attend une décision et
+        // s'éteindra toute seule, l'éveil est un mode qu'on a choisi et qui ne
+        // bougera pas. Ce qui demande quelque chose passe devant ce qui dure.
+        if pendingMeeting != nil { return "bell.badge" }
+        return awake.isOn ? Self.awakeSymbol : "eye"
     }
 
     /// Court, mais présent : c'est ce qui rend l'élément repérable dans une
     /// barre de menus chargée — et pendant l'enregistrement, la durée est
     /// l'information qu'on cherche.
     var menuBarTitle: String {
+        let base = primaryMenuBarTitle
+
+        // L'éveil est allumé mais l'icône montre autre chose : on l'écrit.
+        // « ∞ » sans limite, le décompte quand il y en a un.
+        guard let mark = awake.menuBarMark, menuBarSymbol != Self.awakeSymbol else {
+            return base
+        }
+        return "\(base) · \(mark)"
+    }
+
+    /// Ce que le texte dit quand il n'a qu'une chose à dire.
+    private var primaryMenuBarTitle: String {
         switch dictation.phase {
         case .capturing: return "à l'écoute"
         case .transcribing: return "…"
         case .idle, .pasting, .failed: break
         }
 
-        return switch engine.state {
-        case .recording: elapsedDescription
-        case .paused: "‖ \(elapsedDescription)"
-        case .starting, .finalizing: "…"
-        case .failed: "bran ⚠︎"
-        case .idle: pendingMeeting != nil ? "Meet ?" : "bran"
+        switch engine.state {
+        case .recording: return elapsedDescription
+        case .paused: return "‖ \(elapsedDescription)"
+        case .starting, .finalizing: return "…"
+        case .failed: return "bran ⚠︎"
+        case .idle: break
         }
+
+        if pendingMeeting != nil { return "Meet ?" }
+
+        // Un décompte d'éveil passe devant la consommation : il finit, elle non.
+        if let countdown = awake.countdown { return countdown }
+
+        // Au repos, la place revient au chiffre — c'est ce que la fusion des
+        // deux éléments a coûté et rendu : il n'est plus permanent, mais il est
+        // là chaque fois que rien d'autre ne se passe. Éteint, on retombe sur
+        // le nom, qui rend l'élément repérable.
+        return meter.showsInMenuBar ? meter.label : "bran"
     }
 }

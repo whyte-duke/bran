@@ -48,6 +48,16 @@ public final class AppModel {
     let watchSettings = WatchSettings()
     let watch: WatchController
 
+    /// L'éveil : empêcher le Mac de s'endormir, tant qu'on le demande.
+    ///
+    /// Même autonomie que les trois modules précédents, et c'est le plus
+    /// autonome de tous : il ne connaît ni les réunions, ni la dictée, ni le
+    /// veilleur. Il tient une assertion du gestionnaire d'énergie et un état.
+    /// Son seul lien avec le reste est la fermeture d'échec, câblée plus bas —
+    /// bran a déjà un canal pour dire ce qui a raté, il n'en aura pas un second.
+    let awakeSettings = AwakeSettings()
+    let awake: AwakeController
+
     /// Ce que bran coûte, en processeur et en mémoire.
     ///
     /// **La contrainte C10 dit qu'un plafond CPU/énergie est un critère de
@@ -147,6 +157,7 @@ public final class AppModel {
         self.engine = RecordingEngine(backend: capture)
         self.uploads = UploadService(store: store)
         self.directory = MeetingDirectory(configuration: uploads.configuration)
+        self.awake = AwakeController(settings: awakeSettings)
 
         let settings = self.dictationSettings
         let dictationStore = DictationStore(
@@ -216,6 +227,7 @@ public final class AppModel {
         startDictation()
         startSnapshot()
         startWatch()
+        startAwake()
         startMeter()
 
         // La surveillance est permanente. Il n'y a pas de raison de la
@@ -323,6 +335,21 @@ public final class AppModel {
             // à l'ouverture d'une vue, elle ne ferait que ralentir un affichage.
             await watch.store.purgeExpired()
         }
+    }
+
+    // MARK: - L'éveil
+
+    /// Une fermeture d'échec, et rien d'autre.
+    ///
+    /// Un gestionnaire d'énergie qui refuse l'assertion est rare, mais c'est le
+    /// seul cas où l'interface pourrait prétendre tenir le Mac éveillé sans le
+    /// faire. Il repart donc par le même canal que les autres échecs de bran, et
+    /// s'affiche au même endroit.
+    private func startAwake() {
+        awake.onFailure = { [weak self] reason in
+            self?.lastFailure = reason
+        }
+        awake.start()
     }
 
     // MARK: - Le moniteur

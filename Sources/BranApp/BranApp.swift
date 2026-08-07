@@ -5,39 +5,34 @@ struct BranApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
+        // **Un seul élément de barre de menus, et c'est un choix qui a été
+        // repris.**
+        //
+        // bran en a porté deux : le sien, et un compteur de consommation séparé.
+        // L'argument tenait — le libellé de bran porte le chrono pendant un
+        // enregistrement, donc le chiffre aurait disparu au moment où il monte —
+        // mais il faisait payer deux icônes en permanence pour une information
+        // consultée une fois par semaine, dans une barre de menus qui en compte
+        // déjà quinze. Tout est désormais sous une seule icône : la
+        // consommation est dans le menu, et dans le libellé chaque fois que rien
+        // d'autre ne s'y montre. Voir `AppModel.menuBarTitle` pour l'arbitrage,
+        // et `ResourceLines` pour ce que ça coûte.
         MenuBarExtra {
             MenuBarContent(model: model)
         } label: {
             // Icône ET texte. Une icône seule de 16 points dans une barre de
             // menus chargée est introuvable, et sur un écran à encoche elle
             // peut passer dessous — invisible et non cliquable.
-            Label(model.menuBarTitle, systemImage: model.menuBarSymbol)
-        }
-
-        // **Un second élément, et pas une ligne de plus dans le premier.**
-        //
-        // Le libellé de l'élément bran porte déjà le chrono pendant un
-        // enregistrement et « à l'écoute » pendant une dictée : les deux moments
-        // où la consommation monte sont donc exactement les deux moments où le
-        // chiffre disparaîtrait. iStat Menus et Stats, les deux références du
-        // genre, séparent pour la même raison.
-        //
-        // `isInserted` plutôt qu'un `if` : c'est la façon dont SwiftUI retire
-        // proprement un élément de la barre de menus, sans reconstruire la scène.
-        MenuBarExtra(isInserted: Binding(
-            get: { model.meter.showsInMenuBar },
-            set: { model.meter.showsInMenuBar = $0 }
-        )) {
-            ResourceMenu(meter: model.meter)
-        } label: {
-            // `monospacedDigit` ici, et un remplissage en U+2007 dans la chaîne
-            // elle-même : le modificateur de police n'est pas toujours honoré
-            // sur un élément de barre de menus, le contenu de la chaîne l'est
-            // toujours. Voir `ResourceFormat.menuBarLabel`.
+            //
+            // `monospacedDigit` parce que ce texte porte maintenant des chiffres
+            // dans trois cas sur cinq — chrono, décompte d'éveil, consommation.
+            // Le remplissage en U+2007 de `ResourceFormat` reste nécessaire : le
+            // modificateur de police n'est pas toujours honoré sur un élément de
+            // barre de menus, le contenu de la chaîne l'est toujours.
             Label {
-                Text(model.meter.label).monospacedDigit()
+                Text(model.menuBarTitle).monospacedDigit()
             } icon: {
-                Image(systemName: "speedometer")
+                Image(systemName: model.menuBarSymbol)
             }
         }
 

@@ -42,6 +42,8 @@ recognition ships with macOS. Neither one needs a network.
 - **A library that is just a folder.** Metadata lives in a `.json` next to each
   `.mp4`. Move the folder, copy it to another Mac, restore it from a backup —
   everything still works.
+- **Keeps the Mac awake on request** — one click, indefinitely, from the same
+  menu bar item as everything else. See [Keeping the Mac awake](#keeping-the-mac-awake).
 
 Optionally, bran can push the audio of a call to a CRM for transcription and
 summarisation. That part is specific to one deployment and entirely opt-in — see
@@ -151,6 +153,62 @@ for users.
 The engine sits behind an `OCREngine` protocol, so a local model can be added if
 a real case demands it. Handwriting, photographed text and languages outside the
 supported 30 are where it would win.
+
+---
+
+## Keeping the Mac awake
+
+An app that watches a meeting for an hour has no business letting the screen go
+dark in the middle of it. bran holds the same power assertion Caffeine does —
+`PreventUserIdleDisplaySleep` — and puts it behind one click in the menu bar.
+
+**One click is indefinite**, which is where bran differs from Caffeine's five
+hour default. Click to keep the Mac awake, click again to let it sleep. A
+default duration is a setting for whoever wants one, and `Éveil pendant…` offers
+5 min → 5 h for a one-off; the gesture stays a single click either way.
+
+You can always see that it is on, in three places and without opening anything:
+
+| where | what it shows |
+|---|---|
+| menu bar icon | a filled cup, whenever nothing more urgent is happening |
+| menu bar text | the countdown, or ` · ∞` appended when the icon is busy elsewhere |
+| the window | a pulsing badge above the sidebar footer, with what remains |
+
+The second row is the one that matters. Recording, dictation and a detected
+meeting each take the icon while they run — and those are exactly the moments
+when someone has the keep-awake on. A mode that becomes invisible while it is
+doing its job is a mode you forget to turn off, so when the icon is taken, the
+text says it in words.
+
+**What it does not do, said before you find out.** A power assertion only
+prevents *idle* sleep. Closing the lid still sleeps the Mac, whatever bran
+asks — no public API contradicts that. And the assertion is checkable from
+outside the app, which is why it carries a name:
+
+```bash
+pmset -g assertions | grep bran
+#   pid 4711(bran): [0x…] 00:12:03 PreventUserIdleDisplaySleep
+#   named: "bran: keep-awake requested by the user"
+```
+
+That name is ASCII on purpose, and it is the one place in bran where French had
+to be given up. `pmset` transcodes assertion names to **MacRoman** before
+printing them: an em dash comes out as `0xD1` and an `é` as `0x8E`, which is
+mojibake in any UTF-8 terminal. It is the only string bran hands to a system tool
+instead of drawing itself.
+
+Two settings mirror Caffeine's, for the same reasons: activate on launch (off by
+default — an app that silently stops your Mac sleeping is one you uninstall a
+week later, after hunting the battery drain), and stop when the Mac is put to
+sleep deliberately (on by default — closing the lid means "I'm done").
+
+The timing logic — when a session expires, what the countdown reads — is a pure
+type in `BranCore` with its own tests. The whole of the system call is
+`Sources/BranApp/Awake/SleepBlocker.swift`, forty lines, and it is the only part
+no test can observe. The deadline is an absolute `Date` rather than a
+decrementing counter: a Mac that sleeps for three hours wakes up with the session
+already expired, without anything having had to count.
 
 ---
 
@@ -408,11 +466,21 @@ Findings from building it, each verified on a real machine:
 
 ### What bran costs, and how you can check
 
-A background app that watches your screen owes you a number. bran shows one: a
-second menu bar item, separate from bran's own, reading `processor·memory` as
-percentages. Open it and it names whatever is currently running — the dictation
-model loading, the watcher sampling, a recording in progress — under the heading
-"En ce moment", because those are simultaneous states and not a measured cause.
+A background app that watches your screen owes you a number. bran shows one, in
+its menu bar item, reading `processor·memory` as percentages. Open the menu and
+it names whatever is currently running — the dictation model loading, the
+watcher sampling, a recording in progress — under the heading "En ce moment",
+because those are simultaneous states and not a measured cause.
+
+**It lived in a second menu bar item, and that was reversed.** The argument for
+splitting was real: bran's own label carries the elapsed time while recording and
+"à l'écoute" while dictating, so the two moments when consumption climbs were
+exactly the two moments the number would have vanished. What it did not price was
+the permanent cost — two bran icons side by side, forever, in a menu bar that
+already holds fifteen, for a number consulted once a week. One item now, and the
+trade is explicit: the figure holds the label whenever nothing else is happening,
+it yields to events, and the dropdown always has it. `AppModel.menuBarTitle` is
+where the five competing states are arbitrated, in one place.
 
 **Baseline, MacBook Pro M2 Pro (12 cores, 8P + 4E, 16 GB), bran idle**: watcher
 on, nothing recording, no dictation, Parakeet on disk but not in memory. 90

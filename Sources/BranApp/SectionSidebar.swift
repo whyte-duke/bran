@@ -104,6 +104,15 @@ struct SectionSidebar: View {
             Divider()
                 .padding(.horizontal, Space.inset)
 
+            // Au-dessus de l'état, et seulement quand il est allumé : l'éveil
+            // est un mode que l'utilisateur a choisi et qui ne s'arrêtera pas
+            // tout seul. C'est la seule chose de cette colonne dont l'absence de
+            // rappel se paierait en batterie.
+            if model.awake.isOn {
+                AwakeBadge(awake: model.awake)
+                    .padding(.horizontal, Self.inset)
+            }
+
             if model.hasOpenSession == false {
                 CompactStatusRow(model: model)
                     .padding(.horizontal, Self.inset)
@@ -128,7 +137,12 @@ struct SectionSidebar: View {
 }
 
 /// Une ligne de navigation.
-private struct SidebarItem: View {
+///
+/// **Plus `private`, et pour une seule raison** : `AwakeBadge` s'aligne sur la
+/// gouttière du symbole ci-dessous. La recopier vaudrait deux points d'écart le
+/// jour où l'une des deux bouge — exactement le défaut que le commentaire sur
+/// `inset` décrit plus haut.
+struct SidebarItem: View {
     /// Entre le symbole et son libellé. Partagé avec « Réglages » en pied de
     /// colonne, qui doit s'aligner sur les sections au pixel près.
     static let gap = Space.small

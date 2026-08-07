@@ -41,12 +41,14 @@ struct GeneralSettingsSection: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
 
+        AwakeSettingsSection(model: model)
+
         Section("Consommation") {
             Toggle("Afficher la consommation dans la barre de menus", isOn: Binding(
                 get: { model.meter.showsInMenuBar },
                 set: { model.meter.showsInMenuBar = $0 }
             ))
-            Text("Un second élément, séparé de celui de bran : « processeur·mémoire », en pourcentage. Éteint, il ne mesure plus rien — la boucle s'arrête aussi.")
+            Text("Deux lignes dans le menu de bran — « processeur » et « mémoire » —, et le même chiffre dans le libellé chaque fois que rien d'autre ne s'y montre. Éteint, bran ne mesure plus rien : la boucle s'arrête aussi.")
                 .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
