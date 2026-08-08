@@ -176,7 +176,13 @@ extension DaySummary {
             end: end,
             blocks: blocks(from: merged, events: inside, switching: switching.perBlock),
             lanes: tracks,
-            breaks: BreakSummary.make(events: presence.filter { $0.from < end && $0.to > start }, now: now),
+            breaks: BreakSummary.make(
+                events: presence.filter { $0.from < end && $0.to > start },
+                // Le premier bloc de travail attribué : c'est lui qui fait la
+                // différence entre une pause et la nuit. Voir `BreakSummary.make`.
+                workStartedAt: merged.first?.from,
+                now: now
+            ),
             switching: switching.total,
             firstHour: bounds(of: inside, presence: presence, calendar: calendar).first,
             lastHour: bounds(of: inside, presence: presence, calendar: calendar).last
