@@ -438,3 +438,45 @@ tests. That is what makes this migration verifiable instead of hopeful.
 **Where to start:** measure before deciding. A main-thread stall has no number in
 this project yet — take one with `ResourceProbe` or Instruments on a full-screen
 capture, and only migrate if the number is visible to a human.
+
+---
+
+## Four small debts the clipboard capture left behind
+
+**What:** four loose ends found while wiring `ClipboardCapture` and its
+controller. None of them costs a copy today; all four would cost one later.
+
+**1. `ClipboardCapturePlan.measuresDimensions` has no destination.** The plan
+asks the caller to measure an image's dimensions while it holds the bytes, and
+`ClipboardEntry` has no field to put them in. Nothing was invented — a field
+added on a hunch freezes a format forever, and `ClipboardKind.swift` requires any
+field added after the first write to be `Optional` and argued for. The day the
+panel needs it: `pixelWidth: Int?` and `pixelHeight: Int?` on the entry, plus one
+parameter on `ClipboardCapture.make`. Until then the flag makes the caller do
+work nobody can store. Decide by building the panel: either it wants the aspect
+ratio for its thumbnail cache, in which case add the two fields, or it does not,
+in which case delete the flag.
+
+**2. `ClipboardBlobPayload.hash` is a computed property.** Each access re-hashes
+the content. `ref` calls it, the capture calls `ref`, and the store calls it
+again when writing — a 32 MiB image is hashed two or three times between the
+copy and the file. Measured cost is roughly 20 ms per pass, off the interface
+thread, so nothing is visibly wrong; it is simply work done twice for nothing.
+Store it in `init` instead. Where: `Sources/BranCore/Clipboard/ClipboardStore.swift`.
+
+**3. Two type identifiers are written out twice.**
+`"public.utf16-external-plain-text"` — the only member of
+`ClipboardTypePolicy.textTypes` that is not UTF-8 — and `"NSFilenamesPboardType"`
+— the only member of `fileTypes` that carries a plist rather than a URL — are
+string literals in the policy tables and named constants in `ClipboardCapture`.
+Two identical literals in two files is exactly the pair that diverges at the
+first correction applied to one side. Name them in `ClipboardTypePolicy` and have
+the capture use those.
+
+**4. A multi-item text or rich-text copy keeps only the deciding item.** The
+entry is honest about it — it announces one item, because one is what it stores —
+but the second item is dropped. It is not reachable in practice: a multi-item
+copy from the Finder carries file URLs, which are handled. It becomes reachable
+the day something calls `writeObjects([str1, str2])`. `plainText` holds one
+string, so storing both would need a format decision, which is why nothing was
+done. Where: `makeText` and `makeRichText` in `ClipboardCapture.swift`.
