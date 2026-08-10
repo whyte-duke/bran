@@ -11,6 +11,9 @@ import Observation
 ///   silencieux à `.idle`
 /// - la liste des segments ne perd jamais un morceau : un fichier écrit y
 ///   figure, même si la session échoue ensuite
+/// - toute session ouverte se conclut, et une seule fois : `onSettled` est
+///   appelé exactement une fois entre `.starting` et le retour à `.idle` ou
+///   `.failed`, y compris quand l'arrêt a été différé
 @MainActor
 @Observable
 public final class RecordingEngine {
@@ -33,6 +36,37 @@ public final class RecordingEngine {
     /// l'enregistrement tournerait indéfiniment : le résolveur n'émet `.stop`
     /// qu'une fois.
     private var stopRequestedDuringStart = false
+
+    /// La réunion de la session ouverte, du premier `.starting` jusqu'au verdict
+    /// d'arrêt inclus.
+    ///
+    /// Deux raisons de la garder ici plutôt que de la relire dans `state` :
+    /// `.failed` ne porte pas de `MeetingRef`, et c'est justement après un échec
+    /// qu'il importe le plus de savoir quelle fiche refermer ; et sa remise à
+    /// `nil` est le **verrou d'unicité** de `onSettled`.
+    private var openSession: MeetingRef?
+
+    /// L'arrêt est tranché : la session est close, bien ou mal.
+    ///
+    /// C'est la moitié qui manquait à `StopVerdict.stillOpen`. Un `.stop` reçu
+    /// pendant `.starting` est différé : l'appelant obtient `.stillOpen`, repart
+    /// sans rien écrire — ce qui est juste — et personne ne concluait la session
+    /// quand le démarrage aboutissait enfin. La fin n'était pas horodatée, les
+    /// segments n'étaient jamais fusionnés, et la bibliothèque affichait pour
+    /// toujours une réunion « interrompue » que la machine, elle, tenait pour
+    /// proprement close.
+    ///
+    /// La machine rappelle donc l'appelant au moment où **elle** tranche, tout de
+    /// suite ou dix secondes plus tard, que l'arrêt ait été demandé (`.stop`) ou
+    /// subi (`reportFailure`, échec de démarrage, échec de finalisation).
+    ///
+    /// Garanties :
+    /// - **une fois par session**, jamais zéro, jamais deux — deux clics sur
+    ///   « arrêter » ne fusionnent pas deux fois ;
+    /// - `verdict.isSettled` est toujours vrai ;
+    /// - `segments` est encore rempli à l'appel : c'est à l'observateur de le
+    ///   relever puis d'appeler `clearSegments()`.
+    public var onSettled: (@MainActor (MeetingRef, StopVerdict) -> Void)?
 
     public init(backend: any CaptureBackend) {
         self.backend = backend
@@ -105,6 +139,9 @@ public final class RecordingEngine {
     private func beginRecording(_ meeting: MeetingRef) async {
         stopRequestedDuringStart = false
         segments.removeAll()
+        // Avant la première transition : `.starting` peut échouer immédiatement,
+        // et une session qui échoue à naître doit se conclure comme les autres.
+        openSession = meeting
         transition(to: .starting(meeting))
 
         do {
@@ -142,5 +179,17 @@ public final class RecordingEngine {
     private func transition(to next: RecordingState) {
         state = next
         onTransition?(next)
+
+        // Le verdict est lu ici et nulle part ailleurs. `.idle` et `.failed` sont
+        // les deux seules issues d'une session, et cinq transitions y mènent —
+        // les reconnaître au passage évite d'oublier la sixième.
+        let verdict = StopVerdict(next)
+        guard verdict.isSettled, let meeting = openSession else { return }
+
+        // Le verrou : la session est retirée AVANT l'appel. Un second `.stop`,
+        // ou une panne signalée dans la même seconde, ne rejouera pas la
+        // conclusion — et donc pas la fusion des segments.
+        openSession = nil
+        onSettled?(meeting, verdict)
     }
 }

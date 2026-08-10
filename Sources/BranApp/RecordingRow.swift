@@ -1,3 +1,4 @@
+import BranCore
 import SwiftUI
 
 struct RecordingRow: View {
@@ -80,10 +81,22 @@ struct RecordingRow: View {
                 // Le fichier est presque toujours lisible — replayd le finalise
                 // même si bran meurt — mais le signaler évite de croire à tort
                 // que tout s'est bien passé.
-                Label("interrompue", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(Palette.attention)
-                    .labelStyle(.iconOnly)
-                    .help("Session jamais close proprement.")
+                //
+                // Le motif est écrit sur la ligne quand on l'a. Un triangle seul
+                // renvoie à un bandeau qui a peut-être disparu depuis une heure ;
+                // « finalisation impossible : délai dépassé » se lit sur place.
+                // Sans motif — les enregistrements antérieurs au champ — la ligne
+                // dit « interrompue » et rien de plus : c'est exactement ce
+                // qu'elle sait.
+                Label(
+                    recording.interruptionDetail ?? "interrompue",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(Palette.attention)
+                .labelStyle(.titleAndIcon)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(recording.interruptionNote)
             }
         }
         .font(Type.meta)
@@ -101,7 +114,9 @@ struct RecordingRow: View {
     /// contexte.
     ///
     /// L'« interrompue » était par-dessus le marché posé en `.iconOnly` : une
-    /// icône seule, sans étiquette, donc muette pour tout le monde.
+    /// icône seule, sans étiquette, donc muette pour tout le monde. Elle porte
+    /// désormais son texte, et son motif quand il y en a un — ici comme à
+    /// l'écran, on ne dit du motif que ce qui a été écrit.
     private var accessibilityDescription: String {
         if let progress {
             let percent = (progress * 100).formatted(.number.precision(.fractionLength(0)))
@@ -114,7 +129,11 @@ struct RecordingRow: View {
             recording.sizeDescription,
         ]
         if recording.wasInterrupted {
-            parts.append("session interrompue, jamais close proprement")
+            if let detail = recording.interruptionDetail {
+                parts.append("session interrompue, jamais close proprement, \(detail)")
+            } else {
+                parts.append("session interrompue, jamais close proprement")
+            }
         }
         if let stage = recording.crmBadge {
             parts.append(stage.text)
@@ -128,6 +147,10 @@ struct RecordingRow: View {
         RecordingRow(recording: .preview)
         RecordingRow(recording: .preview, progress: 0.42)
         RecordingRow(recording: .preview, upload: .uploading(0.6))
+        // Les deux façons d'être interrompue : avec le motif, et — pour tout ce
+        // qui date d'avant le champ — sans.
+        RecordingRow(recording: .previewInterrupted(reason: "finalisation impossible : délai dépassé"))
+        RecordingRow(recording: .previewInterrupted(reason: nil))
     }
     .frame(width: 320)
 }
@@ -146,6 +169,25 @@ extension Recording {
             url: URL(fileURLWithPath: "/tmp/preview.mp4"),
             fileSize: 2_400_000_000,
             duration: 2_730,
+            existsOnDisk: true,
+            hasMetadataFile: true
+        )
+    }
+
+    /// Une session que rien n'a close : pas de `endedAt`, avec ou sans motif.
+    static func previewInterrupted(reason: String?) -> Recording {
+        var metadata = RecordingMetadata(
+            id: UUID(),
+            startedAt: .now.addingTimeInterval(-1800),
+            title: "Closing Dupont"
+        )
+        metadata.interruptionReason = reason
+
+        return Recording(
+            metadata: metadata,
+            url: URL(fileURLWithPath: "/tmp/preview-interrupted.mp4"),
+            fileSize: 800_000_000,
+            duration: 1_500,
             existsOnDisk: true,
             hasMetadataFile: true
         )

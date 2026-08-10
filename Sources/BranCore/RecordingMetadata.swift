@@ -15,6 +15,25 @@ public struct RecordingMetadata: Codable, Identifiable, Equatable, Sendable {
     public var startedAt: Date
     public var endedAt: Date?
 
+    /// Pourquoi la session n'a jamais été close, quand on le sait.
+    ///
+    /// `endedAt == nil` dit *qu'*une session s'est mal terminée, et le dit pour
+    /// toujours : c'est le seul signal d'échec qui survive à la fermeture de la
+    /// fenêtre. Mais il ne dit pas *pourquoi*, et le motif, lui, ne vivait que
+    /// dans un bandeau que l'utilisateur voit s'il regarde au bon moment. Une
+    /// heure plus tard il reste un triangle sans explication, et rien à quoi le
+    /// rattacher.
+    ///
+    /// Optionnel pour la même raison que `segmentCount`, et la conséquence
+    /// serait ici bien pire qu'un compteur perdu : le décodage synthétisé
+    /// n'utilise pas les valeurs par défaut, un lecteur qui avale les échecs de
+    /// décodage ferait disparaître de la bibliothèque tous les enregistrements
+    /// écrits avant ce champ. Un mois de réunions, sans un message.
+    ///
+    /// `nil` n'est donc **pas** « motif inconnu » : c'est « personne n'a jamais
+    /// eu l'occasion de l'écrire ». L'affichage doit le traiter comme tel.
+    public var interruptionReason: String?
+
     /// Titre issu du calendrier. `nil` = à horodater à l'affichage, dans la
     /// langue et le fuseau du moment où on regarde.
     public var title: String?
@@ -110,4 +129,35 @@ public struct RecordingMetadata: Codable, Identifiable, Equatable, Sendable {
     /// déplacer le dossier ne doit rien casser.
     public var fileName: String { "\(id.uuidString).mp4" }
     public var sidecarName: String { "\(id.uuidString).json" }
+
+    // MARK: - Interruption
+
+    /// Le motif tel qu'on peut le montrer, ou `nil` s'il n'y en a pas à montrer.
+    ///
+    /// Une chaîne vide ou blanche vaut absence : un sidecar réparé à la main,
+    /// ou un moteur qui a échoué sans rien avoir à dire, ne doit pas produire
+    /// une ligne « interrompue : » qui s'arrête sur ses deux points.
+    ///
+    /// Le point final est retiré parce que l'appelant compose une phrase autour
+    /// du motif et ajoute le sien ; sans ça, « finalisation impossible.. ».
+    public var interruptionDetail: String? {
+        guard let reason = interruptionReason?.trimmingCharacters(in: .whitespacesAndNewlines),
+              reason.isEmpty == false
+        else { return nil }
+
+        return reason.hasSuffix(".") ? String(reason.dropLast()) : reason
+    }
+
+    /// La phrase complète de l'avertissement « interrompue ».
+    ///
+    /// **Sans motif enregistré, la phrase s'arrête à ce qu'on sait.** Écrire
+    /// « motif : inconnu » présenterait une absence d'information comme une
+    /// information : le motif de tout ce qui a été enregistré avant l'existence
+    /// de ce champ n'est pas inconnu, il n'a jamais été demandé. Et un
+    /// avertissement qui affiche « inconnu » sur des mois d'archives apprend à
+    /// ne plus le lire.
+    public var interruptionNote: String {
+        guard let detail = interruptionDetail else { return "Session jamais close proprement." }
+        return "Session jamais close proprement : \(detail)."
+    }
 }

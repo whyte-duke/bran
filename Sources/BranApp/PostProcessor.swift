@@ -1,4 +1,5 @@
 import AVFoundation
+import BranCore
 import Foundation
 import Synchronization
 
@@ -16,6 +17,10 @@ actor PostProcessor {
     struct Outcome: Sendable {
         let originalBytes: Int64
         let finalBytes: Int64
+
+        /// Ce qu'est devenue la matière première. Un `Outcome` ne dit pas
+        /// seulement « ça a marché » : il dit aussi ce qui traîne encore.
+        let cleanup: SegmentCleanup
 
         var savedFraction: Double {
             originalBytes > 0 ? 1 - Double(finalBytes) / Double(originalBytes) : 0
@@ -44,11 +49,18 @@ actor PostProcessor {
     /// rien ajouter de visible.
     private static let bitsPerPixelPerFrame = 0.03
 
+    /// - Parameter preservingSegments: garde les morceaux bruts même après une
+    ///   fusion réussie. Vrai quand la session s'est mal terminée : le fichier
+    ///   final est alors la fusion de segments que `replayd` n'a peut-être pas
+    ///   fini d'écrire, et effacer la matière première interdirait toute
+    ///   récupération à la main. De la place perdue vaut mieux qu'une réunion
+    ///   perdue.
     /// - Parameter onProgress: fraction de 0 à 1, appelée depuis un contexte
     ///   arbitraire.
     func process(
         segments: [URL],
         into destination: URL,
+        preservingSegments: Bool = false,
         onProgress: @escaping @Sendable (Double) -> Void
     ) async throws -> Outcome {
         let usable = segments.filter { FileManager.default.fileExists(atPath: $0.path(percentEncoded: false)) }
@@ -65,11 +77,42 @@ actor PostProcessor {
         let finalBytes = Self.sizeOf(destination)
         guard finalBytes > 0 else { throw ProcessingError.writerFailed("fichier final vide") }
 
-        for segment in usable {
-            try? FileManager.default.removeItem(at: segment)
+        // Un `SegmentCleanup` vide dit la vérité : rien n'a été tenté, donc rien
+        // n'a échoué. C'est à l'appelant d'expliquer pourquoi les morceaux sont
+        // encore là — lui seul sait que la session s'était mal terminée.
+        return Outcome(
+            originalBytes: originalBytes,
+            finalBytes: finalBytes,
+            cleanup: preservingSegments ? SegmentCleanup() : Self.discard(usable)
+        )
+    }
+
+    /// Supprime les morceaux, et rend compte de ceux qui ont résisté.
+    ///
+    /// **Un effacement raté ne doit jamais être rapporté comme un effacement.**
+    /// Le `try?` d'avant en faisait exactement l'inverse : la fusion réussissait,
+    /// la suppression échouait, et les `<uuid>-segNNN.mp4` restaient sur le
+    /// disque — invisibles dans la bibliothèque, qui les exclut par
+    /// construction, et à grossir à chaque réunion.
+    private static func discard(_ segments: [URL]) -> SegmentCleanup {
+        var removed: [String] = []
+        var leftovers: [SegmentCleanup.Leftover] = []
+
+        for segment in segments {
+            do {
+                try FileManager.default.removeItem(at: segment)
+                removed.append(segment.lastPathComponent)
+            } catch {
+                leftovers.append(
+                    SegmentCleanup.Leftover(
+                        name: segment.lastPathComponent,
+                        reason: error.localizedDescription
+                    )
+                )
+            }
         }
 
-        return Outcome(originalBytes: originalBytes, finalBytes: finalBytes)
+        return SegmentCleanup(removed: removed, leftovers: leftovers)
     }
 
     // MARK: - Assemblage

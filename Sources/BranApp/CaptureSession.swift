@@ -89,6 +89,11 @@ public actor CaptureSession: CaptureBackend {
     private func openSegment() async throws -> URL {
         guard var session else { throw CaptureError.noSessionToResume }
 
+        // Un flux de la session précédente peut avoir survécu à un `stop()` en
+        // échec. On le referme avant d'en ouvrir un autre, sans quoi il
+        // continuerait de capturer, hors de tout contrôle.
+        try await discardOrphanStream()
+
         // Préflight avant CHAQUE démarrage, pas seulement au lancement : une
         // mise à jour système peut avoir révoqué l'autorisation depuis. Sans ce
         // contrôle, on enregistrerait un écran noir sans le savoir — la panne
@@ -148,19 +153,38 @@ public actor CaptureSession: CaptureBackend {
         return destination
     }
 
+    /// Ferme le segment courant, ou explique pourquoi il n'a pas pu l'être.
+    ///
+    /// **L'ordre de ces lignes est le correctif.** La référence au flux était
+    /// remise à `nil` *avant* l'appel à `stopCapture()` : quand celui-ci
+    /// échouait, la session avait déjà oublié le flux, un second `stop()`
+    /// tombait sur le `guard` et rendait la main sans rien faire, et la capture
+    /// continuait de tourner sans que personne ne la surveille — en rapportant
+    /// un succès. On ne lâche donc la référence qu'une fois l'arrêt obtenu.
     private func closeCurrentSegment() async throws {
         guard let stream else { return }
-        self.stream = nil
 
         // `stopCapture()` retire la sortie d'enregistrement ET finalise.
         // Appeler `removeRecordingOutput()` d'abord provoque un double
         // `exportAndInvalidate` sur le même SCAssetWriter : l'export échoue et
         // le fichier n'est jamais écrit. Constaté dans les logs de replayd.
+        //
+        // En cas d'échec, tout est laissé en place : le flux, le delegate et la
+        // sortie. C'est ce qui rend un nouvel essai possible, et c'est ce qui
+        // permet à `openSegment()` de constater qu'un flux traîne encore.
         try await stream.stopCapture()
+
+        // Passé ce point le flux est arrêté pour de bon : le relâcher est sûr,
+        // et un `stop()` suivant a raison de ne rien faire.
+        self.stream = nil
 
         // `stopCapture()` rend la main plusieurs secondes avant que le fichier
         // existe. Rendre la main ici sans attendre, c'est déclarer terminé un
         // enregistrement qui n'est pas écrit.
+        //
+        // Le delegate est encore retenu pendant l'attente, et c'est
+        // indispensable : `SCRecordingOutput` ne le tient que faiblement, et
+        // c'est lui qui porte le signal de fin.
         let finalized = await signals.waitForFinish(timeout: .seconds(60))
 
         outputURL = nil
@@ -168,6 +192,33 @@ public actor CaptureSession: CaptureBackend {
         recordingOutput = nil
 
         guard finalized else { throw CaptureError.finalizationTimedOut }
+    }
+
+    /// Arrête un flux resté ouvert après un `stop()` en échec.
+    ///
+    /// Sans ça, `openSegment()` écraserait `self.stream` et la capture
+    /// précédente continuerait indéfiniment, invisible, à écrire dans un fichier
+    /// que plus personne ne réclamera. On tente l'arrêt une fois ; s'il échoue
+    /// encore, on le dit au lieu de démarrer par-dessus.
+    private func discardOrphanStream() async throws {
+        guard let orphan = stream else { return }
+
+        do {
+            try await orphan.stopCapture()
+        } catch {
+            // Un flux qu'on n'arrive pas à arrêter interdit d'en ouvrir un
+            // second : deux captures simultanées se disputeraient l'encodeur et
+            // aucune des deux ne serait fiable.
+            failureContinuation.yield(
+                "Un enregistrement précédent n'a pas pu être arrêté : \(error.localizedDescription)"
+            )
+            throw error
+        }
+
+        stream = nil
+        outputURL = nil
+        delegate = nil
+        recordingOutput = nil
     }
 
     // MARK: - Détails

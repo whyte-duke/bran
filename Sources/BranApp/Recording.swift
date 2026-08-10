@@ -26,6 +26,19 @@ struct Recording: Identifiable, Equatable, Sendable {
         hasMetadataFile && metadata.endedAt == nil
     }
 
+    /// Le motif de l'interruption, **seulement s'il a été écrit**.
+    ///
+    /// `nil` pour tout ce qui a été enregistré avant que le champ existe, et
+    /// c'est le cas le plus courant de la bibliothèque : la ligne doit alors
+    /// dire ce qu'elle sait — la session ne s'est pas close — sans inventer un
+    /// « motif inconnu ».
+    var interruptionDetail: String? {
+        wasInterrupted ? metadata.interruptionDetail : nil
+    }
+
+    /// L'infobulle du triangle. Porte le motif quand il existe.
+    var interruptionNote: String { metadata.interruptionNote }
+
     /// Le titre du calendrier s'il existe, sinon la date formatée **maintenant**
     /// — dans la langue et le fuseau de celui qui regarde, pas de celui qui a
     /// enregistré.

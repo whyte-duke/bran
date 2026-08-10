@@ -111,6 +111,17 @@ public final class AppModel {
 
     public var lastFailure: String?
 
+    /// Ajoute un motif d'échec sans effacer le précédent.
+    ///
+    /// Deux pannes peuvent tomber dans la même seconde — un arrêt qui échoue,
+    /// puis des segments que le disque refuse de rendre — et ce sont deux choses
+    /// à réparer, pas une. `FailureBanner` borne le fil à deux lignes et
+    /// dédoublonne : sans ça, un dossier en lecture seule ferait grossir le
+    /// bandeau à chaque frappe dans le champ « titre ».
+    func report(_ message: String) {
+        lastFailure = FailureBanner.appending(message, to: lastFailure)
+    }
+
     /// Porté par le modèle et non par la vue : les réglages s'ouvrent depuis la
     /// colonne, depuis une section, et depuis un message d'erreur. Trois
     /// endroits, un seul état.
@@ -191,8 +202,37 @@ public final class AppModel {
             for await reason in capture.failures {
                 guard let self else { return }
                 self.engine.reportFailure(reason)
-                self.lastFailure = reason
+                self.report(reason)
             }
+        }
+
+        // La bibliothèque parle par le canal d'échec unique de bran, comme
+        // `AwakeController` : une fiche qu'on n'a pas pu écrire, une fiche qu'on
+        // n'a pas pu relire, un fichier que la corbeille a refusé. Une
+        // revalidation de la destination suit, parce qu'une écriture refusée est
+        // presque toujours un dossier cassé — et c'est dans les réglages qu'on
+        // va le réparer.
+        store.onProblem = { [weak self] reason in
+            guard let self else { return }
+            report(reason)
+            storage.validate()
+        }
+
+        // La conclusion d'une session passe par ici, et par ici seulement.
+        // C'est la machine qui décide *quand* — voir `concludeSession`, et
+        // `RecordingEngine.onSettled` pour ce que ça répare.
+        engine.onSettled = { [weak self] meeting, verdict in
+            guard let self else { return }
+
+            // Les segments sont relevés MAINTENANT, de façon synchrone, pas
+            // dans la tâche : un nouveau départ appelle `segments.removeAll()`,
+            // et il suffirait que l'utilisateur relance avant que la tâche ne
+            // s'exécute pour que les morceaux de la session précédente
+            // disparaissent de la liste sans avoir été fusionnés.
+            let segments = verdict.consumesSegments ? engine.segments : []
+            engine.clearSegments()
+
+            Task { await self.concludeSession(meeting, verdict: verdict, segments: segments) }
         }
 
         notifications.onStartRequested = { [weak self] in
@@ -323,7 +363,7 @@ public final class AppModel {
             case .raised:
                 lastFailure = nil
             case .appOnly(let reason), .notFound(let reason):
-                lastFailure = reason
+                report(reason)
             }
         }
 
@@ -352,7 +392,7 @@ public final class AppModel {
     /// s'affiche au même endroit.
     private func startAwake() {
         awake.onFailure = { [weak self] reason in
-            self?.lastFailure = reason
+            self?.report(reason)
         }
         awake.start()
     }
@@ -499,9 +539,25 @@ public final class AppModel {
         if case .paused = engine.state { true } else { false }
     }
 
-    /// Vrai tant qu'une session est ouverte, en cours ou en pause. C'est ce qui
-    /// commande l'affichage de la barre de pilotage.
-    public var hasOpenSession: Bool { isRecording || isPaused }
+    /// Vrai tant qu'une session est ouverte — **y compris pendant `.starting` et
+    /// `.finalizing`**. C'est ce qui commande l'affichage de la barre de
+    /// pilotage.
+    ///
+    /// La version précédente disait `isRecording || isPaused`, et laissait donc
+    /// deux trous de plusieurs secondes chacun, aux deux extrémités de la
+    /// session, pendant lesquels bran se croyait au repos alors qu'un flux
+    /// tournait :
+    /// - la fenêtre Meet qui disparaît pendant `.starting` n'arrêtait rien
+    ///   (`tick()` ne rappelait pas `stopRecording()`), et l'enregistrement
+    ///   continuait sans plus rien pour le fermer automatiquement ;
+    /// - le veilleur ne se taisait pas (correctif CR-4), et pouvait donc capturer
+    ///   pendant qu'une réunion démarre ou se finalise ;
+    /// - une proposition pouvait être faite par-dessus une session qui démarre ;
+    /// - « En ce moment » n'annonçait pas l'enregistrement.
+    ///
+    /// `isActive` est la même question posée à la machine, qui, elle, connaît ses
+    /// six états.
+    public var hasOpenSession: Bool { engine.state.isActive }
 
     // MARK: - Post-traitement
 
@@ -550,34 +606,103 @@ public final class AppModel {
         }
     }
 
+    /// Demande l'arrêt, et **rien d'autre**.
+    ///
+    /// Ce qui suit l'arrêt ne se décide pas ici : la machine peut trancher tout
+    /// de suite (cas courant) ou plus tard (`.stop` reçu pendant `.starting`,
+    /// qu'elle mémorise pour finaliser elle-même). Conclure au retour de
+    /// `handle(.stop)` marchait dans le premier cas et abandonnait la session
+    /// dans le second. `concludeSession` est donc appelé par la machine, par
+    /// `onSettled`, dans les deux cas.
+    ///
+    /// Le garde-fou reste utile : sans session ouverte, il n'y a rien à arrêter,
+    /// et un clic de trop sur « arrêter » ne doit pas réveiller la machine.
     public func stopRecording() {
-        guard let meeting = engine.state.meeting else { return }
+        guard engine.state.meeting != nil else { return }
+        Task { await engine.handle(.stop) }
+    }
 
-        Task {
-            await engine.handle(.stop)
-            recordingStartedAt = nil
-            pausedAt = nil
-            stopTicking()
+    /// Referme la session **une fois que la machine a tranché**.
+    ///
+    /// Appelé par `RecordingEngine.onSettled`, jamais directement : c'est la
+    /// machine qui sait quand elle a fini, et c'est elle qui garantit que ceci ne
+    /// tourne qu'une fois par session. Deux clics sur « arrêter » ne fusionnent
+    /// donc pas deux fois, et un arrêt différé finit par arriver ici au lieu de
+    /// se perdre.
+    ///
+    /// La version d'origine poursuivait quoi qu'il arrive : `endedAt` était écrit
+    /// même après une finalisation expirée ou une erreur de ScreenCaptureKit. La
+    /// sentinelle de session interrompue disparaissait au passage, et la
+    /// bibliothèque présentait un fichier peut-être tronqué comme une réunion
+    /// complète. `RecordingEngine` distinguait pourtant déjà `.failed` d'un arrêt
+    /// propre, et ses tests l'exigeaient ; c'est l'appelant qui l'ignorait.
+    ///
+    /// Ce que l'utilisateur voit désormais quand ça rate :
+    /// - le bandeau et le menu disent l'échec et disent que le fichier peut
+    ///   être tronqué ;
+    /// - `statusSummary` reste sur « Échec — … », parce que la machine reste
+    ///   dans `.failed` ;
+    /// - **et surtout**, la fiche garde son `endedAt` vide et reçoit le motif :
+    ///   la ligne de la bibliothèque porte le triangle « interrompue » *et dit
+    ///   pourquoi*, aujourd'hui, demain, et après un redémarrage. C'est le seul
+    ///   de ces trois signaux qui survive à la fermeture de la fenêtre — d'où
+    ///   l'intérêt qu'il porte aussi la cause, plutôt que de renvoyer vers un
+    ///   bandeau déjà remplacé par la panne suivante.
+    private func concludeSession(
+        _ meeting: MeetingRef,
+        verdict: StopVerdict,
+        segments: [URL]
+    ) async {
+        recordingStartedAt = nil
+        pausedAt = nil
+        stopTicking()
 
-            let segments = engine.segments
-            engine.clearSegments()
+        if let message = verdict.message { report(message) }
+
+        if verdict.writesEndedAt {
             await store.completeSession(id: meeting.id)
-            await postProcess(meeting.id, segments: segments)
+        } else {
+            // Pas de `completeSession` : l'absence de `endedAt` EST le signal.
+            // Mais elle ne dit pas pourquoi, et le motif ne vivait jusqu'ici que
+            // dans le bandeau — c'est-à-dire nulle part une heure plus tard. On
+            // l'écrit donc dans la fiche, au même endroit et avec la même durée
+            // de vie que l'avertissement qu'il explique.
+            if case .failed(let reason) = verdict {
+                await store.mutate(meeting.id) { $0.interruptionReason = reason }
+            }
+            // On relit le dossier pour que la ligne apparaisse tout de suite
+            // avec son avertissement.
+            await store.reload()
         }
+
+        // Les morceaux déjà écrits sont fusionnés même après un échec : ce sont
+        // les minutes de réunion réellement capturées, et les laisser sous leur
+        // nom de segment les rendrait invisibles. Mais après un échec ils ne
+        // sont PAS effacés : `replayd` n'avait peut-être pas fini d'écrire, et
+        // la fusion peut être plus courte que la source.
+        await postProcess(
+            meeting.id,
+            segments: segments,
+            preservingSegments: verdict.writesEndedAt == false
+        )
     }
 
     /// Fusion des segments puis compression, en une seule passe d'encodage.
     ///
     /// Lancé après la finalisation, jamais pendant : encoder en parallèle d'une
     /// capture volerait au flux le matériel vidéo dont il a besoin.
-    private func postProcess(_ id: UUID, segments: [URL]) async {
+    private func postProcess(_ id: UUID, segments: [URL], preservingSegments: Bool = false) async {
         guard segments.isEmpty == false else { return }
 
         let destination = store.root.appending(path: "\(id.uuidString).mp4")
         processingProgress[id] = 0
 
         do {
-            let outcome = try await processor.process(segments: segments, into: destination) { fraction in
+            let outcome = try await processor.process(
+                segments: segments,
+                into: destination,
+                preservingSegments: preservingSegments
+            ) { fraction in
                 Task { @MainActor [weak self] in self?.processingProgress[id] = fraction }
             }
 
@@ -588,6 +713,19 @@ public final class AppModel {
                 segmentCount: segments.count
             )
 
+            // Le ménage raté se dit. Sans ça, la fusion annonçait un gain de
+            // place que le disque n'avait pas fait : les morceaux étaient
+            // toujours là, invisibles, en double du fichier final.
+            if let leftover = outcome.cleanup.problem { report(leftover) }
+
+            if preservingSegments {
+                report(
+                    "Les morceaux bruts de cette réunion (\(segments.count)) sont conservés dans le dossier "
+                    + "des enregistrements : la session s'était mal terminée, et le fichier fusionné peut être "
+                    + "plus court qu'eux. Supprimez-les une fois le fichier vérifié."
+                )
+            }
+
             let percent = (outcome.savedFraction * 100).formatted(.number.precision(.fractionLength(0)))
             lastSaving = "\(outcome.originalBytes.formatted(.byteCount(style: .file))) → \(outcome.finalBytes.formatted(.byteCount(style: .file))) (−\(percent) %)"
             await store.reload()
@@ -596,7 +734,7 @@ public final class AppModel {
             processingProgress[id] = nil
             // Les segments sont intacts : le post-traitement ne les supprime
             // qu'après avoir écrit un fichier final non vide.
-            lastFailure = "Compression impossible : \(error.localizedDescription) — les segments bruts sont conservés."
+            report("Compression impossible : \(error.localizedDescription) — les segments bruts sont conservés.")
         }
 
         await store.reload()
@@ -619,9 +757,13 @@ public final class AppModel {
 
     /// Changer de destination pendant un enregistrement enverrait la suite du
     /// fichier ailleurs, ou nulle part.
+    ///
+    /// Le test porte sur la session entière, pas sur le seul `.recording` : en
+    /// pause, la reprise ouvrirait son segment dans le nouveau dossier et la
+    /// fusion irait chercher des morceaux répartis sur deux racines.
     func chooseStorageFolder() {
-        guard isRecording == false else {
-            lastFailure = "Impossible de changer de dossier pendant un enregistrement."
+        guard hasOpenSession == false else {
+            report("Impossible de changer de dossier pendant un enregistrement.")
             return
         }
         guard storage.chooseFolder() else { return }
@@ -629,7 +771,7 @@ public final class AppModel {
     }
 
     func resetStorageFolder() {
-        guard isRecording == false else { return }
+        guard hasOpenSession == false else { return }
         guard storage.resetToDefault() else { return }
         applyStorageRoot()
     }
@@ -674,7 +816,11 @@ public final class AppModel {
             pendingMeeting = nil
             linkedBooking = nil
             notifications.withdrawProposals()
-            // Une session en pause s'arrête aussi : la réunion est terminée.
+            // Une session en pause s'arrête aussi, et une session qui démarre
+            // encore également : la réunion est terminée. Le résolveur n'émet
+            // `.stop` qu'une fois, et la fenêtre Meet qui se ferme pendant les
+            // secondes de `.starting` est un cas réel — c'est la machine qui
+            // diffère l'ordre, pas nous qui le retenons.
             if hasOpenSession { stopRecording() }
 
         case .noop:
@@ -728,7 +874,7 @@ public final class AppModel {
     private func begin(_ meeting: MeetingRef) async {
         permissions.refresh()
         guard permissions.canRecord else {
-            lastFailure = "Autorisation manquante — enregistrement non démarré."
+            report("Autorisation manquante — enregistrement non démarré.")
             return
         }
 
@@ -772,6 +918,20 @@ public final class AppModel {
               let recording = store.recordings.first(where: { $0.id == id })
         else { return }
 
+        // **Un enregistrement dont l'arrêt a échoué ne part pas tout seul au
+        // CRM.** Envoyer sans rien dire un fichier peut-être tronqué à la fiche
+        // d'un client, c'est la version aggravée du défaut qu'on vient de
+        // corriger : non seulement bran prétendrait avoir tout gardé, mais il
+        // agirait dessus. L'envoi manuel depuis la bibliothèque reste possible,
+        // après avoir écouté le fichier.
+        guard recording.wasInterrupted == false else {
+            report(
+                "Réunion « \(recording.displayTitle) » non envoyée au CRM : la session ne s'est pas terminée "
+                + "proprement et le fichier peut être incomplet. Vérifiez-le, puis envoyez-le depuis la bibliothèque."
+            )
+            return
+        }
+
         // Rattachement certain par le code Meet : aucune ambiguïté à lever.
         if let bookingID = recording.metadata.bookingID,
            let booking = directory.bookings.first(where: { $0.booking_id == bookingID }) {
@@ -784,7 +944,7 @@ public final class AppModel {
                 // Ni envoi, ni fenêtre de choix : il n'y a rien à choisir, il y
                 // a quelque chose à réparer dans le CRM. Le détail de
                 // l'enregistrement l'explique et propose de revérifier.
-                lastFailure = eligibility.blockingReason
+                if let reason = eligibility.blockingReason { report(reason) }
                 return
             }
 
@@ -806,7 +966,7 @@ public final class AppModel {
                 pendingUpload = (recording, candidates)
             }
         } catch {
-            lastFailure = "CRM injoignable : \(error.localizedDescription)"
+            report("CRM injoignable : \(error.localizedDescription)")
         }
     }
 
@@ -814,7 +974,7 @@ public final class AppModel {
     func requestUpload(for recording: Recording) {
         Task {
             guard uploads.configuration.isConfigured else {
-                lastFailure = "Liaison CRM non configurée — voir les Réglages."
+                report("Liaison CRM non configurée — voir les Réglages.")
                 return
             }
             let linked = recording.metadata.bookingID.flatMap { id in
@@ -837,7 +997,7 @@ public final class AppModel {
                 // Le CRM ne répond pas : la feuille reste utile, sa recherche
                 // retentera l'appel.
                 pendingUpload = (recording, linked.map { [$0] } ?? [])
-                lastFailure = "CRM injoignable : \(error.localizedDescription)"
+                report("CRM injoignable : \(error.localizedDescription)")
             }
         }
     }

@@ -274,6 +274,240 @@ struct RecordingEngineTests {
     final class EngineBox {
         var engine: RecordingEngine?
     }
+
+    // MARK: - Conclusion de la session (onSettled)
+    //
+    // `StopVerdict.stillOpen` interdit à l'appelant de conclure une session dont
+    // l'arrêt a été différé. Il fallait bien que quelqu'un la conclue quand même :
+    // sans ça, `endedAt` n'était jamais écrit, les segments jamais fusionnés, et
+    // la bibliothèque affichait pour toujours une réunion « interrompue » que la
+    // machine tenait, elle, pour proprement close.
+
+    /// Ce que l'appelant reçoit, dans l'ordre.
+    @MainActor
+    final class Settlements {
+        typealias Settlement = (meeting: MeetingRef, verdict: StopVerdict, segments: [URL])
+
+        private(set) var all: [Settlement] = []
+        var count: Int { all.count }
+        var last: Settlement? { all.last }
+
+        func append(_ settlement: Settlement) { all.append(settlement) }
+    }
+
+    /// Branche l'observateur **sans** vider les segments : chaque test décide.
+    private func settlements(_ engine: RecordingEngine) -> Settlements {
+        let log = Settlements()
+        engine.onSettled = { [weak engine] meeting, verdict in
+            log.append((meeting, verdict, engine?.segments ?? []))
+        }
+        return log
+    }
+
+    @Test("Un arrêt normal conclut la session")
+    func nominalStopSettles() async throws {
+        let engine = RecordingEngine(backend: FakeCaptureBackend())
+        let log = settlements(engine)
+        let ref = meeting()
+
+        await engine.handle(.start(ref))
+        #expect(log.count == 0, "une session qui démarre n'est pas une session close")
+
+        await engine.handle(.stop)
+
+        let settled = try #require(log.last)
+        #expect(log.count == 1)
+        #expect(settled.meeting == ref)
+        #expect(settled.verdict == .complete)
+        #expect(settled.segments.count == 1, "les segments sont encore là : l'appelant doit pouvoir les fusionner")
+    }
+
+    /// Le défaut S2, en une assertion.
+    @Test("Le .stop différé pendant .starting conclut la session quand il aboutit")
+    func deferredStopStillSettles() async throws {
+        let ref = meeting()
+        let engineBox = EngineBox()
+
+        let backend = FakeCaptureBackend(.init(duringStart: {
+            await engineBox.engine?.handle(.stop)
+        }))
+        let engine = RecordingEngine(backend: backend)
+        engineBox.engine = engine
+        let log = settlements(engine)
+
+        await engine.handle(.start(ref))
+
+        #expect(engine.state == .idle)
+        let settled = try #require(log.last)
+        #expect(log.count == 1, "l'arrêt différé conclut, et une seule fois")
+        #expect(settled.meeting == ref, "la réunion à refermer est celle qu'on vient de démarrer")
+        #expect(settled.verdict == .complete)
+        #expect(settled.segments.count == 1, "le morceau écrit pendant .starting doit être fusionné, pas perdu")
+    }
+
+    @Test("Deux arrêts ne concluent qu'une fois")
+    func doubleStopSettlesOnce() async {
+        let engine = RecordingEngine(backend: FakeCaptureBackend())
+        let log = settlements(engine)
+
+        await engine.handle(.start(meeting()))
+        await engine.handle(.stop)
+        await engine.handle(.stop)
+        await engine.handle(.stop)
+
+        #expect(log.count == 1, "un clic de trop sur « arrêter » ne doit pas fusionner deux fois")
+    }
+
+    @Test("Deux arrêts différés pendant .starting ne concluent qu'une fois")
+    func doubleDeferredStopSettlesOnce() async {
+        let engineBox = EngineBox()
+
+        let backend = FakeCaptureBackend(.init(duringStart: {
+            await engineBox.engine?.handle(.stop)
+            await engineBox.engine?.handle(.stop)
+        }))
+        let engine = RecordingEngine(backend: backend)
+        engineBox.engine = engine
+        let log = settlements(engine)
+
+        await engine.handle(.start(meeting()))
+
+        #expect(engine.state == .idle)
+        #expect(log.count == 1)
+    }
+
+    @Test("Une finalisation en échec conclut quand même, avec son motif")
+    func failedFinalizationSettlesAsFailure() async throws {
+        let engine = RecordingEngine(backend: FakeCaptureBackend(.init(failOnStop: true)))
+        let log = settlements(engine)
+
+        await engine.handle(.start(meeting()))
+        await engine.handle(.stop)
+
+        let settled = try #require(log.last)
+        #expect(log.count == 1)
+        #expect(settled.verdict.writesEndedAt == false, "la sentinelle de session interrompue doit survivre")
+        #expect(settled.verdict.consumesSegments, "les minutes capturées se récupèrent quand même")
+        #expect(settled.segments.count == 1)
+    }
+
+    /// L'autre moitié du même trou : personne n'émet `.stop` sur une panne en
+    /// cours de route, donc personne ne concluait la session. Les morceaux déjà
+    /// écrits restaient sur le disque sous leur nom de segment, invisibles.
+    @Test("Une panne en cours de route conclut la session")
+    func midStreamFailureSettles() async throws {
+        let engine = RecordingEngine(backend: FakeCaptureBackend())
+        let log = settlements(engine)
+        let ref = meeting()
+
+        await engine.handle(.start(ref))
+        engine.reportFailure("autorisation révoquée")
+
+        let settled = try #require(log.last)
+        #expect(log.count == 1)
+        #expect(settled.meeting == ref, ".failed ne porte pas de réunion : la machine doit s'en souvenir")
+        #expect(settled.verdict == .failed(reason: "autorisation révoquée"))
+        #expect(settled.segments.count == 1)
+    }
+
+    @Test("Un démarrage en échec conclut la session qu'il n'a pas ouverte")
+    func failedStartSettles() async throws {
+        let engine = RecordingEngine(backend: FakeCaptureBackend(.init(failOnStart: true)))
+        let log = settlements(engine)
+        let ref = meeting()
+
+        await engine.handle(.start(ref))
+
+        let settled = try #require(log.last)
+        #expect(log.count == 1, "la fiche a déjà été écrite avant le démarrage : il faut la refermer")
+        #expect(settled.meeting == ref)
+        #expect(settled.verdict.writesEndedAt == false)
+    }
+
+    @Test("Une pause en échec conclut la session")
+    func failedPauseSettles() async {
+        let engine = RecordingEngine(backend: FakeCaptureBackend(.init(failOnPause: true)))
+        let log = settlements(engine)
+
+        await engine.handle(.start(meeting()))
+        await engine.pause()
+
+        #expect(log.count == 1)
+    }
+
+    @Test("Rien à conclure sans session ouverte")
+    func nothingSettlesWithoutASession() async {
+        let engine = RecordingEngine(backend: FakeCaptureBackend())
+        let log = settlements(engine)
+
+        await engine.handle(.stop)
+        engine.reportFailure("bruit")
+
+        #expect(engine.state == .idle)
+        #expect(log.count == 0)
+    }
+
+    @Test("Chaque session se conclut pour son compte")
+    func eachSessionSettlesOnce() async {
+        let engine = RecordingEngine(backend: FakeCaptureBackend())
+        let log = settlements(engine)
+        let first = meeting()
+        let second = MeetingRef(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000CAFE")!,
+            startedAt: Date(timeIntervalSince1970: 1_770_001_000),
+            title: "Revue client",
+            meetCode: "zzz-yyyy-xxx",
+            calendarEventID: "EV-2",
+            attendees: []
+        )
+
+        await engine.handle(.start(first))
+        await engine.handle(.stop)
+        engine.clearSegments()
+
+        await engine.handle(.start(second))
+        await engine.handle(.stop)
+
+        #expect(log.count == 2)
+        #expect(log.all.map(\.meeting) == [first, second])
+    }
+
+    /// Après un échec, la session suivante doit pouvoir se conclure à son tour :
+    /// le verrou d'unicité est par session, pas par machine.
+    @Test("Une reprise après échec se conclut aussi")
+    func settlesAgainAfterFailure() async {
+        let engine = RecordingEngine(backend: FakeCaptureBackend())
+        let log = settlements(engine)
+
+        await engine.handle(.start(meeting()))
+        engine.reportFailure("panne")
+        engine.clearSegments()
+
+        await engine.handle(.start(meeting()))
+        await engine.handle(.stop)
+
+        #expect(log.count == 2)
+        #expect(log.all.map(\.verdict) == [.failed(reason: "panne"), .complete])
+    }
+
+    @Test("L'observateur est appelé après la transition, pas avant")
+    func settlementFollowsTheTransition() async {
+        let engine = RecordingEngine(backend: FakeCaptureBackend())
+        let path = trace(engine)
+        let stateAtSettle = StateBox()
+        engine.onSettled = { [weak engine] _, _ in stateAtSettle.state = engine?.state }
+
+        await engine.handle(.start(meeting()))
+        await engine.handle(.stop)
+
+        #expect(stateAtSettle.state == .idle, "conclure avant d'être à l'arrêt rejouerait le défaut d'origine")
+        #expect(path.states.last == .idle)
+    }
+
+    @MainActor
+    final class StateBox {
+        var state: RecordingState?
+    }
 }
 
 private extension RecordingState {
