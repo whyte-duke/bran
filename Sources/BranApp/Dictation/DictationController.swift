@@ -20,12 +20,24 @@ final class DictationController {
     /// Instant du début de la capture, pour afficher la durée qui court.
     private(set) var startedAt: Date?
     private(set) var lastTranscript: String?
-    /// Renseigné quand le texte n'a pas pu être collé mais reste au
-    /// presse-papiers — l'utilisateur doit le savoir, pas le deviner.
+
+    /// Comment la dernière livraison s'est terminée. `nil` tant qu'il n'y en a
+    /// pas eu, ou qu'elle est en cours.
     ///
-    /// Posé **une fois l'écriture aboutie**, jamais avant : la phrase affirme que
-    /// le texte est là, et tant que `Paster` n'a pas rappelé, il n'y est pas.
-    private(set) var pasteFallbackNotice: String?
+    /// Posée **une fois l'écriture aboutie**, jamais avant : chacun de ses cas
+    /// affirme quelque chose de l'état du presse-papiers, et tant que `Paster`
+    /// n'a pas rappelé, on n'en sait rien.
+    ///
+    /// **Un seul canal.** L'encoche a besoin de la distinction complète — il y a
+    /// trois fins possibles et elles demandent trois gestes différents — tandis
+    /// que le panneau n'a besoin que de la phrase. Publier les deux séparément
+    /// donnerait deux sources pour la même vérité, dont une à oublier de mettre
+    /// à jour ; `pasteFallbackNotice` est donc dérivé et non stocké.
+    private(set) var pasteLanding: Paster.Landing?
+
+    /// Ce qu'il reste à dire à l'utilisateur, ou `nil` quand tout s'est passé
+    /// comme prévu. Lu par `DictationPane`.
+    var pasteFallbackNotice: String? { pasteLanding?.notice }
 
     let settings: DictationSettings
     let store: DictationStore
@@ -127,12 +139,18 @@ final class DictationController {
     /// collage et, quand ça vaut la peine, le contenu du presse-papiers.
     ///
     /// **Un appui pendant une dictée en cours ne fait ni l'un ni l'autre.** En
-    /// mode bascule, ce second appui est celui qui *arrête* ; en mode maintien,
-    /// c'est la répétition système de la touche tenue — `HotkeyMonitor.classify`
-    /// émet un `.triggerDown` à chaque `keyDown` répété, donc plusieurs fois par
-    /// seconde tant qu'on parle. Une touche modificatrice seule y échappe (elle
-    /// n'apparaît que dans `flagsChanged`, sur transition), mais un raccourci à
-    /// touche normale non.
+    /// mode bascule, ce second appui est celui qui *arrête* — et c'est le cas
+    /// qui reste. Le second, la répétition système de la touche tenue en mode
+    /// maintien, n'arrive plus jusqu'ici : `HotkeyMonitor` écarte les `keyDown`
+    /// répétés dans le callback du tap et tient la règle « un appui, un signal »
+    /// avec `HeldTriggers`. Une touche modificatrice seule y échappait déjà —
+    /// elle n'apparaît que dans `flagsChanged`, sur transition —, et c'est
+    /// justement cette asymétrie entre les deux branches qui était le défaut.
+    ///
+    /// Cette garde-ci reste quand même, et pas par prudence rituelle : elle
+    /// répond à une autre question. Un appui *légitime* pendant une dictée —
+    /// celui qui arrête, en mode bascule — n'a pas plus le droit de réviser la
+    /// cible qu'une répétition.
     ///
     /// Dans les deux cas, l'application au premier plan à cet instant n'est plus
     /// forcément celle qu'on visait : la prendre pour cible annule le point 1 de
@@ -233,7 +251,7 @@ final class DictationController {
 
     private func startCapture() {
         currentToken = UUID()
-        pasteFallbackNotice = nil
+        pasteLanding = nil
         lastTranscript = nil
 
         // La saisie sécurisée bloque aussi bien la lecture du clavier que le
@@ -428,6 +446,18 @@ final class DictationController {
     /// machine déclarent impossible. En attendant `whenLanded`, la phase reste
     /// `.pasting`, donc `isBusy`, donc l'appui suivant ne démarre rien.
     ///
+    /// **Et cette attente est bornée par `Paster`, pas par ici** (point 9 de son
+    /// en-tête). Attendre un rappel qui pouvait ne jamais venir était le prix de
+    /// la ligne précédente : une application source bloquée dans son XPC rendait
+    /// la dictée muette, `isBusy` pour toujours, sans même un raccourci pour en
+    /// sortir. Un minuteur *ici* aurait pu le corriger aussi, et aurait été le
+    /// mauvais endroit : il y a trois appels à `Paster` dans le programme, donc
+    /// trois minuteurs à écrire, dont celui qu'on oublie est celui qui gèle. Et
+    /// c'est `Paster` qui sait quand l'écriture a été postée — mesurer depuis
+    /// ici mesurerait en plus le saut d'isolation. La borne est donc une
+    /// propriété de `paste(_:)`, et ce contrôleur n'a rien à faire de plus que
+    /// répondre à ce qu'on lui dit.
+    ///
     /// La valeur de retour, elle, répond à l'autre question — « vais-je seulement
     /// essayer ? » — et sert au journal : savoir si un collage était impossible
     /// dès le départ ou l'est devenu pendant l'attente change le diagnostic.
@@ -436,9 +466,14 @@ final class DictationController {
 
         let willTry = paster.paste(text) { [weak self] landing in
             guard let self else { return }
-            // Le presse-papiers porte le texte : c'est seulement maintenant que
-            // « il est dans le presse-papiers » cesse d'être une promesse.
-            pasteFallbackNotice = landing.needsManualPaste ? Paster.fallbackNotice : nil
+            // C'est seulement maintenant qu'on sait quelque chose de l'état du
+            // presse-papiers — et `landing` est le seul à le savoir. Le
+            // ternaire d'avant ne distinguait que deux fins et aurait affiché
+            // « faites ⌘V » sur un `.stalled`, où il n'y a rien à coller.
+            pasteLanding = landing
+            // La transition part dans tous les cas, y compris `.stalled` : la
+            // dictée est finie, ratée mais finie, et la laisser en `.pasting`
+            // serait le gel qu'on vient de supprimer.
             apply(machine.handle(.pasted))
         }
 

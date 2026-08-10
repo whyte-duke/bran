@@ -118,7 +118,10 @@ struct NotchView: View {
             EmptyView()
         case .listening:
             PulsingDot()
-        case .transcribing:
+        case .transcribing, .pasting, .copying:
+            // Le même rouet pour les trois : ce que l'utilisateur doit lire,
+            // c'est « ça travaille, ne touche à rien ». Le texte à côté dit
+            // laquelle des trois.
             ProgressView()
                 .controlSize(.small)
                 .tint(.white)
@@ -141,6 +144,14 @@ struct NotchView: View {
             Image(systemName: "text.viewfinder")
                 .font(Type.notch.weight(.semibold))
                 .foregroundStyle(NotchInk.symbol)
+        case .handedOver:
+            // Pas la coche : rien n'est collé. Le presse-papiers, et une
+            // couleur qui demande qu'on s'en occupe — l'utilisateur a un geste
+            // à faire, et s'il ne le fait pas le texte partira avec la dictée
+            // suivante.
+            Image(systemName: "doc.on.clipboard")
+                .font(Type.notch.weight(.semibold))
+                .foregroundStyle(Palette.attention)
         case .empty:
             Image(systemName: content.source == .snapshot ? "text.badge.xmark" : "waveform.slash")
                 .font(Type.notch.weight(.semibold))
@@ -203,10 +214,19 @@ struct NotchView: View {
         case .idle: ""
         case .listening: ""
         case .transcribing: "Transcription…"
+        // Les points de suspension font tout le travail : ils disent que c'est
+        // en train de se faire, là où « Dictée collée » disait que c'était fait.
+        case .pasting: "Collage…"
         case .done(let text): text
         case .preparing: ""
         case .reading: ""
+        case .copying: "Copie…"
         case .captured(let text): text
+        // Court, parce que l'encoche fait cent vingt points de large et qu'une
+        // instruction tronquée n'est plus une instruction. La phrase entière est
+        // dans le panneau de la fonction — voir `Paster.fallbackNotice` — et
+        // dans l'annonce VoiceOver.
+        case .handedOver: "⌘V pour coller"
         case .empty: content.source == .snapshot ? "Aucun texte trouvé" : "Rien entendu"
         case .cancelled: "Annulé"
         case .failed(let reason): reason

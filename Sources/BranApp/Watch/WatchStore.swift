@@ -54,8 +54,39 @@ final class WatchStore {
     /// « étais-je là ». Sans eux, une journée sans voie observée est un trou, et
     /// un trou ne dit pas s'il s'agit d'une pause déjeuner ou d'un capteur mort.
     private(set) var presenceToday: [PresenceEvent] = []
-    private(set) var problem: String?
     private(set) var journalBytes: Int64 = 0
+
+    /// Le disque n'a pas voulu de la dernière ligne, ou ne rend plus le fichier
+    /// du jour. Effacé dès qu'une écriture repasse.
+    private var writeProblem: String?
+
+    /// La rétention n'a pas été appliquée. **Vit à part de `writeProblem`**, et
+    /// pas par élégance : `reload()` efface le problème d'écriture quand la
+    /// lecture repasse, et la purge appelle justement `reload()` derrière elle.
+    /// Un seul champ aurait donc effacé l'avertissement de rétention dans la
+    /// milliseconde qui suit sa pose — un silence de plus, au même endroit que
+    /// celui qu'on corrige.
+    private var purgeProblem: String?
+
+    /// Ce que le panneau affiche. Les deux pannes peuvent coexister — un volume
+    /// débranché refuse l'écriture *et* la suppression — et il n'y a aucune
+    /// raison d'en cacher une.
+    ///
+    /// La rétention passe devant : c'est la seule des deux dont la conséquence
+    /// est irréversible. Une ligne non écrite est une ligne perdue ; un journal
+    /// non supprimé est un journal qui reste lisible, et il reste lisible
+    /// jusqu'à ce que quelqu'un l'apprenne.
+    ///
+    /// **Deux emplacements nommés plutôt qu'une file.** Chaque panne a le sien,
+    /// donc chacune s'efface au retour de *sa* réussite : une écriture qui
+    /// repasse ne fait pas disparaître un avertissement de rétention, et une
+    /// purge réussie ne fait pas disparaître un disque qui refuse d'écrire. Une
+    /// file d'accumulation garderait bien les deux messages, mais ne saurait
+    /// plus lequel retirer.
+    var problem: String? {
+        let parts = [purgeProblem, writeProblem].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+    }
 
     /// Secondes d'attente déjà consignées aujourd'hui. La dette *en cours* vit
     /// dans les intervalles encore ouverts — c'est `WatchVerdict.waitDebt`, que
@@ -113,14 +144,30 @@ final class WatchStore {
                 .reduce(into: Int64(0)) { total, url in
                     total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
                 }
+        } catch {
+            writeProblem = "Dossier du journal inaccessible : \(error.localizedDescription)"
+            return
+        }
 
-            let lines = readDay(WatchDay.key(for: .now))
+        do {
+            let lines = try readDay(WatchDay.key(for: .now))
             today = lines.lanes
             presenceToday = lines.presence
             waitSecondsToday = today.filter { $0.state == .waiting }.reduce(0) { $0 + $1.d }
-            problem = nil
+            writeProblem = nil
         } catch {
-            problem = "Dossier du journal inaccessible : \(error.localizedDescription)"
+            // **On vide plutôt que de garder.** Ce qui était en mémoire venait
+            // d'une lecture précédente ; le montrer sous un fichier devenu
+            // illisible, c'est afficher une journée qu'on ne sait plus lire.
+            // C'est le même défaut que l'insertion optimiste de `write`, une
+            // couche plus haut.
+            today = []
+            presenceToday = []
+            waitSecondsToday = 0
+            writeProblem = """
+                Journal du jour illisible : \(error.localizedDescription). \
+                La journée affichée est donc vide, pas terminée.
+                """
         }
     }
 
@@ -136,9 +183,18 @@ final class WatchStore {
     /// proprement sur les lignes de l'autre, exactement comme il échoue déjà sur
     /// une ligne coupée en deux. Aucun aiguillage à écrire, aucun format à
     /// migrer : les journaux d'avant la présence se relisent tels quels.
-    private func readDay(_ day: String) -> (lanes: [WatchEvent], presence: [PresenceEvent]) {
+    ///
+    /// **Un fichier absent n'est pas une erreur, un fichier illisible en est
+    /// une.** Les deux rendaient la même journée vide, et c'était le troisième
+    /// silence du même fichier : avant le premier battement du matin, il n'y a
+    /// rien à lire — après, un `String(contentsOf:)` qui échoue veut dire qu'on
+    /// affiche une journée blanche sur un journal qui, lui, n'est pas blanc.
+    private func readDay(_ day: String) throws -> (lanes: [WatchEvent], presence: [PresenceEvent]) {
         let url = folder.appending(path: "\(day).jsonl")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return ([], []) }
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else {
+            return ([], [])
+        }
+        let text = try String(contentsOf: url, encoding: .utf8)
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
@@ -224,15 +280,37 @@ final class WatchStore {
         if let closed = presenceLedger.flush() { write(closed) }
     }
 
+    /// **Le disque d'abord, la mémoire ensuite.**
+    ///
+    /// L'ordre inverse — insérer puis écrire — donnait à l'interface un
+    /// intervalle que le fichier n'avait jamais reçu : la liste du jour comptait
+    /// une ligne de plus que le journal, et `waitSecondsToday` annonçait une
+    /// dette d'attente qui n'existait que jusqu'au prochain `reload()`, où elle
+    /// disparaissait sans explication.
+    ///
+    /// **Pourquoi cet ordre ne coûte rien, alors qu'un battement passe toutes
+    /// les quelques secondes.** `append` était déjà synchrone et déjà appelé
+    /// ici : le `FileHandle` est ouvert une fois pour la journée, l'écriture est
+    /// un `write(2)` de deux cents octets à une position connue. Il n'y a pas de
+    /// nouvelle attente disque — il y a la même, dans l'autre sens. La solution
+    /// qui aurait coûté cher, c'est celle qu'on n'a pas prise : rendre `append`
+    /// asynchrone pour confirmer après coup, ce qui aurait mis un point de
+    /// suspension sur le chemin chaud et permis à deux battements de se croiser.
+    ///
+    /// **Pourquoi jeter et non pas garder.** Un intervalle refusé par le disque
+    /// est perdu de toute façon : le prochain `reload()` reconstruit `today`
+    /// depuis le fichier et l'aurait fait disparaître. Le garder n'ajoute donc
+    /// pas de durabilité, seulement un écart temporaire entre ce qu'on montre et
+    /// ce qu'on a. Le bandeau, lui, dit que le journal n'est plus écrit.
     private func write(_ event: WatchEvent) {
+        guard append(event, from: event.from) else { return }
         today.insert(event, at: 0)
         if event.state == .waiting { waitSecondsToday += event.d }
-        append(event, from: event.from)
     }
 
     private func write(_ event: PresenceEvent) {
+        guard append(event, from: event.from) else { return }
         presenceToday.insert(event, at: 0)
-        append(event, from: event.from)
     }
 
     /// Écrit une ligne. Le `FileHandle` est ouvert une fois et gardé.
@@ -240,8 +318,14 @@ final class WatchStore {
     /// Générique sur le type d'intervalle : les deux formes partagent le même
     /// fichier, le même roulement à minuit et la même rétention. `start` est
     /// passé à part parce que `Encodable` ne promet aucune date.
-    private func append(_ event: some Encodable, from start: Date) {
-        guard retention.keepsNothing == false else { return }
+    ///
+    /// - Returns: `true` si la mémoire a le droit de tenir l'intervalle pour
+    ///   acquis — soit qu'il est sur le disque, soit qu'il n'avait pas à y
+    ///   aller. Une rétention à zéro jour ne conserve rien **par décision**, et
+    ///   ce n'est pas une panne : l'écran doit continuer d'afficher la journée
+    ///   même quand rien n'en survivra à minuit.
+    private func append(_ event: some Encodable, from start: Date) -> Bool {
+        guard retention.keepsNothing == false else { return true }
 
         // Le fichier est celui du **début** de l'intervalle : un intervalle ne
         // traverse jamais minuit, puisqu'on ferme tout au changement de jour.
@@ -256,9 +340,18 @@ final class WatchStore {
             data.append(0x0A)
             try handle.write(contentsOf: data)
             journalBytes += Int64(data.count)
-            problem = nil
+            writeProblem = nil
+            return true
         } catch {
-            problem = "Journal non écrit : \(error.localizedDescription)"
+            // Le handle est peut-être en cause — volume démonté sous lui, par
+            // exemple. Le lâcher force `handle(for:)` à rouvrir au prochain
+            // battement, ce qui est la seule réparation automatique possible.
+            closeFile()
+            writeProblem = """
+                Journal non écrit : \(error.localizedDescription). \
+                Les intervalles mesurés depuis ne sont pas conservés.
+                """
+            return false
         }
     }
 
@@ -284,6 +377,12 @@ final class WatchStore {
         return opened
     }
 
+    /// **Le seul `try?` volontairement muet de ce fichier.** `write(contentsOf:)`
+    /// n'est pas tamponné : à ce point, chaque ligne est déjà partie au noyau, et
+    /// un `close()` qui échoue ne dit rien de plus que ce que l'écriture aurait
+    /// déjà signalé. Le descripteur est lâché dans tous les cas — le garder
+    /// parce que sa fermeture a échoué empêcherait la réouverture, donc la
+    /// reprise.
     private func closeFile() {
         try? handle?.close()
         handle = nil
@@ -304,25 +403,63 @@ final class WatchStore {
     /// Supprime les fichiers-jour arrivés à échéance.
     ///
     /// La décision appartient à `WatchRetention`, qui prend des noms et rend des
-    /// noms sans toucher au disque. Ici il ne reste que le `removeItem`.
+    /// noms sans toucher au disque. Ici il ne reste que le `removeItem` — et le
+    /// devoir de dire quand il n'a pas eu lieu.
+    ///
+    /// **Le compte rendu est celui des fichiers partis.** Il l'était en
+    /// apparence seulement : `try? removeItem` puis `removed += 1` annonçait
+    /// quatre journaux effacés avec les quatre toujours sur le disque. Sur un
+    /// fichier qui contient des titres de fenêtres — donc des noms de documents,
+    /// de clients et des requêtes de recherche — une promesse de suppression non
+    /// tenue est pire que pas de promesse : elle rassure. `WatchRetention` le
+    /// dit dans ses propres termes : « on peut supprimer un dossier, on ne peut
+    /// pas ne pas l'avoir écrit. »
+    ///
+    /// **Un échec reste affiché jusqu'à ce qu'une purge repasse.** La purge
+    /// tourne une fois par jour et au changement de réglage ; effacer
+    /// l'avertissement plus tôt reviendrait à cacher une rétention non tenue
+    /// pendant vingt-quatre heures. C'est `purgeProblem`, qui survit
+    /// délibérément au `reload()` de la ligne suivante.
     @discardableResult
     func purgeExpired(now: Date = .now) async -> Int {
         let manager = FileManager.default
-        guard let files = try? manager.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-        ) else { return 0 }
+
+        let files: [URL]
+        do {
+            files = try manager.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            )
+        } catch {
+            // Auparavant : `guard let … else { return 0 }`. Zéro supprimé et pas
+            // un mot, exactement comme un dossier où il n'y avait rien à
+            // supprimer. Les deux situations sont opposées.
+            purgeProblem = WatchPurgeReport.blocked(by: error.localizedDescription).problem
+            return 0
+        }
 
         let names = files.map(\.lastPathComponent)
         let doomed = Set(retention.filesToPurge(from: names, today: WatchDay.key(for: now)))
-        guard doomed.isEmpty == false else { return 0 }
-
-        var removed = 0
-        for url in files where doomed.contains(url.lastPathComponent) {
-            try? manager.removeItem(at: url)
-            removed += 1
+        guard doomed.isEmpty == false else {
+            purgeProblem = nil
+            return 0
         }
 
-        if removed > 0 { await reload() }
-        return removed
+        var report = WatchPurgeReport()
+        for url in files where doomed.contains(url.lastPathComponent) {
+            do {
+                try manager.removeItem(at: url)
+                report.succeeded(url.lastPathComponent)
+            } catch let error as CocoaError where error.code == .fileNoSuchFile {
+                // Parti entre l'énumération et ici. La rétention voulait son
+                // absence, elle l'a : ce n'est pas un échec.
+                report.succeeded(url.lastPathComponent)
+            } catch {
+                report.failed(url.lastPathComponent, reason: error.localizedDescription)
+            }
+        }
+
+        purgeProblem = report.problem
+        if report.removed > 0 { await reload() }
+        return report.removed
     }
 }

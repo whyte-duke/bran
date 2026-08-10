@@ -66,13 +66,26 @@ final class NotchPresenter {
 
         case .pasting:
             stopRefreshing()
-            if let text = dictation.lastTranscript {
-                present(.done(Self.excerpt(text)))
-            }
+            // **Aucun minuteur ici.** Cette phase est atteinte avant que le
+            // presse-papiers soit écrit et le ⌘V envoyé ; le compte à rebours
+            // partait donc d'un événement qui ne dit rien de ce qu'il annonce,
+            // et pouvait expirer avant même que le collage ait lieu. Il part
+            // maintenant de l'atterrissage, c'est-à-dire de `.idle` — la phase
+            // que la dictée n'atteint qu'au rappel de `Paster` (voir
+            // `DictationController.performPaste`), et seulement par là :
+            // `DictationMachine` ne sort de `.pasting` que sur `.pasted`.
+            //
+            // **Ce mode-ci est ce que le retour au repos lit ensuite** pour
+            // savoir qu'une livraison était en cours et qu'elle vient
+            // d'aboutir. C'est ce qui rend le `publish()` d'avant les effets
+            // indispensable pour une autre raison que celle qui l'a fait
+            // écrire : sans lui, `.pasting` ne serait jamais vue, et le retour
+            // au repos trouverait « Transcription… » — un mode interruptible —
+            // donc annoncerait « annulé » sur une dictée qui a réussi.
+            dismissTask?.cancel()
+            content.source = .dictation
+            present(.pasting)
             overlay.show()
-            // Assez pour lire le début de ce qui vient d'être collé et vérifier
-            // que c'est bien ça.
-            scheduleDismiss(after: 1.8)
 
         case .failed(let reason):
             stopRefreshing()
@@ -83,7 +96,10 @@ final class NotchPresenter {
 
         case .idle:
             stopRefreshing()
-            settleToIdle()
+            settleToIdle(
+                delivered: dictation.lastTranscript,
+                landing: dictation.pasteLanding
+            )
         }
     }
 
@@ -113,11 +129,13 @@ final class NotchPresenter {
             overlay.show()
 
         case .copying:
-            if let text = snapshot.lastText {
-                present(.captured(Self.excerpt(text)))
-            }
+            // Même règle qu'à `.pasting` : l'écriture est postée, pas faite.
+            // `SnapshotController.finishDelivery` n'est appelé qu'au rappel de
+            // `Paster`, et c'est lui qui fait retomber la phase à `.idle`.
+            dismissTask?.cancel()
+            content.source = .snapshot
+            present(.copying)
             overlay.show()
-            scheduleDismiss(after: 1.8)
 
         case .failed(let reason):
             content.source = .snapshot
@@ -126,7 +144,10 @@ final class NotchPresenter {
             scheduleDismiss(after: 4)
 
         case .idle:
-            settleToIdle()
+            settleToIdle(
+                delivered: snapshot.lastText,
+                landing: snapshot.pasteLanding
+            )
         }
     }
 
@@ -134,24 +155,107 @@ final class NotchPresenter {
 
     /// Décide ce qu'on affiche quand une fonction revient au repos.
     ///
-    /// **Le piège, déjà payé une fois sur la dictée.** `.copying` et `.pasting`
-    /// arrivent juste avant `.idle`, dans la même pile d'appels. Le minuteur de
-    /// 1,8 s vient d'être posé : le raccourcir ici ferait disparaître le texte
-    /// avant qu'on ait pu le lire. D'où le retour immédiat quand un état de fin
-    /// est déjà affiché.
-    private func settleToIdle() {
-        if case .done = content.mode { return }
-        if case .captured = content.mode { return }
-        if case .empty = content.mode { return }
-        if case .failed = content.mode { return }
+    /// **C'est ici que le passé s'écrit.** Le retour au repos n'est pas un
+    /// détail de fin de course : pour les deux fonctions, c'est le seul moment
+    /// où le texte est réellement au presse-papiers. Ni `.pasting` ni `.copying`
+    /// ne le garantissent — les deux sont atteintes avant l'écriture, qui est
+    /// postée sur une file et peut attendre (`Paster`, point 8) —, et les deux
+    /// contrôleurs n'appellent la machine à états qu'au rappel de `Paster`. Un
+    /// « collé » affiché plus tôt est un « collé » qui peut être faux ; affiché
+    /// ici, il ne peut plus l'être.
+    ///
+    /// **Le piège, déjà payé une fois sur la dictée.** Un état de fin déjà
+    /// affiché a le dernier mot : il vient de poser son minuteur, et le
+    /// raccourcir ici ferait disparaître le texte avant qu'on ait pu le lire.
+    /// D'où `Mode.isTerminal`, plutôt que la liste des `if case` qu'il fallait
+    /// penser à rallonger.
+    ///
+    /// - Parameters:
+    ///   - delivered: le texte que la fonction vient de livrer, pour en montrer
+    ///     le début. `nil` quand il n'y en a pas — la coche reste juste, elle
+    ///     dit que c'est fait, pas ce que c'était.
+    ///   - landing: ce que `Paster` a répondu, **posé par le contrôleur au
+    ///     rappel de `Paster`, juste avant la transition vers `.idle`**. `nil`
+    ///     quand il n'y a rien à signaler.
+    ///
+    ///     C'était un `Bool` — « faut-il faire ⌘V ? » —, lu sur la présence du
+    ///     `pasteFallbackNotice` du contrôleur. Deux fins tenaient dans un
+    ///     `Bool` ; il y en a trois depuis que le presse-papiers peut ne pas
+    ///     répondre du tout (`Paster`, point 9), et la troisième se serait
+    ///     rangée du côté `false`, donc affichée en coche verte sur un texte
+    ///     qui n'est allé nulle part. La valeur passe donc entière, par le même
+    ///     canal unique : `pasteFallbackNotice` en est maintenant dérivé, ce qui
+    ///     évite au contrôleur d'en ouvrir un second pour la même information.
+    private func settleToIdle(delivered: String?, landing: Paster.Landing?) {
+        switch content.mode {
+        case .pasting:
+            present(ending(delivered: delivered, landing: landing, pasted: true))
+            scheduleDismiss(after: Self.readingTime(landing))
+
+        case .copying:
+            present(ending(delivered: delivered, landing: landing, pasted: false))
+            scheduleDismiss(after: Self.readingTime(landing))
+
+        case _ where content.mode.isTerminal:
+            return
 
         // Distinguer « annulé » de « rien trouvé » : deux gestes différents, et
         // l'utilisateur doit savoir lequel a été compris.
-        if content.mode.isCancellable {
+        case _ where content.mode.isCancellable:
             present(.cancelled)
             scheduleDismiss(after: 0.9)
-        } else {
+
+        default:
             scheduleDismiss(after: 1.2)
+        }
+    }
+
+    /// Ce que l'encoche dit une fois la livraison terminée.
+    ///
+    /// **Trois fins, trois modes, et aucun qui déborde sur l'autre.**
+    /// `.stalled` sort par `.failed` et non par `.handedOver` : `.handedOver`
+    /// affiche « ⌘V pour coller », ce qui, sur un presse-papiers qu'on n'a
+    /// jamais réussi à écrire, ferait coller le contenu d'avant. Un mode de
+    /// panne qui donne une instruction fausse est pire que pas de mode du tout.
+    /// `.failed` porte déjà sa raison en texte, est terminal — donc le retour au
+    /// repos ne l'écrasera pas — et existe sans que `NotchContent.Mode` ait à
+    /// gagner un cas de plus pour un chemin qu'on espère ne jamais voir.
+    ///
+    /// - Parameter pasted: `true` pour la dictée, dont la fin réussie est un
+    ///   collage ; `false` pour la capture de texte, dont la fin réussie est une
+    ///   copie. La distinction ne survit ni au `.clipboardOnly` ni au
+    ///   `.stalled` : dans ces deux cas les deux fonctions disent la même chose,
+    ///   parce que l'utilisateur a exactement le même geste à faire — ⌘V pour
+    ///   l'un, aller le chercher dans l'historique pour l'autre.
+    private func ending(
+        delivered: String?,
+        landing: Paster.Landing?,
+        pasted: Bool
+    ) -> NotchContent.Mode {
+        switch landing {
+        case .clipboardOnly:
+            return .handedOver
+        case .stalled:
+            return .failed(Paster.stalledNotice)
+        case .pasted, nil:
+            let excerpt = delivered.map { Self.excerpt($0) } ?? ""
+            return pasted ? .done(excerpt) : .captured(excerpt)
+        }
+    }
+
+    /// Assez pour lire le début de ce qui vient d'être livré et vérifier que
+    /// c'est bien ça — et plus longtemps dès qu'il reste quelque chose à faire :
+    /// une instruction qui s'efface avant d'être lue n'a servi à rien.
+    ///
+    /// `.stalled` a droit aux mêmes 4 s que `.clipboardOnly`, et pour une raison
+    /// plus forte : sa phrase est la seule trace de l'incident. Il n'y a pas de
+    /// coche à revoir, pas de texte collé quelque part à retrouver — juste ces
+    /// quelques secondes et le bandeau du panneau, que l'utilisateur n'a aucune
+    /// raison d'aller ouvrir s'il n'a pas su qu'il s'était passé quelque chose.
+    private static func readingTime(_ landing: Paster.Landing?) -> TimeInterval {
+        switch landing {
+        case .clipboardOnly, .stalled: 4
+        case .pasted, nil: 1.8
         }
     }
 
@@ -203,10 +307,18 @@ final class NotchPresenter {
         case .idle: ""
         case .listening: "Dictée : à l'écoute"
         case .transcribing: "Dictée : transcription en cours"
+        // Le temps du verbe est la seule différence entre ces deux-là, et c'est
+        // toute la correction : « collage en cours » pendant, « collée » après.
+        case .pasting: "Dictée : collage en cours"
         case .done(let text): "Dictée collée : \(text)"
         case .preparing: "Capture : chargement du moteur"
         case .reading: "Capture : lecture du texte"
+        case .copying: "Capture : copie en cours"
         case .captured(let text): "Texte copié : \(text)"
+        // La phrase entière, pas l'abrégé de l'encoche : à l'oreille il n'y a
+        // pas de place à gagner, et c'est le seul retour dont dispose quelqu'un
+        // qui n'a pas vu le panneau.
+        case .handedOver: "\(who) : \(Paster.fallbackNotice)"
         case .empty: source == .snapshot ? "Capture : aucun texte trouvé" : "Dictée : rien entendu"
         case .cancelled: "\(who) : annulé"
         case .failed(let reason): "\(who) : \(reason)"

@@ -42,7 +42,18 @@ final class SnapshotController {
     ///
     /// Posé **une fois l'écriture aboutie**, jamais avant : tant que `Paster`
     /// n'a pas rappelé, le texte n'est pas encore au presse-papiers.
-    private(set) var pasteFallbackNotice: String?
+    ///
+    /// **Un seul canal, et c'est la `Landing` qui le porte.** L'encoche a besoin
+    /// des trois fins possibles — collé, à coller, pas parti du tout — et le
+    /// panneau seulement de la phrase. Deux propriétés publiées feraient deux
+    /// sources pour la même vérité ; celle-ci est donc dérivée de `pasteLanding`
+    /// et non stockée. `nil` sur `pasteLanding` veut dire « rien à signaler » :
+    /// c'est ce que rend une copie sans collage qui a abouti.
+    private(set) var pasteLanding: Paster.Landing?
+
+    /// Ce qu'il reste à dire à l'utilisateur, ou `nil` quand tout s'est passé
+    /// comme prévu. Lu par `SnapshotPane`.
+    var pasteFallbackNotice: String? { pasteLanding?.notice }
     /// Les entrées dont une relecture est en cours.
     private(set) var relisting: Set<UUID> = []
 
@@ -168,7 +179,7 @@ final class SnapshotController {
         let token = UUID()
         currentToken = token
         // Le bandeau de la capture précédente ne parle pas de celle-ci.
-        pasteFallbackNotice = nil
+        pasteLanding = nil
 
         // L'application au premier plan est mémorisée **avant** le viseur :
         // pendant la sélection, c'est bran ou `screencapture` qui est devant,
@@ -322,20 +333,28 @@ final class SnapshotController {
     /// passer à `.copied` juste après revenait à annoncer « c'est copié » avant
     /// que ce soit vrai. L'utilisateur entendait le son, faisait ⌘V, et collait
     /// le contenu d'avant. Tout ce qui affirme quelque chose du presse-papiers
-    /// est donc passé dans `finishDelivery(needsManualPaste:)`, qui n'est appelé
+    /// est donc passé dans `finishDelivery(landing:)`, qui n'est appelé
     /// qu'au rappel de `Paster`.
+    ///
+    /// **Les deux chemins peuvent ne jamais répondre, et c'est `Paster` qui les
+    /// borne** (point 9 de son en-tête). Une application source coincée dans son
+    /// XPC retenait l'écriture, donc le rappel, donc `finishDelivery`, donc la
+    /// phase `.copying` : la capture ne se terminait jamais. Le remède n'est pas
+    /// ici — un minuteur par appelant serait le même code écrit trois fois, dont
+    /// l'exemplaire oublié serait celui qui gèle. Ce contrôleur se contente donc
+    /// d'accepter une troisième fin, celle où le texte n'est allé nulle part.
     private func deliver(_ text: String) {
         guard settings.pastesAutomatically else {
-            // Personne n'a demandé de collage : il n'y a pas d'échec à signaler,
-            // seulement une écriture à laisser aboutir.
-            paster.copyOnly(text) { [weak self] in
-                self?.finishDelivery(needsManualPaste: false)
+            // Personne n'a demandé de collage : la seule chose qui puisse mal
+            // se passer est que l'écriture n'aboutisse pas du tout.
+            paster.copyOnly(text) { [weak self] written in
+                self?.finishDelivery(landing: written ? nil : .stalled)
             }
             return
         }
 
         let willTry = paster.paste(text) { [weak self] landing in
-            self?.finishDelivery(needsManualPaste: landing.needsManualPaste)
+            self?.finishDelivery(landing: landing)
         }
 
         if willTry == false {
@@ -346,11 +365,22 @@ final class SnapshotController {
         }
     }
 
-    /// Le texte est au presse-papiers : c'est seulement maintenant qu'on a le
-    /// droit de le dire, de le faire entendre, et de considérer la capture finie.
-    private func finishDelivery(needsManualPaste: Bool) {
-        pasteFallbackNotice = needsManualPaste ? Paster.fallbackNotice : nil
-        if settings.playsSound { Self.doneCue?.play() }
+    /// La livraison est terminée : c'est seulement maintenant qu'on a le droit
+    /// de dire ce qui s'est passé, de le faire entendre, et de considérer la
+    /// capture finie.
+    ///
+    /// - Parameter landing: `nil` pour la copie sans collage qui a abouti — il
+    ///   n'y a rien à raconter. Sinon, ce que `Paster` a répondu.
+    ///
+    /// **Le son ne ment pas non plus.** `Self.doneCue` est le son de réussite :
+    /// le jouer sur un `.stalled` annoncerait à l'oreille exactement ce que le
+    /// bandeau dément à l'écran, et c'est le son qu'on entend en premier — on
+    /// ferait ⌘V avant même d'avoir lu.
+    private func finishDelivery(landing: Paster.Landing?) {
+        pasteLanding = landing
+        if settings.playsSound, landing?.reachedClipboard != false {
+            Self.doneCue?.play()
+        }
         apply(machine.handle(.copied))
     }
 
@@ -386,13 +416,38 @@ final class SnapshotController {
         case .monospaced: try await engine.recogniseCode(handle)
         case .prose: try await engine.recognise(handle, language: language)
         }
-        FeatureLog.record("moteur → \(regions.count) régions (\(layout.rawValue))")
-        for region in regions.prefix(3) {
-            FeatureLog.record(String(
-                format: "   x=%.4f y=%.4f l=%.4f h=%.4f conf=%.2f « %@ »",
-                region.x, region.y, region.width, region.height, region.confidence,
-                String(region.text.prefix(40))
-            ))
+        // **La forme des régions, jamais leur texte.**
+        //
+        // Cette trace a été écrite pour trancher « le moteur n'a rien vu » de
+        // « le moteur a vu du texte et n'a pas su le lire » — la distinction
+        // qui a coûté une soirée. Elle le tranche toujours, mais sans recopier
+        // ce qui était à l'écran : le lecteur vise ce que l'utilisateur a
+        // devant lui, et les quarante premiers caractères qui partaient ici
+        // dans le journal unifié étaient, une fois sur deux, un terminal ou un
+        // navigateur.
+        //
+        // Ce qui reste diagnostique tout ce qu'on a réellement eu à
+        // diagnostiquer : le compte de régions et de caractères, les régions
+        // vides (le moteur a vu sans lire), la confiance, la géométrie, et
+        // l'avance moyenne — largeur de la boîte divisée par le nombre de
+        // caractères rendus. Une avance qui explose, c'est une boîte pleine de
+        // texte dont trois caractères sont sortis ; le reste des symptômes se
+        // lit dans la forme, y compris « le japonais a été lu en latin ».
+        let confidences = regions.map(\.confidence)
+        FeatureLog.record("""
+            moteur → \(regions.count) régions (\(layout)), \
+            \(regions.reduce(0) { $0 + $1.text.count }) c. au total, \
+            \(regions.filter { $0.text.isEmpty }.count) vide(s), \
+            conf \(confidences.min() ?? 0, decimals: 2)–\(confidences.max() ?? 0, decimals: 2)
+            """)
+        for (rank, region) in regions.prefix(3).enumerated() {
+            let advance = region.text.isEmpty ? 0 : region.width / Double(region.text.count)
+            FeatureLog.record("""
+                   #\(rank) x=\(region.x, decimals: 4) y=\(region.y, decimals: 4) \
+                l=\(region.width, decimals: 4) h=\(region.height, decimals: 4) \
+                conf=\(region.confidence, decimals: 2) avance=\(advance, decimals: 4) \
+                \(shapeOf: region.text)
+                """)
         }
 
         let raw = TextAssembler.assemble(regions, layout: layout)
@@ -406,7 +461,6 @@ final class SnapshotController {
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         FeatureLog.record("nettoyage → \(text.count) caractères")
 
-        let confidences = regions.map(\.confidence)
         return Outcome(
             text: text,
             raw: raw,
@@ -441,17 +495,22 @@ final class SnapshotController {
                 }
                 FeatureLog.record("autotest chaîne : image \(image.width)×\(image.height)")
                 let outcome = try await read(image: image, layout: .monospaced, language: settings.language)
-                FeatureLog.record(
-                    "autotest chaîne : \(outcome.text.count) caractères « "
-                    + String(outcome.text.prefix(60)).replacingOccurrences(of: "\n", with: "⏎") + " »"
-                )
+                // Le rectangle est imposé, mais il est pris sur l'écran de
+                // quelqu'un : ce qui s'y trouve n'a pas plus le droit d'être
+                // recopié ici que le reste. La forme dit tout ce qu'on lui
+                // demandait — la chaîne complète a-t-elle rendu du texte, et
+                // du texte qui ressemble à ce qu'on voit en haut à gauche.
+                FeatureLog.record("autotest chaîne : \(shapeOf: outcome.text)")
             } catch {
                 FeatureLog.record("autotest chaîne", error: error)
             }
         }
     }
 
-    func selfTest(_ moment: String) {
+    /// `moment` est une `StaticString` **exprès** : il finit dans le journal
+    /// unifié en clair, et une constante de compilation est la seule chaîne
+    /// dont on puisse promettre qu'elle ne vient pas de l'utilisateur.
+    func selfTest(_ moment: StaticString) {
         guard let image = Self.renderProbe() else {
             FeatureLog.record("autotest \(moment) : impossible de fabriquer l'image")
             return
@@ -463,12 +522,25 @@ final class SnapshotController {
                     RecognisableImage(handle: image, pixelWidth: image.width, pixelHeight: image.height)
                 )
                 let text = regions.map(\.text).joined(separator: " ")
-                FeatureLog.record("autotest \(moment) : \(regions.count) régions « \(text) »")
+                // **Le seul `safe:` du fichier, et il se justifie.** Ce texte ne
+                // vient pas de l'écran : il sort de `renderProbe()`, qui dessine
+                // `Self.probeText` sur un bitmap fabriqué dans ce processus. Le
+                // lire en clair est tout l'intérêt de la sonde — « 1 région »
+                // ne dit pas si le moteur a rendu « autotest 12345 » ou
+                // « au7ote5t I234S », et c'est justement ce qu'on surveille.
+                FeatureLog.record("""
+                    autotest \(moment) : \(regions.count) régions, \
+                    conforme=\(text == Self.probeText), lu « \(safe: text) »
+                    """)
             } catch {
                 FeatureLog.record("autotest \(moment)", error: error)
             }
         }
     }
+
+    /// Le texte de la sonde. Constante du programme, connue d'avance : c'est ce
+    /// qui permet à `selfTest` de comparer au lieu de deviner.
+    private static let probeText = "autotest 12345"
 
     /// Une image de test, noir sur blanc, avec un texte connu.
     private static func renderProbe() -> CGImage? {
@@ -488,7 +560,7 @@ final class SnapshotController {
         NSColor.white.setFill()
         NSRect(origin: .zero, size: size).fill()
         NSAttributedString(
-            string: "autotest 12345",
+            string: probeText,
             attributes: [
                 .font: NSFont.monospacedSystemFont(ofSize: 34, weight: .regular),
                 .foregroundColor: NSColor.black,

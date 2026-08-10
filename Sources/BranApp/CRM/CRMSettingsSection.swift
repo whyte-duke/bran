@@ -28,6 +28,19 @@ struct CRMSettingsSection: View {
                     .disabled(isTesting || configuration.isConfigured == false)
             }
 
+            // Le refus du Trousseau passe **avant** le résultat du test, et
+            // s'affiche avec lui plutôt qu'à sa place : les deux sont vrais en
+            // même temps. La connexion peut très bien réussir — elle utilise le
+            // jeton en mémoire — pendant que le Trousseau, lui, n'en a pas
+            // voulu. Un « Connexion établie » vert tout seul enverrait
+            // l'utilisateur quitter bran avec un jeton qui n'existe plus.
+            if let problem = configuration.tokenProblem {
+                Text(problem)
+                    .font(Type.cardBody)
+                    .foregroundStyle(Palette.attention)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if let testResult {
                 Text(testResult)
                     .font(Type.cardBody)
@@ -99,6 +112,13 @@ struct CRMSettingsSection: View {
         }
 
         configuration.token = token
-        testResult = "Jeton importé dans le Trousseau. Vous pouvez supprimer le fichier .env."
+
+        // « Vous pouvez supprimer le fichier .env » est le pire conseil possible
+        // si le Trousseau vient de refuser l'écriture : ce fichier serait alors
+        // la dernière copie du jeton. On ne le donne donc que quand l'écriture
+        // est confirmée ; sinon le motif du refus s'affiche déjà au-dessus.
+        testResult = configuration.tokenProblem == nil
+            ? "Jeton importé dans le Trousseau. Vous pouvez supprimer le fichier .env."
+            : nil
     }
 }

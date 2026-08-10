@@ -44,9 +44,24 @@ final class CRMConfiguration {
     }
 
     /// Jamais persisté ailleurs que dans le Trousseau.
+    ///
+    /// Le résultat de l'écriture est **lu**. `Keychain.set` rend un `Outcome`
+    /// depuis qu'une écriture refusée a cessé d'être silencieuse, mais un
+    /// résultat que personne ne regarde ne vaut pas mieux qu'un `Void` : l'écran
+    /// affichait le jeton — il est en mémoire — pendant que le Trousseau gardait
+    /// l'ancien. L'utilisateur collait son nouveau jeton, le voyait accepté,
+    /// quittait, et le dépôt suivant échouait avec un identifiant qu'il croyait
+    /// remplacé.
     var token: String {
-        didSet { Keychain.set(token, for: Key.token) }
+        didSet { tokenProblem = Keychain.set(token, for: Key.token).problem }
     }
+
+    /// Ce que le Trousseau a refusé, déjà écrit pour un humain, ou `nil` quand
+    /// la valeur à l'écran est bien celle qui est stockée.
+    ///
+    /// Remis à `nil` par la première écriture qui passe : c'est l'état du
+    /// stockage, pas un historique.
+    var tokenProblem: String?
 
     init() {
         let defaults = UserDefaults.standard

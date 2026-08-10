@@ -217,6 +217,21 @@ final class NotchContent {
         // Dictée
         case listening
         case transcribing
+        /// **Le collage est en train de se faire.** Présent, pas passé : la
+        /// phase `.pasting` est atteinte *avant* que le presse-papiers soit
+        /// écrit et le ⌘V envoyé, et depuis que cette écriture est asynchrone,
+        /// elle peut attendre des secondes derrière une lecture bloquée
+        /// (`Paster`, point 8). L'encoche disait « Dictée collée » à cet
+        /// instant-là : elle affirmait un fait qui n'avait pas eu lieu, et son
+        /// minuteur de 1,8 s pouvait la faire disparaître avant qu'il n'ait
+        /// lieu.
+        ///
+        /// Sans texte associé, délibérément. Le mode est posé au changement de
+        /// phase, et à cet instant `DictationController.lastTranscript` n'est
+        /// pas encore écrit : c'est l'effet `.paste` qui l'écrit, et les effets
+        /// s'exécutent après la publication de la phase. L'extrait n'a de toute
+        /// façon de sens qu'après coup — il sert à vérifier ce qui a atterri.
+        case pasting
         case done(String)
 
         // Capture de texte
@@ -225,9 +240,20 @@ final class NotchContent {
         /// est pire qu'une barre indéterminée.
         case preparing(Double?)
         case reading
+        /// L'écriture au presse-papiers est en cours. Même raison qu'à
+        /// `.pasting`, même remède.
+        case copying
         case captured(String)
 
         // Communs
+        /// Le texte est au presse-papiers **et l'utilisateur a un ⌘V à faire**.
+        ///
+        /// Un troisième état de fin, et non une variante de `.done` : ce que
+        /// `Paster.Landing.clipboardOnly` décrit n'est pas un collage réussi,
+        /// c'est un collage qui n'a pas pu se faire — cible disparue, saisie
+        /// sécurisée. Les confondre laissait l'utilisateur devant une coche
+        /// verte et un texte qui n'était nulle part.
+        case handedOver
         case empty
         case cancelled
         case failed(String)
@@ -241,10 +267,31 @@ final class NotchContent {
         /// ces cas en porte une, la comparaison devient silencieusement fausse.
         /// `.preparing(_)` le montrait déjà — impossible à mettre dans une telle
         /// liste sans en inventer la valeur.
+        ///
+        /// `.pasting` et `.copying` n'en sont pas : la touche est relâchée, le
+        /// texte existe, et plus rien n'attend l'utilisateur. Les compter comme
+        /// interruptibles ferait annoncer « annulé » au retour au repos, sur une
+        /// dictée qui vient d'aboutir.
         var isCancellable: Bool {
             switch self {
             case .listening, .transcribing, .preparing, .reading: true
-            case .idle, .done, .captured, .empty, .cancelled, .failed: false
+            case .idle, .pasting, .copying, .done, .captured, .handedOver,
+                 .empty, .cancelled, .failed: false
+            }
+        }
+
+        /// Un état de fin : il a le dernier mot, et le retour au repos ne doit
+        /// pas l'écraser.
+        ///
+        /// **Le piège que ça ferme.** `NotchPresenter.settleToIdle` énumérait
+        /// ces cas à la main, dans quatre `if case`. Le cinquième état de fin —
+        /// `.handedOver` — se serait ajouté sans que rien ne le rappelle, et
+        /// l'instruction « faites ⌘V » aurait disparu au bout de 0,9 s en
+        /// laissant « Annulé » à sa place.
+        var isTerminal: Bool {
+            switch self {
+            case .done, .captured, .handedOver, .empty, .cancelled, .failed: true
+            case .idle, .listening, .transcribing, .pasting, .preparing, .reading, .copying: false
             }
         }
     }

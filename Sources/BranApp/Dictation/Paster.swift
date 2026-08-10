@@ -1,12 +1,13 @@
 import AppKit
+import BranSpeech
 import CoreGraphics
 import Dispatch
 import Foundation
 
 /// Le collage du texte là où était le curseur.
 ///
-/// Huit détails font toute la différence entre « ça marche » et « ça marche
-/// vraiment ». Les deux premiers se voient à la première dictée ; les six
+/// Neuf détails font toute la différence entre « ça marche » et « ça marche
+/// vraiment ». Les deux premiers se voient à la première dictée ; les sept
 /// autres ne se voient que chez quelqu'un d'autre, sur une autre machine, un
 /// autre jour — et c'est exactement pour ça qu'ils ont vécu longtemps :
 ///
@@ -166,6 +167,39 @@ import Foundation
 ///    n'importe laquelle peut écrire au milieu de notre lecture. Aucun verrou
 ///    de ce processus n'y peut quoi que ce soit — c'est précisément à ça que
 ///    sert `changeCount` (points 3 et 6).
+/// 9. **Une réponse finit toujours par arriver.** Les points 6 et 8 sont chacun
+///    justes, et leur composition ne l'était pas. Le point 6 dit qu'une lecture
+///    peut rester bloquée indéfiniment dans un XPC et que rien ne peut
+///    l'interrompre — l'annulation lui épargne les représentations *suivantes*,
+///    pas celle qui est en cours. Le point 8 dit que toute écriture passe
+///    derrière elle sur la même file. Mis bout à bout : une application source
+///    coincée retenait l'écriture, l'écriture retenait `whenLanded`, et
+///    `whenLanded` retenait la machine à états de l'appelant. La dictée restait
+///    en `.pasting` et la capture en `.copying` aussi longtemps que Mail ou
+///    Photoshop ne répondait pas. C'est le blocage que la propagation de la
+///    `Landing` avait été écrite pour supprimer, revenu par la sérialisation
+///    ajoutée pour en supprimer un autre.
+///
+///    **On ne peut pas débloquer ce XPC. On peut arrêter de l'attendre.** Au
+///    moment où l'écriture est postée, un minuteur de `PasteDeadline.grace`
+///    part sur le main actor — sans rien attendre, c'est tout l'intérêt : une
+///    attente sur le main actor échangerait un gel contre un autre. Le premier
+///    des deux à se réveiller prend le jeton `PasteDeadline` et répond ; l'autre
+///    se tait. Un seul `whenLanded`, jamais zéro.
+///
+///    **Et l'écriture perdante n'écrit pas.** Elle se réveillera, plus tard,
+///    quand l'application source se débloquera. Écrire à ce moment-là poserait
+///    dans le presse-papiers une dictée d'il y a deux minutes, par-dessus ce que
+///    l'utilisateur a copié entre-temps, alors qu'on venait de lui dire qu'elle
+///    n'était pas partie. C'est donc `.stalled`, le texte ne part pas, et il
+///    n'est pas perdu pour autant : les deux appelants enregistrent leur entrée
+///    dans l'historique *avant* de la livrer, et l'historique a un bouton
+///    « copier ». `Paster.stalledNotice` dit exactement cela.
+///
+///    Le délai vit dans `BranSpeech` et non ici, avec les tests qui prouvent
+///    qu'un seul des deux coureurs parle : `BranApp` n'a pas de cible de test,
+///    et une politique de renoncement non prouvée est précisément le genre de
+///    chose qui se remet à ne jamais expirer sans que rien ne le signale.
 ///
 /// ```
 ///        appui                  relâchement   écriture finie  +0,08 s   +0,68 s
@@ -184,6 +218,14 @@ import Foundation
 ///              annulable, pas                                                nôtre
 ///              interruptible)
 /// ```
+///
+/// Le minuteur du point 9 part du même instant que l'écriture, sur le main
+/// actor, et court en parallèle de tout ce que ce schéma montre à droite. Si
+/// l'écriture n'a pas atteint la file au bout de `PasteDeadline.grace`, c'est
+/// lui qui répond `.stalled` — et la file, quand elle se libère enfin, trouve le
+/// jeton pris et n'écrit pas. Toute la branche de droite est alors abandonnée :
+/// pas d'activation, pas de ⌘V, pas de restitution, parce qu'il n'y a rien à
+/// restituer.
 ///
 /// L'activation de la cible est **du côté droit** de l'écriture, collée au ⌘V :
 /// c'est ce qui fait qu'un collage tardif atterrit quand même dans la fenêtre
@@ -205,13 +247,47 @@ final class Paster {
         /// avait disparu, la saisie sécurisée bloquait la synthèse d'événements,
         /// ou l'appelant n'avait rien demandé de plus (`copyOnly(_:)`).
         case clipboardOnly
+        /// **Le texte n'est nulle part.** Le presse-papiers n'a pas répondu dans
+        /// le délai (point 9), l'écriture a été abandonnée, et elle n'aura pas
+        /// lieu plus tard non plus.
+        ///
+        /// Un troisième cas et non une variante du second, parce que ce que le
+        /// second raconte serait ici un mensonge : `.clipboardOnly` veut dire
+        /// « c'est dans le presse-papiers, faites ⌘V », et faire ⌘V collerait
+        /// ce qui s'y trouvait avant. La différence n'est pas de formulation,
+        /// c'est celle entre un geste qui marche et un geste qui trompe.
+        case stalled
 
         /// L'utilisateur a-t-il un ⌘V à faire lui-même ?
         ///
         /// La question que se posent les deux appelants, et la seule : elle évite
         /// à chacun de réécrire la comparaison — donc de se tromper de sens le
-        /// jour où un troisième cas apparaîtra.
+        /// jour où un troisième cas apparaîtra. Ce jour est arrivé avec
+        /// `.stalled`, et la réponse est `false` : il n'y a rien à coller. Tout
+        /// appelant qui posait déjà cette question-ci s'est trouvé juste sans
+        /// rien changer, ce qui est exactement ce pour quoi elle existe.
         var needsManualPaste: Bool { self == .clipboardOnly }
+
+        /// Le texte est-il au presse-papiers ?
+        ///
+        /// La question de tout ce qui *annonce* la fin : un son de réussite, une
+        /// coche verte. `.stalled` est le seul cas où la réponse est non.
+        var reachedClipboard: Bool { self != .stalled }
+
+        /// Ce qu'il reste à dire à l'utilisateur, ou `nil` quand il n'y a rien à
+        /// ajouter parce que tout s'est passé comme prévu.
+        ///
+        /// Ici et pas chez les appelants : c'est la même phrase pour la dictée
+        /// et pour la capture, et le ternaire qu'ils écrivaient chacun de leur
+        /// côté est très exactement ce qui aurait laissé l'un des deux dire
+        /// « faites ⌘V » sur un collage qui n'a jamais atteint le presse-papiers.
+        var notice: String? {
+            switch self {
+            case .pasted: nil
+            case .clipboardOnly: Paster.fallbackNotice
+            case .stalled: Paster.stalledNotice
+            }
+        }
     }
 
     /// Ce qu'on dit à l'utilisateur quand le collage n'a pas eu lieu.
@@ -224,8 +300,33 @@ final class Paster {
     ///
     /// À n'afficher qu'une fois la `Landing` reçue : avant, le texte n'est pas
     /// encore là et la phrase est prématurée.
-    static let fallbackNotice =
+    /// `nonisolated` : `Landing` est un type imbriqué, et en Swift 6 un type
+    /// imbriqué n'hérite pas de l'isolation d'acteur de son parent. Sans ça,
+    /// `Landing.notice` ne peut pas lire cette constante — qui n'est qu'une
+    /// chaîne, et n'a aucune raison d'appartenir au fil principal.
+    nonisolated static let fallbackNotice =
         "Le texte n'a pas pu être collé — il est dans le presse-papiers, faites ⌘V."
+
+    /// Ce qu'on dit quand le presse-papiers lui-même n'a pas répondu (point 9).
+    ///
+    /// Trois choses à dire et pas une de moins. **Que ça a échoué** — sinon
+    /// l'utilisateur fait ⌘V et colle autre chose. **Pourquoi** — sinon il
+    /// recommence sa dictée, ce qui repartira dans la même file coincée.
+    /// **Où est le texte** — parce qu'il y est : les deux appelants enregistrent
+    /// leur entrée avant de la livrer, et c'est ce qui autorise à renoncer à
+    /// l'écriture plutôt que de la laisser atterrir en retard.
+    ///
+    /// Pas de nom d'application coupable, même si on le connaît souvent : la
+    /// lecture est faite à l'appui et le blocage se constate une dictée plus
+    /// tard, sur une application qui n'est peut-être plus au premier plan.
+    /// Accuser la mauvaise est pire que de ne pas accuser.
+    /// `nonisolated` : `Landing` est un type imbriqué, et en Swift 6 un type
+    /// imbriqué n'hérite pas de l'isolation d'acteur de son parent. Sans ça,
+    /// `Landing.notice` ne peut pas lire cette constante — qui n'est qu'une
+    /// chaîne, et n'a aucune raison d'appartenir au fil principal.
+    nonisolated static let stalledNotice =
+        "Le presse-papiers n'a pas répondu — le texte n'a pas été collé,"
+        + " retrouvez-le dans l'historique."
 
     /// Ce qu'un collage a mis de côté, **et le collage auquel ça appartient**.
     ///
@@ -352,9 +453,13 @@ final class Paster {
     /// la pire issue possible, et `Paster.fallbackNotice` dit exactement ce qu'il
     /// reste à faire.
     ///
-    /// - Parameter whenLanded: appelé **une fois**, sur le main actor, quand tout
-    ///   est terminé. Facultatif : un appelant qui n'a rien à enchaîner ne doit
-    ///   pas avoir à écrire une fermeture vide.
+    /// - Parameter whenLanded: appelé **exactement une fois**, sur le main actor,
+    ///   quand tout est terminé. Ni zéro ni deux : au pire il arrive
+    ///   `PasteDeadline.grace` après l'appel, avec `.stalled`, parce que le
+    ///   presse-papiers n'a pas répondu (point 9). Aucun appelant n'a donc à se
+    ///   protéger d'une réponse qui ne viendrait pas, et aucun n'a de minuteur à
+    ///   poser de son côté. Facultatif : un appelant qui n'a rien à enchaîner ne
+    ///   doit pas avoir à écrire une fermeture vide.
     @discardableResult
     func paste(_ text: String, whenLanded: ((Landing) -> Void)? = nil) -> Bool {
         // La lecture en cours n'a plus d'objet : on s'apprête à écrire par-
@@ -389,13 +494,57 @@ final class Paster {
             && target?.isTerminated == false
             && HotkeyMonitor.isSecureInputActive == false
 
+        // Le jeton du point 9. Deux coureurs le regardent : l'écriture, sur la
+        // file série, et le minuteur juste en dessous, sur le main actor. Le
+        // premier à le prendre répond à l'appelant ; l'autre se retire.
+        let deadline = PasteDeadline()
+
+        // **Posé avant l'écriture, et non attendu.** `asyncAfter` et non
+        // `Task.sleep` : le sommeil vivrait dans une tâche héritant du main
+        // actor, ce qui reste correct, mais `asyncAfter` dit sans ambiguïté que
+        // personne n'attend — c'est la garantie de l'en-tête, le main actor ne
+        // bloque jamais.
+        DispatchQueue.main.asyncAfter(deadline: .now() + PasteDeadline.graceInSeconds) {
+            guard deadline.claim() else { return }
+            // Rien à défaire : `pending` n'est installé qu'au retour de
+            // l'écriture, qui n'a pas eu lieu, et l'instantané a déjà été
+            // consommé ci-dessus. Le presse-papiers, lui, n'a pas été touché —
+            // c'est même tout ce que `.stalled` veut dire.
+            FeatureLog.record(
+                "presse-papiers : aucune réponse en \(PasteDeadline.graceInSeconds) s"
+                + " (application source bloquée) — l'écriture est abandonnée,"
+                + " le texte reste dans l'historique"
+            )
+            whenLanded?(.stalled)
+        }
+
         Task { [weak self] in
             // `expecting:` fait comparer le numéro de version *sur la file*,
             // juste avant d'écrire — le seul endroit où « le presse-papiers
             // n'a pas bougé depuis la lecture » et « je l'écris » ne peuvent
             // pas être séparés par un de nos propres accès (points 3 et 8).
-            let outcome = await pasteboardAccess.write(text, expecting: saved?.changeCount)
-            guard let self else { return }
+            //
+            // `claiming:` est pris au même endroit et pour la même raison : la
+            // décision d'écrire et l'écriture doivent être indissociables. Prise
+            // ici, la course avec le minuteur se jouerait entre les deux.
+            let outcome = await pasteboardAccess.write(
+                text,
+                expecting: saved?.changeCount,
+                claiming: deadline
+            )
+            // Le minuteur a parlé le premier et a déjà répondu `.stalled` :
+            // l'écriture n'a pas eu lieu, il n'y a rien à restituer, rien à
+            // coller, et surtout pas un second `whenLanded` à envoyer.
+            guard let outcome else { return }
+
+            // Le texte *est* au presse-papiers. Si `Paster` a disparu entre
+            // temps, l'appelant doit quand même l'apprendre : sans cette
+            // réponse-ci, un `Paster` libéré pendant l'écriture laisserait sa
+            // machine à états figée — le défaut du point 9, par une autre porte.
+            guard let self else {
+                whenLanded?(.clipboardOnly)
+                return
+            }
 
             // Un collage plus récent est passé devant pendant l'attente : tout
             // ce qui suit lui appartient, on ne touche plus ni au
@@ -436,6 +585,20 @@ final class Paster {
                   target.isTerminated == false,
                   HotkeyMonitor.isSecureInputActive == false
             else {
+                // **Relâcher n'est pas rendre.** Le minuteur de restitution
+                // n'est posé que sur le chemin du ⌘V ; ici il n'y en aura pas,
+                // et la sauvegarde installée juste au-dessus n'a plus personne
+                // pour la consommer. Elle restait donc en place jusqu'au collage
+                // suivant, qui la trouvait et la rendait — au nom d'un collage
+                // qui n'avait jamais eu lieu, par-dessus un presse-papiers dont
+                // l'utilisateur s'était peut-être servi entre-temps.
+                //
+                // Ne *pas* restituer est le bon comportement et reste le
+                // comportement : le texte est au presse-papiers et l'utilisateur
+                // a encore son ⌘V à faire, le lui reprendre serait un sabotage.
+                // Ce qu'on jette n'est pas le service rendu, c'est une intention
+                // devenue sans objet.
+                releasePendingRestore(generation: generation)
                 whenLanded?(.clipboardOnly)
                 return
             }
@@ -454,7 +617,15 @@ final class Paster {
                 // dictée suivante peut démarrer et son écriture doubler celui-ci.
                 whenLanded?(.pasted)
 
-                guard let self, restoresClipboard else { return }
+                guard let self else { return }
+                // La même porte que ci-dessus, en plus étroite : le réglage a pu
+                // basculer pendant les 0,08 s. La sauvegarde a été installée
+                // sous l'ancien réglage et n'aura plus de minuteur ; la laisser
+                // en place, c'est la promettre au collage suivant.
+                guard restoresClipboard else {
+                    releasePendingRestore(generation: generation)
+                    return
+                }
                 // Assez tard pour que la cible ait lu le presse-papiers, assez
                 // tôt pour que l'utilisateur ne s'en aperçoive pas.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -468,12 +639,17 @@ final class Paster {
 
     /// Place le texte dans le presse-papiers, sans coller.
     ///
-    /// - Parameter whenLanded: appelé **une fois**, sur le main actor, quand le
-    ///   texte est réellement au presse-papiers. Même règle qu'au collage : rien
-    ///   ne doit annoncer « c'est copié » avant ce rappel, sinon l'utilisateur
-    ///   entend le son de fin, fait ⌘V, et récupère le contenu précédent.
-    ///   Facultatif — une copie depuis l'historique n'a rien à enchaîner.
-    func copyOnly(_ text: String, whenLanded: (() -> Void)? = nil) {
+    /// - Parameter whenLanded: appelé **exactement une fois**, sur le main actor.
+    ///   Même règle qu'au collage : rien ne doit annoncer « c'est copié » avant
+    ///   ce rappel, sinon l'utilisateur entend le son de fin, fait ⌘V, et
+    ///   récupère le contenu précédent. Le paramètre est `false` quand le
+    ///   presse-papiers n'a pas répondu dans le délai et que l'écriture a été
+    ///   abandonnée (point 9) — c'est le `.stalled` du collage, réduit au seul
+    ///   bit qui ait un sens ici puisqu'il n'y a jamais eu de ⌘V à envoyer.
+    ///   Ce chemin-là avait le même trou que l'autre : sans réponse, la capture
+    ///   restait en `.copying` indéfiniment. Facultatif — une copie depuis
+    ///   l'historique n'a rien à enchaîner.
+    func copyOnly(_ text: String, whenLanded: ((Bool) -> Void)? = nil) {
         // Un geste explicite de l'utilisateur : ce qu'il vient de copier prime
         // sur tout ce que bran avait prévu de faire du presse-papiers. La
         // lecture en cours n'a plus d'objet, et une restitution en attente lui
@@ -489,9 +665,33 @@ final class Paster {
         //
         // La tâche hérite de l'isolation du main actor : le rappel revient donc
         // là où l'appelant l'attend, sans saut d'isolation à écrire.
+
+        // Le même jeton et le même minuteur qu'au collage (point 9), pour la
+        // même raison : la file peut être occupée par une lecture bloquée, et
+        // une copie qui ne répond jamais fige l'appelant tout autant qu'un
+        // collage qui ne répond jamais. `copyOnly` n'a pas de ⌘V à envoyer, donc
+        // pas de troisième issue à distinguer : écrit, ou pas écrit.
+        let deadline = PasteDeadline()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + PasteDeadline.graceInSeconds) {
+            guard deadline.claim() else { return }
+            FeatureLog.record(
+                "presse-papiers : aucune réponse en \(PasteDeadline.graceInSeconds) s"
+                + " sur une copie — l'écriture est abandonnée"
+            )
+            whenLanded?(false)
+        }
+
         Task {
-            _ = await pasteboardAccess.write(text, expecting: nil)
-            whenLanded?()
+            let written = await pasteboardAccess.write(
+                text,
+                expecting: nil,
+                claiming: deadline
+            )
+            // Le minuteur a renoncé le premier : il a déjà répondu `false`, et
+            // rien n'a été écrit.
+            guard written != nil else { return }
+            whenLanded?(true)
         }
     }
 
@@ -510,6 +710,17 @@ final class Paster {
     ///
     /// Dans tous les cas la sauvegarde est relâchée, pour qu'aucune dictée
     /// suivante n'aille repêcher un contenu périmé.
+    /// Jette la sauvegarde de **ce** collage-ci, sans rien rendre.
+    ///
+    /// La vérification du numéro d'ordre n'est pas une précaution de style :
+    /// entre l'écriture et ce point, un collage plus récent a pu s'installer, et
+    /// sa sauvegarde à lui a un minuteur qui l'attend. La jeter le priverait de
+    /// sa restitution, ce qui est le défaut d'à côté, à l'envers.
+    private func releasePendingRestore(generation: Int) {
+        guard pending?.generation == generation else { return }
+        pending = nil
+    }
+
     private func restoreClipboard(generation: Int) {
         guard let pending, pending.generation == generation else { return }
         self.pending = nil
@@ -524,10 +735,22 @@ final class Paster {
 
     // MARK: - Synthèse du ⌘V
 
+    /// Synthétise le ⌘V — **signé**, pour que le guet de bran le reconnaisse et
+    /// n'y réponde pas.
+    ///
+    /// Injecté au niveau du pilote (`cghidEventTap` et non `cgSessionEventTap`)
+    /// parce que c'est le seul endroit où toutes les applications le voient, y
+    /// compris celles qui filtrent les événements de session. Le revers, mesuré :
+    /// **le tap de session de bran le voit aussi**. Sans marque, il suffirait
+    /// qu'un utilisateur règle un raccourci sur ⌘V pour que chaque collage de
+    /// dictée déclenche la fonction correspondante — bran se répondant à
+    /// lui-même, une fois par dictée, indéfiniment.
+    ///
+    /// La marque est posée sur **chacun des deux** événements et non sur la
+    /// source : `HotkeyMonitor.receive` lit un événement à la fois, et un
+    /// relâchement non marqué serait aussi mal interprété qu'un appui. Voir
+    /// `SyntheticEventTag` pour la mesure du champ et pour ce qui a été écarté.
     private static func sendCommandV() {
-        // `cghidEventTap` et non `cgSessionEventTap` : injecté au niveau du
-        // pilote, c'est le seul endroit où toutes les applications le voient,
-        // y compris celles qui filtrent les événements de session.
         let source = CGEventSource(stateID: .hidSystemState)
         let keyCodeV: CGKeyCode = 9
 
@@ -537,6 +760,8 @@ final class Paster {
 
         down.flags = .maskCommand
         up.flags = .maskCommand
+        down.setIntegerValueField(.eventSourceUserData, value: SyntheticEventTag.value)
+        up.setIntegerValueField(.eventSourceUserData, value: SyntheticEventTag.value)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
     }
@@ -659,8 +884,25 @@ private actor PasteboardAccess {
     /// l'option et laisse le presse-papiers universel diffuser la dictée sur les
     /// autres appareils du compte iCloud (point 5). Sa valeur de retour est le
     /// nouveau numéro de version, dont dépend la restitution.
+    ///
+    /// - Parameter claim: le jeton du point 9. **La prise se fait ici, sur la
+    ///   file, juste avant de toucher le presse-papiers** — exactement comme la
+    ///   vérification de `expected`, et pour la même raison : décider et agir
+    ///   doivent être un seul geste. La prendre chez l'appelant laisserait entre
+    ///   le « j'ai le droit » et le « j'écris » un intervalle que le minuteur
+    ///   peut traverser, et le presse-papiers gagnerait un texte dont on vient
+    ///   d'annoncer qu'il n'arriverait pas.
+    /// - Returns: `nil` quand le minuteur a renoncé le premier. **Rien n'a été
+    ///   écrit et rien ne le sera** : c'est la décision du point 9, pas un
+    ///   report. Le presse-papiers de l'utilisateur reste tel qu'il l'a laissé.
     @discardableResult
-    func write(_ text: String, expecting expected: Int?) -> WriteOutcome {
+    func write(
+        _ text: String,
+        expecting expected: Int?,
+        claiming claim: PasteDeadline
+    ) -> WriteOutcome? {
+        guard claim.claim() else { return nil }
+
         let pasteboard = NSPasteboard.general
         let held = expected != nil && pasteboard.changeCount == expected
 

@@ -175,10 +175,16 @@ final class HotkeyMonitor {
     /// autrement que bit périphérique par bit périphérique. L'effacement, lui,
     /// ferait perdre un relâchement, et c'est `TriggerTable.resyncedFlags` qui
     /// le ferme : les bits des fonctions encore tenues ne sont jamais retirés.
+    ///
+    /// **Et la marque de `SyntheticEventTag` n'y change rien.** Elle écarte
+    /// notre faux ⌘V du *flux d'événements*, donc de `classify` et de
+    /// `lastFlags` ; elle ne nettoie pas l'*état du système*, qui est lu ici au
+    /// système et non déduit de nos événements. Les deux gardes traitent deux
+    /// chemins distincts vers le même dégât, et il faut les deux.
     private func resyncFlags() {
         let systemFlags = CGEventSource.flagsState(.hidSystemState).rawValue
         lastFlags = CGEventFlags(
-            rawValue: bindings.resyncedFlags(from: systemFlags, held: held)
+            rawValue: bindings.resyncedFlags(from: systemFlags, held: held.triggers)
         )
     }
 
@@ -208,7 +214,7 @@ final class HotkeyMonitor {
     /// qu'au `keyDown`, n'entre jamais dans `held` et ne laisse donc aucun état
     /// à libérer quand on la déplace.
     private func releaseTriggersLosingTheirKey(since previous: TriggerTable) {
-        let released = bindings.triggersLosingTheirKey(since: previous, among: held)
+        let released = bindings.triggersLosingTheirKey(since: previous, among: held.triggers)
         guard released.isEmpty == false else { return }
 
         // Retirées de `held` **avant** d'être signalées. Un `onSignal` peut
@@ -232,7 +238,12 @@ final class HotkeyMonitor {
     /// Les fonctions dont la touche est actuellement enfoncée. Un ensemble et
     /// non un booléen : maintenir Command droite pour dicter pendant qu'un
     /// autre raccourci va et vient doit rester cohérent.
-    private var held: Set<Action> = []
+    ///
+    /// `HeldTriggers` et non un `Set` nu : ses deux mutations rendent ce qui a
+    /// changé, et le compilateur oblige à le regarder. C'est ce qui fait que les
+    /// deux branches de `classify` — modificateur seul et touche normale —
+    /// dédupliquent de la même façon, au lieu qu'une seule des deux y pense.
+    private var held = HeldTriggers()
 
     private(set) var isInstalled = false
 
@@ -336,7 +347,7 @@ final class HotkeyMonitor {
         tap = nil
         source = nil
         isInstalled = false
-        held.removeAll()
+        held.releaseEverything()
     }
 
     deinit {
@@ -389,6 +400,25 @@ final class HotkeyMonitor {
             return
         }
 
+        // — Les événements de bran, écartés avant tout le reste ——————————
+        //
+        // **Avant `watchedKeys`, avant le saut vers le main actor, avant même
+        // de lire le code de touche.** Un tap de session voit les événements
+        // postés au niveau pilote — mesuré —, donc le ⌘V que `Paster` synthétise
+        // repasse par ici. Il n'a aucune raison de traverser quoi que ce soit :
+        // ni le filtre, qui ne l'écarte aujourd'hui que par chance (personne
+        // n'a lié de fonction à V), ni `classify`, dont le
+        // `defer { lastFlags = flags }` enregistrerait un `maskCommand` sans bit
+        // périphérique. Voir `SyntheticEventTag` pour la mesure et pour les
+        // trois autres façons de filtrer qui ont été écartées.
+        //
+        // Le lire sur **toutes** les frappes du système ne se discute même pas :
+        // mesuré à 2 ns par appel, contre 2,9 ns pour la lecture du code de
+        // touche que la ligne d'après fait de toute façon.
+        guard SyntheticEventTag.isOurs(
+            event.getIntegerValueField(.eventSourceUserData)
+        ) == false else { return }
+
         // Lu ici, pas dans la tâche : `event` appartient au système et n'est
         // valide que le temps du callback.
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
@@ -398,6 +428,27 @@ final class HotkeyMonitor {
         // n'apparaît que dans `flagsChanged`, et son code y est celui de la
         // touche elle-même. Filtrer sur le masque le manquerait.
         guard watchedKeys.withLock({ $0.contains(keyCode) }) else { return }
+
+        // — La répétition automatique du système ————————————————————————
+        //
+        // macOS réémet des `keyDown` tant que la touche est tenue, plusieurs
+        // fois par seconde. Écartée **ici** et non dans `classify`, pour ce que
+        // ça coûte : sans ce filtre, tenir une touche liée crée une tâche par
+        // répétition, sur le main actor, pendant toute la durée d'une dictée —
+        // très exactement la charge qui fait dépasser au callback le budget de
+        // temps que macOS lui accorde, et qui coupe le tap en silence.
+        //
+        // Ce filtre-ci ne suffit pas, et il n'est pas censé suffire : il traite
+        // le coût, pas la justesse. La règle « un appui, un signal » est tenue
+        // par `HeldTriggers`, dans `classify`, parce qu'elle doit valoir pour
+        // tout ce qui peut faire arriver deux appuis d'affilée — pas seulement
+        // pour ce que le système veut bien étiqueter comme une répétition. Le
+        // champ est lu après le filtre des touches surveillées : le payer sur
+        // les quatre-vingts frappes par minute qui ne nous concernent pas
+        // reviendrait à défaire ce que ce filtre-là économise.
+        if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+            return
+        }
 
         let flags = event.flags
 
@@ -444,19 +495,32 @@ final class HotkeyMonitor {
                 let wasDown = (lastFlags.rawValue & bit) != 0
                 guard isDown != wasDown else { continue }
 
-                if isDown { held.insert(action) } else { held.remove(action) }
+                // La transition du masque ne suffit pas à conclure, et c'est le
+                // même juge que pour la branche d'en dessous qui tranche. Un bit
+                // peut repasser par « enfoncé » sans que le doigt ait bougé —
+                // c'est très exactement ce que fait le faux ⌘V en effaçant les
+                // bits périphériques, cas que `resyncedFlags` contient d'un côté
+                // et que celui-ci ferme de l'autre.
+                let changed = isDown ? held.press(action) : held.release(action)
+                guard changed else { return }
+
                 onSignal?(isDown ? .triggerDown(action) : .triggerUp(action))
                 return
             }
 
             guard keyCode == binding.keyCode else { continue }
             if type == .keyDown, matches(binding, keyCode: keyCode, flags: flags) {
-                held.insert(action)
+                // **Un appui, un signal.** `held.press` rend `false` quand la
+                // touche était déjà tenue : répétition automatique que le
+                // système n'aurait pas étiquetée, `keyDown` redoublé par une
+                // autre source, ou appui déjà compté. On sort quand même — la
+                // touche appartient à cette fonction-là, et la donner à la
+                // suivante ferait déclencher deux fonctions sur une frappe.
+                guard held.press(action) else { return }
                 onSignal?(.triggerDown(action))
                 return
             }
-            if type == .keyUp, held.contains(action) {
-                held.remove(action)
+            if type == .keyUp, held.release(action) {
                 onSignal?(.triggerUp(action))
                 return
             }
