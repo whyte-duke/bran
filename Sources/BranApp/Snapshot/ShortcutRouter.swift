@@ -19,6 +19,13 @@ import Foundation
 ///   être le comportement par défaut d'un raccourci voisin.
 ///
 /// Ignorer est le seul choix qui ne perd jamais de travail.
+///
+/// **Et une exception, qui n'en est pas une.** `copyHint` traverse cet
+/// aiguilleur sans passer par l'arbitrage. Ce n'est pas une entorse à la règle
+/// ci-dessus mais son domaine exact : la règle départage des *fonctions de bran*
+/// qui se disputent l'écran et le micro. Un ⌘C ne dispute rien à personne — il
+/// dit qu'un contenu vient de changer de main, et le jeter parce qu'une dictée
+/// tourne perdrait précisément la copie qu'on allait coller.
 @MainActor
 final class ShortcutRouter {
 
@@ -26,6 +33,29 @@ final class ShortcutRouter {
 
     private weak var dictation: DictationController?
     private weak var snapshot: SnapshotController?
+
+    /// Ouvrir le panneau d'historique du presse-papiers.
+    ///
+    /// **Une fermeture et pas un `weak var` comme les deux autres, parce que le
+    /// contrôleur n'existe pas encore.** Ce qui manque, et ce qu'il faudra
+    /// brancher ici : un objet qui possède un `ClipboardMachine`, tient la liste
+    /// des entrées, et sait poser le panneau. Le jour où il arrive, deux
+    /// possibilités — une troisième référence faible et un `case` de plus dans
+    /// `attach`, ou cette fermeture telle quelle. La fermeture suffit tant que
+    /// l'aiguilleur n'a rien à *demander* au presse-papiers ; le passage à la
+    /// référence faible se justifiera le jour où il devra l'interroger, par
+    /// exemple pour un `isBusy` qui entrerait dans l'arbitrage.
+    ///
+    /// Tant qu'elle est `nil`, ⌘⇧V ne fait rien — et c'est l'état actuel : rien
+    /// n'ouvre de panneau.
+    var openClipboardPanel: (() -> Void)?
+
+    /// « Une copie vient d'avoir lieu, et voici le compte d'avant. »
+    ///
+    /// Le futur contrôleur y branchera `machine.handle(.hinted(changeCount:at:))`
+    /// et exécutera les effets rendus. Rien d'autre n'a le droit de s'y mettre :
+    /// l'indice n'a de valeur que relevé une fois, tout de suite.
+    var onCopyHint: ((Int) -> Void)?
 
     init() {
         monitor.onSignal = { [weak self] signal in
@@ -56,6 +86,27 @@ final class ShortcutRouter {
             // déjà son propre cycle appui/relâchement, lui en superposer un
             // second annulerait la sélection au moment où on la termine.
             break
+
+        case .triggerDown(.clipboard):
+            // La même règle que pour les deux autres, pas une nouvelle : une
+            // fonction occupée l'emporte. Ouvrir le panneau pendant une dictée
+            // poserait une fenêtre par-dessus l'encoche qui enregistre, et
+            // pendant une capture, par-dessus le viseur de macOS.
+            guard dictation?.isBusy != true, snapshot?.isBusy != true else { return }
+            openClipboardPanel?()
+
+        case .triggerUp(.clipboard):
+            // Le panneau fonctionne en bascule, comme la capture : le relâchement
+            // de ⌘⇧V n'a rien à dire.
+            break
+
+        case .copyHint(let changeCount):
+            // **Relayé sans condition, et c'est le seul signal dans ce cas.** Ce
+            // n'est pas une fonction de bran qui démarre, c'est une copie faite
+            // dans une autre application. L'arbitrer reviendrait à décider que
+            // ce qu'on copie pendant une dictée ne mérite pas d'être gardé —
+            // alors que c'est exactement ce qu'on voudra coller à la fin.
+            onCopyHint?(changeCount)
 
         case .cancel:
             // Échap n'annule que ce qui tourne. Sans ce filtre, la touche

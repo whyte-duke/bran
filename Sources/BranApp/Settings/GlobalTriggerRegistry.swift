@@ -1,5 +1,6 @@
 import BranSpeech
 import Foundation
+import Observation
 
 /// L'objet de réglages qui détient la liaison d'un déclencheur global.
 ///
@@ -15,6 +16,41 @@ protocol GlobalTriggerSettings: AnyObject {
 
 extension DictationSettings: GlobalTriggerSettings {}
 extension SnapshotSettings: GlobalTriggerSettings {}
+
+/// La liaison d'une fonction qui n'a pas encore d'objet de réglages à elle.
+///
+/// **Ce que l'ajout du presse-papiers a révélé.** La recette annoncée plus bas
+/// — trois libellés, une ligne ici, un `case` dans l'aiguilleur — supposait sans
+/// le dire qu'un objet `…Settings` existait déjà et exposait `var trigger`.
+/// C'était vrai des deux premières fonctions parce qu'elles avaient chacune un
+/// écran de réglages complet avant d'avoir un raccourci. Le presse-papiers
+/// arrive dans l'autre sens : le raccourci d'abord, l'écran ensuite. Il fallait
+/// donc bien un quatrième morceau, et le voici — vingt lignes, pas trois.
+///
+/// Le jour où un `ClipboardSettings` naîtra avec le reste de la fonction, il
+/// exposera `var trigger` comme ses deux aînés, la conformance ne coûtera rien,
+/// et ce type-ci disparaîtra — en emportant sa clé, qui est déjà la bonne.
+@MainActor
+@Observable
+final class StandaloneTriggerBinding: GlobalTriggerSettings {
+
+    var trigger: HotkeyBinding { didSet { store() } }
+
+    private let key: String
+    private let defaults = UserDefaults.standard
+
+    init(key: String, default fallback: HotkeyBinding) {
+        self.key = key
+        let data = UserDefaults.standard.data(forKey: key)
+        trigger = data.flatMap { try? JSONDecoder().decode(HotkeyBinding.self, from: $0) }
+            ?? fallback
+    }
+
+    private func store() {
+        guard let data = try? JSONEncoder().encode(trigger) else { return }
+        defaults.set(data, forKey: key)
+    }
+}
 
 /// Le seul endroit où l'on déclare qu'une fonction a un raccourci global.
 ///
@@ -42,6 +78,36 @@ extension SnapshotSettings: GlobalTriggerSettings {}
 /// ci-dessous, un `case` dans le routage de `ShortcutRouter` — que le
 /// compilateur réclamera aussi. L'écran de réglages, la détection de conflits
 /// et l'échange suivront sans être touchés.
+///
+/// ## Ce que l'ajout a réellement coûté
+///
+/// La recette ci-dessus a été suivie, et sa deuxième moitié est vraie : la
+/// détection de conflits, l'échange, `GlobalTriggerRow` et `TriggerTable` n'ont
+/// pas bougé d'une ligne, et le compilateur a bien réclamé les deux `switch`
+/// annoncés — ici et dans `ShortcutRouter`. Trois choses manquaient à
+/// l'énoncé, toutes découvertes en le faisant :
+///
+/// - **le quatrième morceau**. `Entry` exige un `any GlobalTriggerSettings` ;
+///   une fonction qui n'a pas encore d'écran n'a pas d'objet de réglages, donc
+///   rien à donner. D'où `StandaloneTriggerBinding`, plus haut. La recette
+///   valait pour une fonction *déjà réglable*, pas pour une fonction nouvelle ;
+/// - **la liaison par défaut**. Elle ne se déduit de rien et se choisit contre
+///   le système d'exploitation — voir `HotkeyBinding.clipboardPanel`, où ⌘⇧C
+///   est écarté parce que le Finder le tient. Elle vit dans `BranSpeech` avec
+///   ses deux sœurs, et non ici : c'est une valeur, et une valeur posée dans une
+///   cible exécutable n'est vérifiable par rien ;
+/// - **`HotkeyBinding.displayName` ne savait pas nommer une lettre.** Sa table
+///   de noms couvrait les modificateurs, les fonctions et les chiffres ; ⌘⇧V s'y
+///   affichait « ⌘⇧Touche 9 ». Aucun raccourci par défaut n'était sur une lettre
+///   jusqu'ici, donc le trou ne s'était jamais vu. Corrigé dans `BranSpeech` en
+///   interrogeant la disposition clavier installée — un code de touche est une
+///   position, pas une lettre, et le code 12 est « Q » en QWERTY et « A » en
+///   AZERTY.
+///
+/// Et un piège qui n'est **pas** dans le registre mais qu'un quatrième
+/// déclencheur retrouvera : rien n'inscrit une liaison dans
+/// `HotkeyMonitor.bindings`. Chaque fonction le fait dans son propre
+/// contrôleur, à la main. `apply` réarme, il n'enregistre pas.
 ///
 /// **Pourquoi des méthodes statiques et pas un objet.** La table n'a pas d'état
 /// à elle : tout ce qu'elle sait est déjà dans les réglages persistés. Un
@@ -103,8 +169,35 @@ enum GlobalTriggerRegistry {
                     if model.enableSnapshot(true) == false { HotkeyMonitor.requestTrust() }
                 }
             )
+        case .clipboard:
+            Entry(
+                trigger: .clipboard,
+                settings: clipboardBinding,
+                // Rien à réarmer : personne n'installe encore cette liaison dans
+                // le guet, parce que rien n'ouvre encore de panneau. Le jour où
+                // le contrôleur arrive, cette fermeture appellera son
+                // `applySettings()`, comme la dictée. Une fermeture vide plutôt
+                // qu'un `Entry` optionnel : la détection de conflits, elle, doit
+                // déjà voir ⌘⇧V — sinon on laisserait quelqu'un le donner à la
+                // capture aujourd'hui et découvrir le recouvrement le jour de la
+                // livraison.
+                apply: {}
+            )
         }
     }
+
+    /// Où vit la liaison du presse-papiers, en attendant qu'elle rejoigne les
+    /// réglages de la fonction.
+    ///
+    /// **Une entorse assumée à la règle du dessous — « pas d'état » —, et la
+    /// seule.** Ce n'est pas une deuxième copie de quelque chose : c'est *la*
+    /// copie, écrite dans `UserDefaults` comme les deux autres, sous une clé du
+    /// même format. La désynchronisation que le registre sans état existe pour
+    /// éviter demanderait deux détenteurs de la même valeur ; il n'y en a qu'un.
+    private static let clipboardBinding = StandaloneTriggerBinding(
+        key: "bran.clipboard.trigger",
+        default: .clipboardPanel
+    )
 
     static func all(in model: AppModel) -> [Entry] {
         GlobalTrigger.allCases.map { entry(for: $0, in: model) }

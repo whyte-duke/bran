@@ -60,7 +60,10 @@ struct TriggerTableTests {
 
     @Test("Les liaisons sont rendues dans l'ordre de allCases, pas celui du dictionnaire")
     func assignedFollowsAllCases() {
-        let table = TriggerTable([.snapshot: Self.f2, .dictation: Self.f1])
+        // Toutes les fonctions inscrites, dans un ordre de saisie qui n'est
+        // celui d'aucune priorité : c'est la table qui doit les remettre en
+        // ordre, pas l'appelant.
+        let table = TriggerTable([.snapshot: Self.f2, .clipboard: Self.f3, .dictation: Self.f1])
         #expect(table.assigned.map(\.trigger) == GlobalTrigger.allCases)
     }
 
@@ -71,6 +74,14 @@ struct TriggerTableTests {
         #expect(Array(GlobalTrigger.allCases.prefix(2)) == [.dictation, .snapshot])
     }
 
+    /// Un cas ajouté doit l'être **à la fin**. Le vérifier ici plutôt que dans
+    /// la revue : la règle est écrite dans `GlobalTrigger`, et une règle écrite
+    /// que rien ne constate se perd au troisième ajout.
+    @Test("Le presse-papiers est en dernier")
+    func clipboardComesLast() {
+        #expect(GlobalTrigger.allCases.last == .clipboard)
+    }
+
     @Test("Chaque déclencheur a ses trois formes de nom, toutes non vides")
     func everyTriggerIsNamed() {
         for trigger in GlobalTrigger.allCases {
@@ -78,6 +89,36 @@ struct TriggerTableTests {
             #expect(trigger.definiteName.isEmpty == false)
             #expect(trigger.possessiveName.isEmpty == false)
         }
+    }
+
+    /// **Le seul test de grammaire du programme, et il a une raison d'être.**
+    /// Les trois formes sont écrites à la main précisément parce qu'une
+    /// dérivation depuis `definiteName` produirait « de le presse-papiers ».
+    /// Le presse-papiers est le premier déclencheur masculin : si la
+    /// dérivation revenait un jour par la petite porte, c'est ce cas-là qu'elle
+    /// casserait, et la phrase de `GlobalTriggerRow` deviendrait fausse.
+    @Test("Le complément du nom contracte « de le » en « du »")
+    func masculineTriggerContractsItsArticle() {
+        #expect(GlobalTrigger.clipboard.definiteName == "le presse-papiers")
+        #expect(GlobalTrigger.clipboard.possessiveName == "du presse-papiers")
+
+        // Et les deux féminines ne contractent pas.
+        #expect(GlobalTrigger.dictation.possessiveName.hasPrefix("de la"))
+        #expect(GlobalTrigger.snapshot.possessiveName.hasPrefix("de la"))
+    }
+
+    /// Ce que la table fait pour une fonction dont l'écran n'existe pas encore.
+    /// Elle n'a rien de particulier à faire, et c'est le résultat attendu : le
+    /// presse-papiers se dispute une touche comme les deux autres, et s'échange
+    /// comme elles.
+    @Test("Le presse-papiers entre dans les conflits et dans l'échange")
+    func clipboardTakesPartInArbitration() {
+        let table = TriggerTable([.dictation: Self.f1, .clipboard: Self.f2])
+        #expect(table.holder(of: Self.f2, excluding: .dictation) == .clipboard)
+
+        let swapped = table.exchanging(.dictation, to: Self.f2)
+        #expect(swapped[.dictation] == Self.f2)
+        #expect(swapped[.clipboard] == Self.f1)
     }
 
     // MARK: - Échange

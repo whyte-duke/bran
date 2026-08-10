@@ -30,11 +30,16 @@ import Synchronization
 ///   ┌─────────────────────┐
 ///   │     CGEventTap      │  un seul, listenOnly
 ///   └──────────┬──────────┘
-///        ┌─────┴──────┬────────────┐
-///        ▼            ▼            ▼
-///     dictée      capture      annulation
-///   (⌘ droite)   (⌘⇧2 …)         (Échap)
+///        ┌─────┴──────┬────────────┬─────────────┬──────────────┐
+///        ▼            ▼            ▼             ▼              ▼
+///     dictée      capture      panneau      annulation    indice de copie
+///   (⌘ droite)   (⌘⇧2 …)       (⌘⇧V)          (Échap)        (⌘C, ⌘X)
 /// ```
+///
+/// Les quatre premières branches sont des **fonctions** : elles se règlent, et
+/// `ShortcutRouter` arbitre entre elles. La cinquième n'en est pas une — c'est
+/// une observation du clavier de quelqu'un d'autre, elle ne s'arbitre pas et ne
+/// se règle pas. Voir `Signal.copyHint`.
 @MainActor
 final class HotkeyMonitor {
 
@@ -51,6 +56,27 @@ final class HotkeyMonitor {
         case triggerDown(Action)
         case triggerUp(Action)
         case cancel
+
+        /// Une copie vient probablement d'avoir lieu — un ⌘C ou un ⌘X observé au
+        /// vol —, et voici le compte de version du presse-papiers **d'avant**.
+        ///
+        /// **Ce n'est pas une `Action`, et ça ne doit jamais en devenir une.**
+        /// Les trois signaux du dessus disent « l'utilisateur demande une
+        /// fonction de bran » ; celui-ci dit « le monde extérieur vient de faire
+        /// quelque chose ». La différence est opérationnelle et pas
+        /// philosophique : `ShortcutRouter` arbitre les premiers — une fonction
+        /// occupée fait taire les autres — et doit relayer celui-ci sans
+        /// condition. Une copie faite pendant une dictée est précisément celle
+        /// qu'on voudra coller à la fin ; la jeter au nom de l'arbitrage serait
+        /// perdre le seul cas qui compte.
+        ///
+        /// `changeCount` est **le dernier compte publié par le propriétaire**,
+        /// relu dans le callback du tap — voir `receive`. C'est la référence
+        /// d'avant la copie : la machine du presse-papiers compare ce qu'elle
+        /// relèvera ensuite à cette valeur-là, et une référence prise trop tard
+        /// vaudrait déjà le compte *d'après*, ce qui lui ferait conclure « rien
+        /// n'a bougé » sur une copie bien réelle.
+        case copyHint(changeCount: Int)
     }
 
     /// Les touches surveillées, par fonction. Une fonction absente n'est pas
@@ -105,12 +131,101 @@ final class HotkeyMonitor {
     ///
     /// Un `Mutex` et non l'état de l'acteur : le callback n'est pas un contexte
     /// isolé, et il doit pouvoir répondre sans attendre personne.
-    private let watchedKeys = Mutex<Set<UInt16>>([HotkeyBinding.escape.keyCode])
+    private let watchedKeys = Mutex<WatchedKeys>(
+        WatchedKeys(claimed: [HotkeyBinding.escape.keyCode])
+    )
 
+    /// Ce que le callback a le droit de laisser passer, **et à quel titre**.
+    ///
+    /// Deux ensembles et non leur union, parce que les deux ne donnent pas les
+    /// mêmes droits :
+    ///
+    /// - une touche `claimed` — liée à une fonction, ou l'annulation — mérite le
+    ///   saut vers le main actor et `classify` ;
+    /// - une touche `copyHint` — C et X — ne mérite **que** l'examen du geste de
+    ///   copie. Les fondre dans un seul ensemble ferait traverser au moindre
+    ///   « c » de prose tout le chemin que le filtre existe pour lui épargner :
+    ///   une tâche sur le main actor par frappe, à quatre-vingts mots la minute,
+    ///   c'est-à-dire la charge qui fait couper le tap.
+    ///
+    /// Une touche peut être dans les deux — rien n'interdit de lier une fonction
+    /// à ⌘C —, et les deux droits s'appliquent alors, dans cet ordre.
+    private struct WatchedKeys: Sendable {
+        var claimed: Set<UInt16> = []
+        var copyHint: Set<UInt16> = []
+    }
+
+    /// Reconstruit le filtre à partir des liaisons, de l'annulation **et de
+    /// l'indice de copie**.
+    ///
+    /// **Le troisième terme n'est pas décoratif.** Le filtre est reconstruit
+    /// entièrement à chaque changement de réglage. Armer l'indice ailleurs — une
+    /// insertion faite une fois à l'installation, par exemple — le ferait
+    /// disparaître au premier raccourci modifié : le presse-papiers cesserait de
+    /// voir les copies jusqu'au prochain lancement, sans un mot. Ce défaut-là a
+    /// déjà été trouvé et corrigé pour la touche d'annulation, qui est ici pour
+    /// la même raison.
     private func refreshWatchedKeys() {
-        var codes = bindings.keyCodes
-        codes.insert(cancelKey.keyCode)
+        var codes = WatchedKeys(claimed: bindings.keyCodes)
+        codes.claimed.insert(cancelKey.keyCode)
+        if watchesCopies { codes.copyHint = CopyGesture.keyCodes }
         watchedKeys.withLock { $0 = codes }
+    }
+
+    // MARK: - L'indice de copie
+
+    /// Le dernier compte de version que le propriétaire ait publié, ou `nil`
+    /// tant que personne n'a rien dit. `nil` désarme l'indice : sans référence,
+    /// un indice ne veut rien dire.
+    ///
+    /// Dans un `Mutex` pour la même raison que `watchedKeys` : il est lu depuis
+    /// le callback, qui n'est isolé sur rien.
+    private let knownChangeCount = Mutex<Int?>(nil)
+
+    /// Le miroir main-actor de « l'indice est armé », pour que
+    /// `refreshWatchedKeys` n'ait pas à prendre un verrou pour le savoir.
+    private var watchesCopies = false
+
+    /// Arme l'observation des copies en publiant un compte de version, ou la
+    /// désarme avec `nil`.
+    ///
+    /// **Une valeur et non une fermeture, et le changement est celui d'un
+    /// contrat.** La première version prenait une `@Sendable () -> Int` que le
+    /// callback appelait. Elle était juste tant que le propriétaire tenait la
+    /// promesse écrite à côté — ne jamais bloquer, ne jamais toucher
+    /// `NSPasteboard` —, et cette promesse n'était garantie par rien : le jour
+    /// où quelqu'un y branche une lecture directe du presse-papiers, un `await`
+    /// sur un acteur ou n'importe quel verrou, le fil du tap se bloque et macOS
+    /// **coupe le tap**. Tous les raccourcis globaux de bran meurent d'un coup,
+    /// et rien dans le code fautif ne désigne cette ligne-ci.
+    ///
+    /// Une lecture protégée par un verrou, elle, ne peut pas bloquer plus
+    /// longtemps qu'une autre publication : le contrat est tenu par le type, pas
+    /// par un commentaire.
+    ///
+    /// **Ce que la valeur publiée perd, et pourquoi ça ne coûte rien.** Elle est
+    /// forcément plus ancienne que l'instant de la frappe. Ça n'a aucune
+    /// importance : ce que la machine attend est le compte **d'avant la copie**,
+    /// et n'importe quelle valeur antérieure à la frappe convient — si une copie
+    /// avait eu lieu depuis la dernière publication, c'est le sondeur qui
+    /// l'aurait déjà rattrapée, puisque c'est exactement son travail.
+    ///
+    /// **Le raccord que le presse-papiers viendra prendre.** Il reste à écrire :
+    /// un contrôleur qui possède un `ClipboardMachine`, lui passe
+    /// `.hinted(changeCount:at:)` à chaque `copyHint` reçu de `ShortcutRouter`,
+    /// exécute les `sample` qu'elle réclame, et republie ici le compte après
+    /// chaque relevé. Tant qu'il n'est pas là, `nil` est l'état par défaut : C
+    /// et X ne sont pas surveillées du tout, et rien de ce qui suit ne coûte une
+    /// instruction.
+    func observeCopies(changeCount: Int?) {
+        knownChangeCount.withLock { $0 = changeCount }
+        let armed = changeCount != nil
+        // Le filtre n'est reconstruit qu'au changement d'armement : le sondeur
+        // republie plusieurs fois par seconde, et refaire l'ensemble à chaque
+        // fois serait payer un travail de réglage sur une cadence de mesure.
+        guard armed != watchesCopies else { return }
+        watchesCopies = armed
+        refreshWatchedKeys()
     }
 
     /// Remet `lastFlags` sur l'état réel du clavier.
@@ -427,7 +542,13 @@ final class HotkeyMonitor {
         // modificateurs : un raccourci à modificateur seul — Command droite —
         // n'apparaît que dans `flagsChanged`, et son code y est celui de la
         // touche elle-même. Filtrer sur le masque le manquerait.
-        guard watchedKeys.withLock({ $0.contains(keyCode) }) else { return }
+        //
+        // Deux droits distincts sortent d'ici, et le second est plus étroit que
+        // le premier : voir `WatchedKeys`.
+        let (isClaimed, watchesCopyOnThisKey) = watchedKeys.withLock {
+            ($0.claimed.contains(keyCode), $0.copyHint.contains(keyCode))
+        }
+        guard isClaimed || watchesCopyOnThisKey else { return }
 
         // — La répétition automatique du système ————————————————————————
         //
@@ -450,7 +571,40 @@ final class HotkeyMonitor {
             return
         }
 
+        // Lu ici pour la même raison que le code de touche : `event` meurt avec
+        // le callback. C'est aussi ce qui rend le test du geste de copie
+        // possible sans rien envoyer au main actor.
         let flags = event.flags
+
+        // — L'indice de copie —————————————————————————————————————————
+        //
+        // **La référence est relevée ici et nulle part ailleurs.** Ce point du
+        // programme est le dernier instant où l'on sait que la copie n'a pas
+        // encore eu lieu : le tap est posé en `.headInsertEventTap`, donc avant
+        // que l'application de devant ne voie la frappe, et à plus forte raison
+        // avant qu'elle n'écrive. Reporter le relevé dans la tâche du main
+        // actor le ferait tomber après l'écriture une fois sur deux, et la
+        // machine conclurait « rien n'a bougé » — la copie serait perdue en
+        // silence, ce que son contrat dit en toutes lettres.
+        //
+        // Ce qu'on relève est la dernière valeur **publiée**, pas une lecture du
+        // presse-papiers : voir `observeCopies(changeCount:)`. Un verrou pris et
+        // rendu, aucun code étranger appelé, donc aucun moyen de bloquer le fil
+        // du tap — et un tap bloqué est un tap que macOS coupe.
+        //
+        // La répétition automatique est déjà écartée plus haut : tenir ⌘C ne
+        // produit qu'un indice.
+        if watchesCopyOnThisKey,
+           type == .keyDown,
+           CopyGesture.matches(keyCode: keyCode, flags: flags.rawValue),
+           let baseline = knownChangeCount.withLock({ $0 }) {
+            Task { @MainActor in self.onSignal?(.copyHint(changeCount: baseline)) }
+        }
+
+        // **La lettre nue s'arrête ici.** C et X ne sont surveillées que pour
+        // l'indice ; sans fonction liée à ce code, il n'y a rien à classer, et
+        // écrire de la prose ne doit pas créer une tâche par frappe.
+        guard isClaimed else { return }
 
         Task { @MainActor in
             self.classify(type: type, keyCode: keyCode, flags: flags)

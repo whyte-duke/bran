@@ -26,11 +26,25 @@ public enum GlobalTrigger: String, CaseIterable, Sendable, Codable {
     case dictation
     case snapshot
 
+    /// Le panneau d'historique du presse-papiers.
+    ///
+    /// **En dernier, et c'est la règle qui décide.** L'ordre de `allCases` est
+    /// l'ordre de l'arbitrage, et la doctrine de `ShortcutRouter` est qu'une
+    /// fonction occupée l'emporte : ouvrir le panneau pendant une dictée ne doit
+    /// rien faire. Placer le presse-papiers en tête ne l'aurait pas rendu
+    /// prioritaire au sens où l'on croit — l'arbitrage « qui est occupé »
+    /// n'utilise pas cet ordre-là —, mais aurait changé qui gagne quand deux
+    /// fonctions partagent une touche, c'est-à-dire un état que seul un fichier
+    /// de réglages écrit à la main produit. Rien à y gagner, une règle stable à
+    /// y perdre.
+    case clipboard
+
     /// Le nom seul, pour un titre ou une colonne. « Dictée ».
     public var label: String {
         switch self {
         case .dictation: "Dictée"
         case .snapshot: "Capture de texte"
+        case .clipboard: "Presse-papiers"
         }
     }
 
@@ -40,6 +54,7 @@ public enum GlobalTrigger: String, CaseIterable, Sendable, Codable {
         switch self {
         case .dictation: "la dictée"
         case .snapshot: "la capture de texte"
+        case .clipboard: "le presse-papiers"
         }
     }
 
@@ -47,13 +62,80 @@ public enum GlobalTrigger: String, CaseIterable, Sendable, Codable {
     ///
     /// Écrit et non dérivé de `definiteName` : la contraction « de le » → « du »
     /// ne se déduit pas d'une chaîne sans faire de la grammaire, et le jour où
-    /// un déclencheur masculin arrivera — « du presse-papiers » — la forme
+    /// un déclencheur masculin arriverait — « du presse-papiers » — la forme
     /// dérivée serait fausse. Trois chaînes par cas, une seule fois.
+    ///
+    /// **Ce jour est arrivé, et la prévision était juste** : `clipboard` rend
+    /// « du presse-papiers » quand la dérivation aurait écrit « de le
+    /// presse-papiers ». La phrase de `GlobalTriggerRow` — « est déjà le
+    /// raccourci du presse-papiers » — se lit donc sans retouche, et c'est la
+    /// seule chose que cette prévision avait à garantir.
     public var possessiveName: String {
         switch self {
         case .dictation: "de la dictée"
         case .snapshot: "de la capture de texte"
+        case .clipboard: "du presse-papiers"
         }
+    }
+}
+
+/// Le geste « je viens de copier », qui n'est pas un déclencheur.
+///
+/// **Pourquoi ce n'est pas un `GlobalTrigger`, et pourquoi la distinction est
+/// tout le sujet.** ⌘⇧V ouvre le panneau : c'est une fonction, elle se règle,
+/// elle s'arbitre, une dictée en cours la fait taire. ⌘C, lui, n'est *pas* une
+/// fonction de bran — c'est une frappe adressée à l'application de devant, qu'on
+/// se contente d'observer pour savoir qu'il faudra relever le presse-papiers.
+///
+/// Le faire passer par `Signal.triggerDown` l'aurait soumis à l'arbitrage, et
+/// l'arbitrage l'aurait perdu : copier pendant une dictée est très exactement le
+/// cas où l'on veut que la copie soit gardée — c'est ce qu'on collera après.
+/// Une fonction occupée fait taire *les autres fonctions*, pas l'observation du
+/// clavier.
+///
+/// La logique vit ici, dans la bibliothèque, pour la même raison que le reste de
+/// ce fichier : enfermée dans le callback du tap, elle n'aurait été testable par
+/// rien.
+public enum CopyGesture {
+
+    /// Les codes des touches à observer : C et X.
+    ///
+    /// X et pas seulement C : couper *est* une copie du point de vue du
+    /// presse-papiers, et l'oublier perdrait une entrée sur deux dans un
+    /// éditeur de texte.
+    ///
+    /// Pas ⌘⇧V ni ⌘V : coller ne change pas le presse-papiers. Pas non plus les
+    /// copies faites au menu ou à la souris — elles existent, elles ne
+    /// produisent aucune frappe, et c'est le sondeur du presse-papiers qui les
+    /// rattrape. L'indice clavier est l'accélérateur, pas la seule source.
+    public static let keyCodes: Set<UInt16> = [
+        8,  // C
+        7,  // X
+    ]
+
+    /// Le bit de Commande dans un masque `CGEventFlags`.
+    private static let command: UInt64 = 0x10_0000
+
+    /// Cette frappe ressemble-t-elle à une copie ?
+    ///
+    /// **Le test est « contient Commande », pas « égale Commande ».** ⌘⌥C copie
+    /// le chemin dans le Finder, ⌘⇧C copie le nom du fichier, ⌘⌥⇧C existe aussi,
+    /// et une application quelconque est libre d'en inventer une autre. Toutes
+    /// écrivent dans le presse-papiers. Exiger l'égalité stricte — ce que fait
+    /// `HotkeyMonitor.matches` pour un raccourci, à raison, parce qu'un
+    /// raccourci doit être exact — laisserait passer ces copies-là sans indice,
+    /// et l'entrée n'arriverait qu'au sondage suivant, ou pas du tout.
+    ///
+    /// Le faux positif que ça autorise est sans conséquence : un ⌘⌥C qui ne
+    /// copie rien produit un indice, la machine relève un compteur qui n'a pas
+    /// bougé et conclut « rien n'a été copié ». Le faux négatif, lui, perd une
+    /// copie pour de bon.
+    ///
+    /// - Parameters:
+    ///   - keyCode: le code de la touche frappée.
+    ///   - flags: le masque brut de `CGEventFlags`.
+    public static func matches(keyCode: UInt16, flags: UInt64) -> Bool {
+        keyCodes.contains(keyCode) && flags & command != 0
     }
 }
 
