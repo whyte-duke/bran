@@ -79,4 +79,35 @@ public struct HotkeyBinding: Codable, Equatable, Sendable {
         if modifiers != 0 { return true }
         return Self.forbiddenAlone.contains(keyCode) == false
     }
+
+    // MARK: - Le bit qui distingue la gauche de la droite
+
+    /// Le bit « périphérique » du masque de modificateurs qui correspond à cette
+    /// touche, ou `0` si ce n'est pas une touche modificatrice.
+    ///
+    /// **Pourquoi ces bits-là et pas `CGEventFlags.maskCommand`.** Le masque
+    /// *indépendant du périphérique* dit « une touche Command est enfoncée »
+    /// sans dire laquelle. Un raccourci sur ⌘ droite ne peut donc pas s'y fier :
+    /// tenir ⌘ gauche allumerait le même bit. Les bits gauche/droite ci-dessous
+    /// — les `NX_DEVICE…KEYMASK` de `IOLLEvent.h` — sont les seuls à répondre à
+    /// la question posée. Ils ne sont pas exposés par `CGEventFlags`, mais ils
+    /// sont stables depuis toujours et présents aussi bien dans les événements
+    /// que dans l'état du système (mesuré, voir `HotkeyMonitor.resyncFlags`).
+    ///
+    /// Vit ici, sur la liaison, et non dans `HotkeyMonitor` : c'est une
+    /// propriété de la touche, la seule chose qui la détermine est `keyCode`, et
+    /// enfermée dans une cible exécutable elle n'était vérifiable par rien.
+    public var deviceModifierBit: UInt64 {
+        switch keyCode {
+        case 54: 0x0000_0010  // ⌘ droite
+        case 55: 0x0000_0008  // ⌘ gauche
+        case 56: 0x0000_0002  // ⇧ gauche
+        case 60: 0x0000_0004  // ⇧ droite
+        case 58: 0x0000_0020  // ⌥ gauche
+        case 61: 0x0000_0040  // ⌥ droite
+        case 59: 0x0000_0001  // ⌃ gauche
+        case 62: 0x0000_2000  // ⌃ droite
+        default: 0
+        }
+    }
 }

@@ -9,7 +9,6 @@ import SwiftUI
 struct DictationSettingsSection: View {
     @Bindable var model: AppModel
 
-    @State private var isCapturingHotkey = false
     @State private var accessibilityRefused = false
     @State private var showsVocabulary = false
 
@@ -109,17 +108,13 @@ struct DictationSettingsSection: View {
 
     private var triggerRow: some View {
         VStack(alignment: .leading, spacing: Space.small) {
-            HStack {
-                Text("Raccourci")
-                Spacer()
-                HotkeyField(
-                    binding: Binding(
-                        get: { settings.trigger },
-                        set: { settings.trigger = $0; controller.applySettings() }
-                    ),
-                    isCapturing: $isCapturingHotkey
-                )
-            }
+            // **Cette ligne ne vérifiait rien.** Elle écrivait le raccourci
+            // directement, sans jamais demander si la capture de texte le
+            // tenait déjà : les deux fonctions se retrouvaient armées sur la
+            // même frappe, et `ShortcutRouter` en arbitrait une en silence.
+            // L'écran d'en face, lui, refusait le conflit depuis toujours.
+            // `GlobalTriggerRow` est le même code des deux côtés.
+            GlobalTriggerRow(model: model, trigger: .dictation)
 
             HStack {
                 Text("Annuler")
@@ -366,74 +361,6 @@ struct DictationSettingsSection: View {
             Task { @MainActor in NSApplication.shared.terminate(nil) }
         }
     }
-}
-
-/// Champ de capture d'un raccourci.
-///
-/// Écoute localement les `flagsChanged` et les `keyDown` : pas besoin de tap ni
-/// d'autorisation pour lire ce qui arrive à notre propre fenêtre.
-/// Le champ de saisie d'un raccourci global.
-///
-/// Partagé par la dictée et la capture de texte : deux implémentations
-/// divergeraient sur les touches refusées, et l'une des deux finirait par
-/// laisser passer Entrée.
-struct HotkeyField: View {
-    @Binding var binding: HotkeyBinding
-    @Binding var isCapturing: Bool
-
-    @State private var monitor: Any?
-
-    var body: some View {
-        Button {
-            isCapturing.toggle()
-            isCapturing ? startListening() : stopListening()
-        } label: {
-            Text(isCapturing ? "Appuyez sur une touche…" : binding.displayName)
-                .font(Type.code)
-                // TODO(design) : pas d'échelle de largeurs de composant. Cette
-                // largeur plancher empêche le bouton de sauter entre « ⌘⇧2 » et
-                // « Appuyez sur une touche… » ; elle est mesurée sur le texte.
-                .frame(minWidth: 130)
-        }
-        .buttonStyle(.bordered)
-        .tint(isCapturing ? .accentColor : nil)
-        .onDisappear(perform: stopListening)
-    }
-
-    private func startListening() {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
-            let captured = Self.interpret(event)
-            guard let captured, captured.isAcceptableAsTrigger else { return nil }
-            binding = captured
-            isCapturing = false
-            stopListening()
-            return nil
-        }
-    }
-
-    private func stopListening() {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil
-    }
-
-    private static func interpret(_ event: NSEvent) -> HotkeyBinding? {
-        if event.type == .flagsChanged {
-            // Un `flagsChanged` où plus aucun modificateur n'est actif est un
-            // relâchement : on l'ignore, sinon relâcher la touche l'écraserait
-            // par elle-même.
-            guard event.modifierFlags.rawValue & Self.significant != 0 else { return nil }
-            return HotkeyBinding(keyCode: event.keyCode, isModifierOnly: true)
-        }
-
-        return HotkeyBinding(
-            keyCode: event.keyCode,
-            modifiers: UInt64(event.modifierFlags.rawValue) & Self.significantCG,
-            isModifierOnly: false
-        )
-    }
-
-    private static let significant = NSEvent.ModifierFlags([.command, .option, .control, .shift]).rawValue
-    private static let significantCG: UInt64 = 0x1E_0000
 }
 
 /// L'éditeur du dictionnaire.

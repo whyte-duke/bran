@@ -38,20 +38,14 @@ import Synchronization
 @MainActor
 final class HotkeyMonitor {
 
-    /// Ce qu'un raccourci déclenche. L'ordre de `allCases` fixe la priorité
-    /// quand deux fonctions partagent la même touche — l'interface empêche ce
-    /// cas, mais un fichier de réglages écrit à la main peut le produire.
-    enum Action: String, CaseIterable, Sendable, Codable {
-        case dictation
-        case snapshot
-
-        var label: String {
-            switch self {
-            case .dictation: "Dictée"
-            case .snapshot: "Capture de texte"
-            }
-        }
-    }
+    /// Ce qu'un raccourci déclenche.
+    ///
+    /// L'énumération elle-même est `GlobalTrigger`, dans `BranSpeech` : la liste
+    /// des fonctions déclenchables et l'arbitrage entre elles sont de la logique
+    /// pure, et enfermées ici elles n'étaient testables par rien. L'alias existe
+    /// pour que le vocabulaire du guet reste le sien — un `HotkeyMonitor` parle
+    /// d'actions — sans dupliquer la liste.
+    typealias Action = GlobalTrigger
 
     enum Signal: Sendable {
         case triggerDown(Action)
@@ -61,12 +55,42 @@ final class HotkeyMonitor {
 
     /// Les touches surveillées, par fonction. Une fonction absente n'est pas
     /// surveillée du tout.
-    private(set) var bindings: [Action: HotkeyBinding] = [:] {
-        didSet { refreshWatchedKeys() }
+    ///
+    /// Cette table-ci ne contient que les fonctions **actives**. Celle des
+    /// réglages — `GlobalTriggerRegistry` — contient tout ce qui est persisté,
+    /// active ou non, et c'est elle que l'interface interroge.
+    ///
+    /// Le `didSet` fait trois choses et non une : réviser le filtre du callback,
+    /// **relâcher les fonctions dont la touche vient de changer sous les
+    /// doigts** — voir `releaseTriggersLosingTheirKey(since:)` —, puis remettre
+    /// le masque de modificateurs à l'heure. Ces effets sont ici, sur la
+    /// propriété, et non dans `bind` : c'est le seul endroit par lequel toute
+    /// écriture de la table passe forcément.
+    ///
+    /// **L'ordre des trois compte.** `resyncFlags` protège les bits des
+    /// fonctions encore dans `held` — c'est tout l'objet de
+    /// `TriggerTable.resyncedFlags(from:held:)`. Le faire avant le relâchement
+    /// protégerait justement celles qui viennent de perdre leur touche : leur
+    /// bit resterait figé sur « enfoncé » dans `lastFlags`, et on aurait
+    /// reconstruit à la main le défaut que la remise à l'heure existe pour
+    /// corriger. Après le relâchement, `held` ne contient plus que des fonctions
+    /// réellement tenues, sur des touches réellement surveillées.
+    private(set) var bindings = TriggerTable() {
+        didSet {
+            refreshWatchedKeys()
+            releaseTriggersLosingTheirKey(since: oldValue)
+            resyncFlags()
+        }
     }
 
+    /// Déplacer l'annulation ne relâche rien — l'annulation n'entre jamais dans
+    /// `held` — mais change bien le filtre, donc les touches dont `lastFlags`
+    /// cessera d'être tenu à jour.
     var cancelKey: HotkeyBinding = .escape {
-        didSet { refreshWatchedKeys() }
+        didSet {
+            refreshWatchedKeys()
+            resyncFlags()
+        }
     }
 
     /// Les codes de touche qui méritent qu'on regarde de plus près, lisibles
@@ -84,9 +108,117 @@ final class HotkeyMonitor {
     private let watchedKeys = Mutex<Set<UInt16>>([HotkeyBinding.escape.keyCode])
 
     private func refreshWatchedKeys() {
-        var codes = Set(bindings.values.map(\.keyCode))
+        var codes = bindings.keyCodes
         codes.insert(cancelKey.keyCode)
         watchedKeys.withLock { $0 = codes }
+    }
+
+    /// Remet `lastFlags` sur l'état réel du clavier.
+    ///
+    /// **Pourquoi c'est indispensable dès que la liste des touches surveillées
+    /// change.** `lastFlags` n'est écrit que par `classify`, donc seulement pour
+    /// les touches qui passent le filtre. Une touche qui cesse d'être surveillée
+    /// fige son bit sur la dernière valeur vue — et un bit figé sur « enfoncé »
+    /// rend le prochain appui *invisible* : `isDown != wasDown` est faux,
+    /// `classify` passe son chemin, et la fonction ne répond qu'au deuxième
+    /// appui. C'est le même défaut que celui du relâchement perdu, vu de
+    /// l'autre côté : couper la dictée en tenant ⌘ droite, la rallumer, et le
+    /// premier appui ne fait rien.
+    ///
+    /// `CGEventSource.flagsState` demande l'état courant au système au lieu de
+    /// le déduire. Écarté : remettre `lastFlags` à `[]`, qui fabriquerait un
+    /// faux appui à la première frappe si la touche est réellement tenue pendant
+    /// le réglage.
+    ///
+    /// ## Pourquoi `.hidSystemState` et pas les deux autres
+    ///
+    /// Mesuré sur macOS 26.5 (Apple Silicon) avec une sonde jetable, en postant
+    /// des `flagsChanged` au niveau pilote et au niveau session puis en lisant
+    /// les trois identifiants. Trois choses, dont deux ne s'inventaient pas :
+    ///
+    /// - **les bits gauche/droite y sont**, ce dont dépend tout
+    ///   `deviceModifierBit`. ⌘ droite tenue donne `0x0000_0000_2010_0110` —
+    ///   `maskCommand`, `nonCoalesced`, et `0x10` qui est le bit périphérique de
+    ///   ⌘ droite. De même `0x…0108` pour ⌘ gauche, `0x…0102` pour ⇧ gauche,
+    ///   `0x…0120` pour ⌥ gauche, `0x…0101` pour ⌃ gauche. La crainte d'un
+    ///   masque qui ne porterait que `maskCommand` ne se vérifie pas ;
+    /// - **`.combinedSessionState` voit le synthétique de session, pas
+    ///   `.hidSystemState`.** Un `flagsChanged` ⌘ gauche posté sur
+    ///   `.cgSessionEventTap` — ce que fait n'importe quelle application ayant
+    ///   l'Accessibilité — donne `0x…2010_0108` en état combiné, avec le bit
+    ///   périphérique, pendant que l'état HID reste à `0x0` d'un bout à l'autre.
+    ///   L'état combiné retarde en plus d'un échantillon (~80 ms). C'est
+    ///   exactement la fragilité que l'on nous signalait, et elle est réelle :
+    ///   un correcteur orthographique ou un automatisme tiers suffirait à faire
+    ///   croire à bran qu'un modificateur est tenu ;
+    /// - **`.privateState` est à ne jamais appeler.**
+    ///   `CGEventSource.flagsState(.privateState)` **ne rend pas la main** :
+    ///   interblocage dans SkyLight (`CGSEventSourceForID` → `std::mutex::lock`).
+    ///   Constaté trois fois sur trois, processus tué au bout de six secondes.
+    ///
+    /// `.hidSystemState` est donc le seul des trois qui décrive un état
+    /// *physique*, et c'est déjà celui que `Paster.sendCommandV` et
+    /// `WatchController` emploient.
+    ///
+    /// ## Ce que le choix de l'identifiant ne règle pas
+    ///
+    /// Le ⌘V que bran synthétise est posté sur `.cghidEventTap` — délibérément,
+    /// pour que toutes les applications le voient. Il entre donc dans l'état HID
+    /// comme le ferait du vrai matériel, et les deux identifiants sont pollués
+    /// de la même façon : mesuré, l'état reste à `0x0000_0000_2010_0000` —
+    /// `maskCommand` **sans aucun bit périphérique** — pendant au moins quinze
+    /// secondes après le collage, jusqu'au prochain événement quel qu'il soit.
+    /// Pire, avec ⌘ droite réellement tenue, l'état passe de `0x…2010_0110` à
+    /// `0x…2010_0000` : **le faux ⌘V efface le bit de la touche tenue.**
+    ///
+    /// Le `maskCommand` parasite est inoffensif — rien ne lit `lastFlags`
+    /// autrement que bit périphérique par bit périphérique. L'effacement, lui,
+    /// ferait perdre un relâchement, et c'est `TriggerTable.resyncedFlags` qui
+    /// le ferme : les bits des fonctions encore tenues ne sont jamais retirés.
+    private func resyncFlags() {
+        let systemFlags = CGEventSource.flagsState(.hidSystemState).rawValue
+        lastFlags = CGEventFlags(
+            rawValue: bindings.resyncedFlags(from: systemFlags, held: held)
+        )
+    }
+
+    /// Rend son relâchement à toute fonction dont la touche a changé pendant
+    /// qu'elle était tenue.
+    ///
+    /// **Ce qui se passait sans ça.** `bind` ne nettoyait `held` que sur un
+    /// `nil`, et sans jamais signaler quoi que ce soit. Deux trous, pas un :
+    ///
+    /// - **rebrancher** la dictée pendant que l'ancienne touche est enfoncée la
+    ///   laissait dans `held`, et le `keyUp` de cette touche — désormais hors du
+    ///   filtre `watchedKeys` — n'arrivait jamais jusqu'à `classify`. Une dictée
+    ///   en mode « maintenir » restait en capture indéfiniment ;
+    /// - **débrancher** la nettoyait bien de `held`, mais en silence : personne
+    ///   ne recevait le `.triggerUp`, et la capture en cours restait ouverte
+    ///   exactement de la même façon. Le nettoyage traitait le symptôme visible
+    ///   dans le débogueur, pas celui que l'utilisateur constate.
+    ///
+    /// On émet donc `.triggerUp`, et pas `.cancel` : c'est très exactement le
+    /// signal qu'aurait produit le relâchement physique de la touche qu'on vient
+    /// de retirer. L'utilisateur a parlé ; jeter ce qu'il a dit parce qu'il a
+    /// touché à ses réglages serait un choix, et ce n'est pas celui-là. Rien à
+    /// faire du côté de `ShortcutRouter` : c'est un signal qu'il sait déjà
+    /// router.
+    ///
+    /// `cancelKey` n'a pas besoin du même traitement : l'annulation ne s'observe
+    /// qu'au `keyDown`, n'entre jamais dans `held` et ne laisse donc aucun état
+    /// à libérer quand on la déplace.
+    private func releaseTriggersLosingTheirKey(since previous: TriggerTable) {
+        let released = bindings.triggersLosingTheirKey(since: previous, among: held)
+        guard released.isEmpty == false else { return }
+
+        // Retirées de `held` **avant** d'être signalées. Un `onSignal` peut
+        // rappeler `bind` — l'écran des réglages est à un clic, et
+        // `applySettings` rebranche tout —, ce qui rentrerait une seconde fois
+        // dans le `didSet` de `bindings`. Dans cet ordre, la réentrance trouve
+        // un ensemble déjà vidé et s'arrête ; dans l'autre, elle n'a pas de
+        // fond.
+        held.subtract(released)
+        for action in released { onSignal?(.triggerUp(action)) }
     }
 
     /// Appelé sur la boucle principale. Doit rester bref.
@@ -107,23 +239,24 @@ final class HotkeyMonitor {
     // MARK: - Liaisons
 
     /// Associe une touche à une fonction. `nil` retire la surveillance.
+    ///
+    /// Si la fonction était tenue au moment du changement, son relâchement est
+    /// signalé — voir `releaseTriggersLosingTheirKey(since:)`. Rien à écrire
+    /// ici : le `didSet` de `bindings` s'en charge, quel que soit le chemin par
+    /// lequel la table a changé.
     func bind(_ action: Action, to binding: HotkeyBinding?) {
-        if let binding {
-            bindings[action] = binding
-        } else {
-            bindings.removeValue(forKey: action)
-            held.remove(action)
-        }
+        bindings[action] = binding
     }
 
-    /// Les fonctions qui partagent la même touche qu'`action`. L'interface s'en
-    /// sert pour refuser un réglage avant qu'il ne casse quelque chose, plutôt
-    /// que de laisser deux fonctions se déclencher ensemble.
+    /// Les fonctions **actives** qui partagent la même touche qu'`action`.
+    ///
+    /// Reste ici pour le diagnostic — un journal, un test manuel — mais
+    /// l'interface ne s'en sert pas : elle passe par
+    /// `GlobalTriggerRegistry.conflicts`, qui voit aussi les fonctions
+    /// désactivées. Deux réponses différentes à la même question, chacune juste
+    /// pour son appelant ; l'algorithme, lui, est unique — `TriggerTable`.
     func conflicts(for binding: HotkeyBinding, excluding action: Action) -> [Action] {
-        bindings.compactMap { key, value in
-            guard key != action, value == binding else { return nil }
-            return key
-        }
+        bindings.conflicts(for: binding, excluding: action)
     }
 
     // MARK: - Autorisation
@@ -183,9 +316,20 @@ final class HotkeyMonitor {
         tap = port
         source = runLoopSource
         isInstalled = true
+        // Le guet peut très bien s'armer alors qu'un modificateur est déjà
+        // enfoncé — on accorde l'Accessibilité, on revient à l'application avec
+        // ⌘⇥. Sans cette remise à l'heure, `lastFlags` prétend que rien n'est
+        // tenu et le premier relâchement se lit comme un appui.
+        resyncFlags()
         return true
     }
 
+    /// Retire le tap. **N'annonce rien** : les fonctions encore tenues sont
+    /// oubliées sans `.triggerUp`, comme au retrait d'une liaison avant
+    /// correction. Ce n'est pas un choix documenté, c'est un cas qui n'arrive
+    /// pas encore — rien n'appelle `uninstall()` aujourd'hui. Le jour où
+    /// quelqu'un l'appellera avec une dictée en cours, il faudra passer par
+    /// `releaseTriggersLosingTheirKey` ou son équivalent.
     func uninstall() {
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
@@ -277,26 +421,25 @@ final class HotkeyMonitor {
         // et le déclenchement indiscernables.
         if type == .keyDown,
            matches(cancelKey, keyCode: keyCode, flags: flags),
-           bindings.values.contains(cancelKey) == false {
+           bindings.isTaken(cancelKey) == false {
             onSignal?(.cancel)
             return
         }
 
         // — Fonctions ——————————————————————————————————————————————
         //
-        // Ordre stable via `allCases` : deux fonctions sur la même touche ne
-        // doivent pas se déclencher dans un ordre qui change d'un lancement à
-        // l'autre.
-        for action in Action.allCases {
-            guard let binding = bindings[action] else { continue }
-
+        // Ordre stable : `assigned` rend les liaisons dans l'ordre de
+        // `allCases`, pas dans celui d'un dictionnaire. Deux fonctions sur la
+        // même touche ne doivent pas se déclencher dans un ordre qui change
+        // d'un lancement à l'autre.
+        for (action, binding) in bindings.assigned {
             if binding.isModifierOnly {
                 guard type == .flagsChanged, keyCode == binding.keyCode else { continue }
 
                 // Un `flagsChanged` ne dit pas s'il s'agit d'un appui ou d'un
                 // relâchement : il faut regarder si le bit correspondant vient
                 // d'apparaître ou de disparaître.
-                let bit = Self.deviceBit(for: binding.keyCode)
+                let bit = binding.deviceModifierBit
                 let isDown = (flags.rawValue & bit) != 0
                 let wasDown = (lastFlags.rawValue & bit) != 0
                 guard isDown != wasDown else { continue }
@@ -338,20 +481,4 @@ final class HotkeyMonitor {
         | CGEventFlags.maskAlternate.rawValue
         | CGEventFlags.maskControl.rawValue
         | CGEventFlags.maskShift.rawValue
-
-    /// Les bits « périphérique » qui distinguent gauche et droite. Ils ne sont
-    /// pas exposés par `CGEventFlags`, mais ils sont stables depuis toujours.
-    private static func deviceBit(for keyCode: UInt16) -> UInt64 {
-        switch keyCode {
-        case 54: 0x0000_0010  // ⌘ droite
-        case 55: 0x0000_0008  // ⌘ gauche
-        case 56: 0x0000_0002  // ⇧ gauche
-        case 60: 0x0000_0004  // ⇧ droite
-        case 58: 0x0000_0020  // ⌥ gauche
-        case 61: 0x0000_0040  // ⌥ droite
-        case 59: 0x0000_0001  // ⌃ gauche
-        case 62: 0x0000_2000  // ⌃ droite
-        default: 0
-        }
-    }
 }
