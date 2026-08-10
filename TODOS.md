@@ -316,7 +316,25 @@ setting today.
 
 ---
 
-## Extract the shared row from Dictées and Captures
+## Extract the shared *row* from Dictées and Captures
+
+> **Revised 2026-08-10 by the clipboard eng review.** This entry used to cover
+> "the duplication between Dictées and Captures" as one thing. It is two things,
+> and only one of them is still open.
+>
+> The **store** half is being closed: `SnapshotStore.swift` (250 lines) and
+> `DictationStore.swift` (280 lines) are the same store copied — sixteen methods,
+> same order, same names modulo the payload word. That is 530 duplicated lines,
+> five times heavier than the row, and nobody had noticed it. The clipboard work
+> extracts a generic `ContentStore` into `BranCore`, which also gives those lines
+> their first test: `grep -rln "SnapshotStore|DictationStore|RecordingStore" Tests/`
+> returns nothing today, because `BranApp` is an `.executableTarget` with no test
+> target (`Package.swift:53`, `:80-83`).
+>
+> The **row** half below is unchanged and still open. Note that the clipboard row
+> may not be the third caller this entry was waiting for: it carries a thumbnail
+> and a source app, where a dictation carries a duration and a word count. Decide
+> on the evidence, not on the count of callers.
 
 **What:** the two panes carry the same figures — a card header, an action strip,
 a footer of facts — written twice, with the same unnamed sub-scale of spacings
@@ -345,3 +363,78 @@ three is where the shape becomes obvious.
 **Where to start:** `Sources/BranApp/Dictation/DictationPane.swift:234` and
 `Sources/BranApp/Snapshot/SnapshotPane.swift:210` — the same `VStack(spacing: 9)`
 in both, with the same children.
+
+---
+
+## Decide whether RecordingStore joins the generic ContentStore
+
+**What:** `RecordingStore.swift` is the fourth `@MainActor` store, and the
+clipboard eng review of 2026-08-10 deliberately left it **outside** the generic
+`ContentStore` extracted from `SnapshotStore` and `DictationStore`. Write down
+the condition under which it should join, so the next session does not redo the
+reasoning from scratch.
+
+**Why it was left out.** It is the same *idea* — a folder is the library, a
+`.json` sidecar next to each file — but not the same *shape*:
+
+| | Snapshot / Dictation / Clipboard | RecordingStore |
+|---|---|---|
+| retention | a policy, purges the blob and keeps the text | none — a recording is never auto-deleted |
+| identity | `UUID` in the entry | `UUID` in the *file name*, parsed back |
+| scan | list the folder, read sidecars | `nonisolated static func scan` (`:62`), async, also probes durations with AVFoundation |
+| lifecycle | save once, mutate rarely | `beginSession` → `completeSession` → `completeProcessing`, a real state machine |
+
+A generic that swallowed all four would need retention to be optional, identity
+to be pluggable, and scanning to be overridable. Three escape hatches for one
+caller is how a generic becomes worse than the duplication it replaced.
+
+**Pros of doing it later:** one store instead of two shapes; `RecordingStore`
+gets the tests it has never had.
+**Cons:** the recording lifecycle is the only path in bran where losing data
+means losing a client meeting. It is the worst possible place to discover that a
+generic leaked.
+
+**The condition to revisit:** if a *fifth* store appears and it looks like
+`RecordingStore` rather than like `SnapshotStore`, then the recording shape is a
+real second family and deserves its own generic. Until then, one honest copy.
+
+**Where to start:** `Sources/BranCore/ContentStore.swift` once it exists, and
+`Sources/BranApp/RecordingStore.swift:62` for the scan that would have to become
+a customisation point.
+
+---
+
+## Move the content stores off the MainActor
+
+**What:** `SnapshotStore`, `DictationStore` and the extracted `ContentStore` are
+`@MainActor` (`SnapshotStore.swift:21`, `DictationStore.swift:20`). Make the
+generic an `actor` and migrate all callers.
+
+**Why:** this is not a theoretical improvement, it is an existing defect. A PNG
+is written on the main thread at `SnapshotStore.swift:236` (`writePNG`) and a WAV
+at `DictationStore.swift:221` (`writeWave`). A full-screen capture at 2880×2416
+measures 150–270 KB as a text region but a whole screen is megabytes, and the
+interface has nothing to do during that write except wait. Nobody has complained,
+which most likely means nobody has looked — there is no measurement of main-thread
+stalls anywhere in the project.
+
+**Decided against, for now (2026-08-10, D4 of the clipboard eng review):** the
+clipboard work already carries one structural refactor, the `ContentStore`
+extraction. Stacking a concurrency migration on top breaks the rule the whole
+plan is built on — never a structural and a behavioural change at the same time.
+The clipboard therefore stays `@MainActor` like its siblings and offloads only
+its heavy writes through `nonisolated static` funcs, which is the pattern already
+in place at `RecordingStore.swift:62`.
+
+**Pros:** no disk write can ever stall the interface again, for any of the three
+libraries; the pattern stops being decided per call site.
+**Cons:** a concurrency refactor on code that has no tests until the
+`ContentStore` extraction gives it some. Doing it before those tests exist means
+changing untested behaviour twice.
+
+**Depends on:** the `ContentStore` extraction landing first, with its regression
+tests. That is what makes this migration verifiable instead of hopeful.
+
+**Where to start:** measure before deciding. A main-thread stall has no number in
+this project yet — take one with `ResourceProbe` or Instruments on a full-screen
+capture, and only migrate if the number is visible to a human.
