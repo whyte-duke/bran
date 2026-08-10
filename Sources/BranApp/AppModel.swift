@@ -37,6 +37,17 @@ public final class AppModel {
     let snapshotSettings = SnapshotSettings()
     let snapshot: SnapshotController
 
+    /// L'historique du presse-papiers.
+    ///
+    /// **Pas de `ClipboardSettings` à côté, contrairement aux deux autres, et
+    /// c'est voulu tant qu'il n'y a rien à régler.** La fonction arrive dans
+    /// l'ordre inverse de ses aînées — le raccourci d'abord, l'écran de réglages
+    /// ensuite — et sa liaison vit donc dans `GlobalTriggerRegistry`, qui la
+    /// détient déjà pour la détection de conflits. Inventer un objet de réglages
+    /// vide juste pour la symétrie ferait un fichier de plus qui ne réglerait
+    /// rien.
+    let clipboard: ClipboardController
+
     /// La veille des sessions parallèles. Même autonomie encore : son propre
     /// résolveur, son propre journal, ses propres réglages.
     ///
@@ -198,6 +209,22 @@ public final class AppModel {
         self.watch = WatchController(settings: watchSettings, store: watchStore)
         self.week = WeekLoader(folder: { watchStore.folder })
 
+        self.clipboard = ClipboardController(
+            store: ClipboardStore(root: { [storage] in storage.root }),
+            binding: GlobalTriggerRegistry.clipboardBinding
+        )
+
+        // **Les deux coutures que le guet avait laissées ouvertes.** L'indice de
+        // copie est relayé sans arbitrage — une copie faite pendant une dictée
+        // est précisément celle qu'on voudra coller à la fin — tandis que ⌘⇧V
+        // passe par l'arbitrage comme les deux autres fonctions.
+        shortcuts.onCopyHint = { [weak self] changeCount in
+            self?.clipboard.copyHinted(changeCount: changeCount)
+        }
+        shortcuts.openClipboardPanel = { [weak self] in
+            self?.clipboard.openRequested()
+        }
+
         Task { [weak self, capture] in
             for await reason in capture.failures {
                 guard let self else { return }
@@ -269,6 +296,7 @@ public final class AppModel {
         startWatch()
         startAwake()
         startMeter()
+        clipboard.start(monitor: shortcuts.monitor)
 
         // La surveillance est permanente. Il n'y a pas de raison de la
         // suspendre : elle ne fait qu'observer des titres de fenêtres, et une

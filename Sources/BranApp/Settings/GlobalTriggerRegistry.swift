@@ -173,15 +173,13 @@ enum GlobalTriggerRegistry {
             Entry(
                 trigger: .clipboard,
                 settings: clipboardBinding,
-                // Rien à réarmer : personne n'installe encore cette liaison dans
-                // le guet, parce que rien n'ouvre encore de panneau. Le jour où
-                // le contrôleur arrive, cette fermeture appellera son
-                // `applySettings()`, comme la dictée. Une fermeture vide plutôt
-                // qu'un `Entry` optionnel : la détection de conflits, elle, doit
-                // déjà voir ⌘⇧V — sinon on laisserait quelqu'un le donner à la
-                // capture aujourd'hui et découvrir le recouvrement le jour de la
-                // livraison.
-                apply: {}
+                // Le contrôleur est arrivé, et la fermeture vide avec lui :
+                // c'est lui qui inscrit la liaison dans `HotkeyMonitor.bindings`,
+                // parce que rien ne le fait tout seul — `apply` réarme, il
+                // n'enregistre pas. Sans cet appel, changer le raccourci dans les
+                // réglages l'écrirait bien sur le disque et ne changerait rien au
+                // clavier jusqu'au lancement suivant.
+                apply: { model.clipboard.applySettings() }
             )
         }
     }
@@ -194,7 +192,7 @@ enum GlobalTriggerRegistry {
     /// copie, écrite dans `UserDefaults` comme les deux autres, sous une clé du
     /// même format. La désynchronisation que le registre sans état existe pour
     /// éviter demanderait deux détenteurs de la même valeur ; il n'y en a qu'un.
-    private static let clipboardBinding = StandaloneTriggerBinding(
+    static let clipboardBinding = StandaloneTriggerBinding(
         key: "bran.clipboard.trigger",
         default: .clipboardPanel
     )
