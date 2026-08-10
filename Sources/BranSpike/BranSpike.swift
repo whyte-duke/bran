@@ -30,6 +30,15 @@ struct BranSpike {
                     ticks: ticks
                 ).run()
 
+            case "pasteboard":
+                let mode = PasteboardProbe.Mode(rawValue: value(of: "--mode", in: arguments) ?? "") ?? .watch
+                let interval = Double(value(of: "--interval", in: arguments) ?? "") ?? 0.1
+                try await PasteboardProbe(
+                    mode: mode,
+                    interval: .seconds(interval),
+                    force: arguments.contains("--force")
+                ).run()
+
             case "record":
                 let duration = Double(value(of: "--duration", in: arguments) ?? "") ?? 30
                 let output = value(of: "--output", in: arguments).map(URL.init(fileURLWithPath:))
@@ -99,6 +108,29 @@ struct BranSpike {
                 watch      La vraie mesure, sur une journée. Alertes annotables,
                            plus lecture de ~/.claude/projects (trois champs,
                            jamais de contenu).
+
+          pasteboard [--mode watch|access|cost] [--interval 0.1] [--force]
+              Mesure le presse-papiers sans jamais l'écrire et sans jamais
+              imprimer son contenu. Trois modes :
+
+                watch   La vraie mesure, à laisser tourner une journée. Une
+                        ligne par changement — types dans l'ordre, items,
+                        marqueurs, application source — puis un
+                        re-échantillonnage à +40, +120, +300 et +1000 ms. Un
+                        `clearContents` compte pour 1 et les `setData` qui
+                        suivent pour 0 : c'est ce mode qui dit combien
+                        d'applications publient un presse-papiers VIDE au
+                        compte N avant de le remplir, et combien de temps il
+                        faut attendre avant de lire.
+                access  L'état de `accessBehavior` (macOS 15.4), avant et après
+                        une lecture unique. À lire comme une base de référence
+                        et rien de plus : une ligne de commande hérite de
+                        l'autorisation du Terminal, pas de celle de bran.app.
+                cost    Le prix des octets, type par type. Exige --force, parce
+                        que c'est le seul mode qui appelle `data(forType:)`,
+                        donc le seul qui peut déclencher l'alerte d'accès et
+                        obliger l'application source à rendre un TIFF de
+                        200 Mo.
 
           record [--duration 30] [--scale 1] [--codec h264|hevc] [--output <chemin.mp4>]
               Enregistre l'écran + l'audio système + le micro via SCRecordingOutput
