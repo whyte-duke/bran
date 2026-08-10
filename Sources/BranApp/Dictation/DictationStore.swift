@@ -1,16 +1,37 @@
 import AVFoundation
+import BranCore
 import BranSpeech
 import Foundation
 import Observation
 
+// MARK: - Conformités
+
+/// Une dictée se range comme n'importe quel contenu : une identité, une date,
+/// un fichier lourd voisin. Le seul écart est le nom du champ —
+/// `audioFileName` se lit mieux que `blobFileName` partout ailleurs dans
+/// l'application, et c'est le nom que portent les fichiers déjà écrits.
+///
+/// La conformité est déclarée ici, et pas dans `BranSpeech`, parce que `BranApp`
+/// est le seul module d'où `BranCore` et `BranSpeech` se voient tous les deux.
+extension TranscriptEntry: ContentEntry {
+    public var blobFileName: String? {
+        get { audioFileName }
+        set { audioFileName = newValue }
+    }
+}
+
+/// `RetentionPolicy` satisfait déjà le protocole mot pour mot : elle n'a rien à
+/// apprendre, et elle reste dans `BranSpeech` avec ses neuf tests.
+extension RetentionPolicy: ContentRetentionPolicy {}
+
+// MARK: - Le store
+
 /// L'historique des dictées.
 ///
-/// Même parti pris que `RecordingStore` : **le dossier est la source de
-/// vérité**. Pas de base de données à côté du disque — deux sources de vérité
-/// divergent toujours, et c'est l'utilisateur qui arbitre au pire moment. Ici
-/// l'utilisateur peut supprimer un `.wav` dans le Finder ; au prochain scan,
-/// l'entrée existe toujours mais devient non-réessayable. C'est exactement le
-/// comportement souhaité.
+/// Une coquille au-dessus de `ContentStore` : tout ce qui est commun aux trois
+/// bibliothèques — balayage du dossier, sidecars, purge, comptage des octets —
+/// vit dans `BranCore`, où il est enfin testable. Ne reste ici que ce qui est
+/// propre à de l'audio : l'écriture d'un `.wav` et sa relecture.
 ///
 /// ```
 /// ~/…/bran/Dictées/
@@ -21,121 +42,73 @@ import Observation
 @Observable
 final class DictationStore {
 
-    private(set) var entries: [TranscriptEntry] = []
-    private(set) var problem: String?
+    private let store: ContentStore<TranscriptEntry>
+
+    init(root: @escaping @MainActor () -> URL, retention: RetentionPolicy = .default) {
+        self.store = ContentStore(
+            root: root,
+            shape: ContentShape(
+                folderName: "Dictées",
+                blobExtension: "wav",
+                // L'audio part, le texte reste. Réessayer et purger sont
+                // couplés : au huitième jour le bouton « réessayer » doit être
+                // désactivé avec sa raison, pas échouer.
+                purge: .blobOnly,
+                inaccessibleFolderMessage: "Dossier des dictées inaccessible",
+                // Silence délibéré, à la différence des captures : l'audio est
+                // un confort, le texte est déjà là, et une bannière d'erreur
+                // après une dictée réussie ferait douter d'une transcription qui
+                // n'a pourtant rien perdu.
+                blobFailureMessage: nil
+            ),
+            retention: retention
+        )
+    }
+
+    var entries: [TranscriptEntry] { store.entries }
+    var problem: String? { store.problem }
 
     /// Octets occupés par l'audio conservé. Affiché dans les réglages : une
     /// rétention se règle mieux quand on voit ce qu'elle coûte.
-    private(set) var audioBytes: Int64 = 0
+    var audioBytes: Int64 { store.blobBytes }
 
-    /// Le dossier suit celui des enregistrements : changer la destination dans
-    /// les réglages déplace les deux d'un coup. Une fermeture plutôt qu'une
-    /// `URL` figée, sinon le store garderait l'ancien dossier jusqu'au
-    /// prochain lancement.
-    private let root: @MainActor () -> URL
-    private var retention: RetentionPolicy
-
-    init(root: @escaping @MainActor () -> URL, retention: RetentionPolicy = .default) {
-        self.root = root
-        self.retention = retention
-    }
-
-    var folder: URL {
-        root().appending(path: "Dictées", directoryHint: .isDirectory)
-    }
+    var folder: URL { store.folder }
 
     func setRetention(_ policy: RetentionPolicy) {
-        retention = policy
-        Task { await purgeExpiredAudio() }
+        store.setRetention(policy)
     }
 
     // MARK: - Lecture
 
     func reload() async {
-        do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let files = try FileManager.default.contentsOfDirectory(
-                at: folder,
-                includingPropertiesForKeys: [.fileSizeKey],
-                options: [.skipsHiddenFiles]
-            )
-
-            let decoder = Self.decoder
-            var found: [TranscriptEntry] = []
-            var bytes: Int64 = 0
-
-            for url in files {
-                if url.pathExtension == "json",
-                   let data = try? Data(contentsOf: url),
-                   var entry = try? decoder.decode(TranscriptEntry.self, from: data) {
-
-                    // Un `.wav` supprimé à la main dans le Finder doit rendre
-                    // l'entrée non-réessayable, pas planter au clic.
-                    if let name = entry.audioFileName,
-                       FileManager.default.fileExists(atPath: folder.appending(path: name).path(percentEncoded: false)) == false {
-                        entry.audioFileName = nil
-                    }
-                    found.append(entry)
-                } else if url.pathExtension == "wav" {
-                    bytes += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-                }
-            }
-
-            entries = found.sorted { $0.createdAt > $1.createdAt }
-            audioBytes = bytes
-            problem = nil
-        } catch {
-            problem = "Dossier des dictées inaccessible : \(error.localizedDescription)"
-        }
+        await store.reload()
     }
 
     // MARK: - Écriture
 
     /// Écrit l'audio puis le sidecar, dans cet ordre.
     ///
-    /// L'ordre compte : un `.json` qui référence un `.wav` inexistant serait
-    /// une entrée qui promet un réessai impossible. L'inverse — un `.wav`
-    /// orphelin — se nettoie tout seul à la purge.
+    /// Un tampon vide n'est pas une erreur : c'est une dictée sans son, et elle
+    /// s'enregistre quand même — le texte est l'essentiel.
     func save(_ entry: TranscriptEntry, samples: [Float]?) async {
-        var stored = entry
-
-        if let samples, samples.isEmpty == false {
-            let name = "\(Self.stamp(entry.createdAt))-\(entry.id.uuidString).wav"
-            do {
-                try Self.writeWave(samples, to: folder.appending(path: name))
-                stored.audioFileName = name
-            } catch {
-                // L'audio est un confort ; le texte est l'essentiel. On garde
-                // l'entrée sans son audio plutôt que de tout perdre.
-                stored.audioFileName = nil
-            }
+        guard let samples, samples.isEmpty == false else {
+            await store.save(entry)
+            return
         }
-
-        write(stored)
-        entries.insert(stored, at: 0)
-        await refreshAudioBytes()
+        await store.save(entry) { try Self.writeWave(samples, to: $0) }
     }
 
-    /// Modifie une entrée en relisant d'abord le disque, comme `RecordingStore`.
+    /// Modifie une entrée en réécrivant son sidecar.
     func mutate(_ id: UUID, _ change: (inout TranscriptEntry) -> Void) {
-        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
-        var entry = entries[index]
-        change(&entry)
-        entries[index] = entry
-        write(entry)
+        store.mutate(id, change)
     }
 
     func delete(_ entry: TranscriptEntry) async {
-        if let name = entry.audioFileName {
-            try? FileManager.default.removeItem(at: folder.appending(path: name))
-        }
-        try? FileManager.default.removeItem(at: sidecarURL(for: entry))
-        entries.removeAll { $0.id == entry.id }
-        await refreshAudioBytes()
+        await store.delete(entry)
     }
 
     func audioURL(for entry: TranscriptEntry) -> URL? {
-        entry.audioFileName.map { folder.appending(path: $0) }
+        store.blobURL(for: entry)
     }
 
     // MARK: - Purge
@@ -146,72 +119,11 @@ final class DictationStore {
     /// vue, où elle ne ferait que ralentir un affichage.
     @discardableResult
     func purgeExpiredAudio(now: Date = .now) async -> Int {
-        let expired = retention.entriesToPurge(from: entries, now: now)
-        guard expired.isEmpty == false else { return 0 }
-
-        for entry in expired {
-            if let name = entry.audioFileName {
-                try? FileManager.default.removeItem(at: folder.appending(path: name))
-            }
-            mutate(entry.id) { $0.audioFileName = nil }
-        }
-
-        await refreshAudioBytes()
-        return expired.count
+        await store.purgeExpired(now: now)
     }
 
     func expiryDate(for entry: TranscriptEntry) -> Date {
-        retention.expiryDate(for: entry)
-    }
-
-    // MARK: - Interne
-
-    private func write(_ entry: TranscriptEntry) {
-        do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let data = try Self.encoder.encode(entry)
-            try data.write(to: sidecarURL(for: entry), options: .atomic)
-        } catch {
-            problem = "Écriture impossible : \(error.localizedDescription)"
-        }
-    }
-
-    private func sidecarURL(for entry: TranscriptEntry) -> URL {
-        folder.appending(path: "\(Self.stamp(entry.createdAt))-\(entry.id.uuidString).json")
-    }
-
-    private func refreshAudioBytes() async {
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
-        )) ?? []
-
-        audioBytes = files
-            .filter { $0.pathExtension == "wav" }
-            .reduce(into: Int64(0)) { total, url in
-                total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-            }
-    }
-
-    /// Horodatage triable en tête de nom de fichier : le dossier se lit dans
-    /// l'ordre chronologique sans outil.
-    private static func stamp(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd'T'HH-mm-ss"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter.string(from: date)
-    }
-
-    private static var encoder: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .secondsSince1970
-        return encoder
-    }
-
-    private static var decoder: JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        return decoder
+        store.expiryDate(for: entry)
     }
 
     // MARK: - Écriture du WAV

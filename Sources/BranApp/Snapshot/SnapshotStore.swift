@@ -1,17 +1,45 @@
 import AppKit
+import BranCore
 import BranVision
 import ImageIO
 import UniformTypeIdentifiers
 import Foundation
 import Observation
 
+// MARK: - Conformités
+
+/// Une capture se range comme n'importe quel contenu : une identité, une date,
+/// un fichier lourd voisin. Le seul écart est le nom du champ — `imageFileName`
+/// se lit mieux que `blobFileName` partout ailleurs dans l'application, et c'est
+/// le nom que portent les fichiers déjà écrits sur le disque.
+///
+/// La conformité est déclarée ici, et pas dans `BranVision`, parce que `BranApp`
+/// est le seul module d'où `BranCore` et `BranVision` se voient tous les deux.
+/// Faire dépendre `BranVision` de `BranCore` pour trois lignes serait une arête
+/// de plus dans le graphe des cibles pour un gain nul.
+extension SnippetEntry: ContentEntry {
+    public var blobFileName: String? {
+        get { imageFileName }
+        set { imageFileName = newValue }
+    }
+}
+
+/// `SnapshotRetention` satisfait déjà le protocole mot pour mot : elle n'a rien
+/// à apprendre, et elle reste dans `BranVision` avec ses treize tests. Voir la
+/// note sur `ContentRetentionPolicy` pour pourquoi les deux politiques n'ont pas
+/// été fondues en une seule.
+extension SnapshotRetention: ContentRetentionPolicy {}
+
+// MARK: - Le store
+
 /// L'historique des captures de texte.
 ///
-/// Même parti pris que `RecordingStore` et `DictationStore` : **le dossier est
-/// la source de vérité**. Pas de base de données à côté du disque — deux
-/// sources de vérité divergent toujours, et c'est l'utilisateur qui arbitre au
-/// pire moment. Supprimer un `.png` dans le Finder rend simplement l'entrée
-/// non-relisable au prochain balayage, ce qui est le comportement souhaité.
+/// Une coquille au-dessus de `ContentStore` : tout ce qui est commun aux trois
+/// bibliothèques — balayage du dossier, sidecars, purge, comptage des octets —
+/// vit dans `BranCore`, où il est enfin testable. Ne reste ici que ce qui est
+/// propre à une image : l'écriture d'un PNG, sa relecture, et la seule question
+/// que la générique ne sait pas poser à la politique de rétention
+/// (`keepsNothing`).
 ///
 /// ```
 /// ~/…/bran/Captures/
@@ -22,129 +50,89 @@ import Observation
 @Observable
 final class SnapshotStore {
 
-    private(set) var entries: [SnippetEntry] = []
-    private(set) var problem: String?
+    private let store: ContentStore<SnippetEntry>
 
-    /// Octets occupés par les images conservées. Affiché dans les réglages :
-    /// une rétention se règle mieux quand on voit ce qu'elle coûte.
-    private(set) var imageBytes: Int64 = 0
-
-    /// Le dossier suit celui des enregistrements : changer la destination dans
-    /// les réglages déplace tout d'un coup. Une fermeture plutôt qu'une `URL`
-    /// figée, sinon le store garderait l'ancien dossier jusqu'au prochain
-    /// lancement.
-    private let root: @MainActor () -> URL
+    /// Gardée en plus de celle du `ContentStore` parce que `save` lui pose une
+    /// question que le protocole générique n'expose pas : `keepsNothing`. Ce
+    /// n'est pas une deuxième source de vérité — les deux sont réglées ensemble,
+    /// et seule celle-ci est interrogée.
     private var retention: SnapshotRetention
 
     init(root: @escaping @MainActor () -> URL, retention: SnapshotRetention = .default) {
-        self.root = root
         self.retention = retention
+        self.store = ContentStore(
+            root: root,
+            shape: ContentShape(
+                folderName: "Captures",
+                blobExtension: "png",
+                // L'image part, le texte reste. Le contraire effacerait des
+                // captures vieilles de plus d'une semaine sans que personne ne
+                // l'ait demandé.
+                purge: .blobOnly,
+                inaccessibleFolderMessage: "Dossier des captures inaccessible",
+                // On **dit** pourquoi l'image manque. La première version avalait
+                // l'erreur, et c'est exactement ce qui a empêché de diagnostiquer
+                // une capture vide : plus d'image, donc plus rien à regarder.
+                blobFailureMessage: "Image non conservée"
+            ),
+            retention: retention
+        )
     }
 
-    var folder: URL {
-        root().appending(path: "Captures", directoryHint: .isDirectory)
-    }
+    var entries: [SnippetEntry] { store.entries }
+    var problem: String? { store.problem }
+
+    /// Octets occupés par les images conservées. Affiché dans les réglages :
+    /// une rétention se règle mieux quand on voit ce qu'elle coûte.
+    var imageBytes: Int64 { store.blobBytes }
+
+    var folder: URL { store.folder }
 
     func setRetention(_ policy: SnapshotRetention) {
         retention = policy
-        Task { await purgeExpiredImages() }
+        store.setRetention(policy)
     }
 
     // MARK: - Lecture
 
     func reload() async {
-        do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let files = try FileManager.default.contentsOfDirectory(
-                at: folder,
-                includingPropertiesForKeys: [.fileSizeKey],
-                options: [.skipsHiddenFiles]
-            )
-
-            let decoder = Self.decoder
-            var found: [SnippetEntry] = []
-            var bytes: Int64 = 0
-
-            for url in files {
-                if url.pathExtension == "json",
-                   let data = try? Data(contentsOf: url),
-                   var entry = try? decoder.decode(SnippetEntry.self, from: data) {
-
-                    // Une image supprimée à la main dans le Finder doit rendre
-                    // l'entrée non-relisable, pas planter au clic.
-                    if let name = entry.imageFileName,
-                       FileManager.default.fileExists(
-                           atPath: folder.appending(path: name).path(percentEncoded: false)
-                       ) == false {
-                        entry.imageFileName = nil
-                    }
-                    found.append(entry)
-                } else if url.pathExtension == "png" {
-                    bytes += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-                }
-            }
-
-            entries = found.sorted { $0.createdAt > $1.createdAt }
-            imageBytes = bytes
-            problem = nil
-        } catch {
-            problem = "Dossier des captures inaccessible : \(error.localizedDescription)"
-        }
+        await store.reload()
     }
 
     // MARK: - Écriture
 
     /// Écrit l'image puis le sidecar, dans cet ordre.
     ///
-    /// L'ordre compte : un `.json` qui référence un `.png` inexistant serait une
-    /// entrée qui promet une relecture impossible. L'inverse — une image
-    /// orpheline — se nettoie tout seul à la purge.
+    /// Deux raisons de ne pas écrire d'image, et elles ne se racontent pas
+    /// pareil : il n'y en avait pas à écrire (silence), ou la rétention est
+    /// réglée sur zéro (il faut le dire, sinon l'absence d'image ressemble à une
+    /// panne).
     func save(_ entry: SnippetEntry, image: CGImage?) async {
-        var stored = entry
-
-        if let image, retention.keepsNothing == false {
-            let name = "\(Self.stamp(entry.createdAt))-\(entry.id.uuidString).png"
-            do {
-                try Self.writePNG(image, to: folder.appending(path: name))
-                stored.imageFileName = name
-            } catch {
-                // L'image est un confort ; le texte est l'essentiel. On garde
-                // l'entrée sans son image plutôt que de tout perdre — mais on
-                // **dit pourquoi**. La première version avalait l'erreur, et
-                // c'est exactement ce qui a empêché de diagnostiquer une
-                // capture vide : plus d'image, donc plus rien à regarder.
-                problem = "Image non conservée : \(error.localizedDescription)"
-                stored.imageFileName = nil
-            }
-        } else if image != nil, retention.keepsNothing {
-            problem = "Image non conservée : la durée de conservation est réglée sur zéro."
+        guard let image else {
+            await store.save(entry)
+            return
         }
 
-        write(stored)
-        entries.insert(stored, at: 0)
-        await refreshImageBytes()
+        guard retention.keepsNothing == false else {
+            store.report("Image non conservée : la durée de conservation est réglée sur zéro.")
+            await store.save(entry)
+            return
+        }
+
+        await store.save(entry) { try Self.writePNG(image, to: $0) }
     }
 
     /// Modifie une entrée en réécrivant son sidecar.
     func mutate(_ id: UUID, _ change: (inout SnippetEntry) -> Void) {
-        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
-        var entry = entries[index]
-        change(&entry)
-        entries[index] = entry
-        write(entry)
+        store.mutate(id, change)
     }
 
     func delete(_ entry: SnippetEntry) async {
-        if let name = entry.imageFileName {
-            try? FileManager.default.removeItem(at: folder.appending(path: name))
-        }
-        try? FileManager.default.removeItem(at: sidecarURL(for: entry))
-        entries.removeAll { $0.id == entry.id }
-        await refreshImageBytes()
+        await store.delete(entry)
     }
 
     func imageURL(for entry: SnippetEntry) -> URL? {
-        entry.imageFileName.map { folder.appending(path: $0) }
+        store.blobURL(for: entry)
     }
 
     /// Relit une image pour une nouvelle lecture.
@@ -160,73 +148,14 @@ final class SnapshotStore {
     /// Supprime les images arrivées à échéance. Le texte n'est jamais touché.
     @discardableResult
     func purgeExpiredImages(now: Date = .now) async -> Int {
-        let expired = retention.entriesToPurge(from: entries, now: now)
-        guard expired.isEmpty == false else { return 0 }
-
-        for entry in expired {
-            if let name = entry.imageFileName {
-                try? FileManager.default.removeItem(at: folder.appending(path: name))
-            }
-            mutate(entry.id) { $0.imageFileName = nil }
-        }
-
-        await refreshImageBytes()
-        return expired.count
+        await store.purgeExpired(now: now)
     }
 
     func expiryDate(for entry: SnippetEntry) -> Date {
-        retention.expiryDate(for: entry)
+        store.expiryDate(for: entry)
     }
 
     // MARK: - Interne
-
-    private func write(_ entry: SnippetEntry) {
-        do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let data = try Self.encoder.encode(entry)
-            try data.write(to: sidecarURL(for: entry), options: .atomic)
-        } catch {
-            problem = "Écriture impossible : \(error.localizedDescription)"
-        }
-    }
-
-    private func sidecarURL(for entry: SnippetEntry) -> URL {
-        folder.appending(path: "\(Self.stamp(entry.createdAt))-\(entry.id.uuidString).json")
-    }
-
-    private func refreshImageBytes() async {
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
-        )) ?? []
-
-        imageBytes = files
-            .filter { $0.pathExtension == "png" }
-            .reduce(into: Int64(0)) { total, url in
-                total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-            }
-    }
-
-    /// Horodatage triable en tête de nom de fichier : le dossier se lit dans
-    /// l'ordre chronologique sans outil.
-    private static func stamp(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd'T'HH-mm-ss"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter.string(from: date)
-    }
-
-    private static var encoder: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .secondsSince1970
-        return encoder
-    }
-
-    private static var decoder: JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        return decoder
-    }
 
     /// PNG et pas JPEG : du texte à l'écran est du trait net sur fond uni,
     /// exactement le cas où la compression avec perte fabrique des halos autour
