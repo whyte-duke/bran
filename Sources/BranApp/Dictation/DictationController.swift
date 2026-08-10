@@ -22,6 +22,9 @@ final class DictationController {
     private(set) var lastTranscript: String?
     /// Renseigné quand le texte n'a pas pu être collé mais reste au
     /// presse-papiers — l'utilisateur doit le savoir, pas le deviner.
+    ///
+    /// Posé **une fois l'écriture aboutie**, jamais avant : la phrase affirme que
+    /// le texte est là, et tant que `Paster` n'a pas rappelé, il n'y est pas.
     private(set) var pasteFallbackNotice: String?
 
     let settings: DictationSettings
@@ -116,8 +119,59 @@ final class DictationController {
         // Le chargement démarre à l'appui, en parallèle de la capture. C'est
         // ce qui permet de décharger le modèle sans jamais faire attendre.
         host.warmUp()
-        paster.rememberTarget()
+        aimAtFrontmostApp()
         apply(machine.handle(.hotkeyDown))
+    }
+
+    /// Mémorise ce qu'on ne pourra plus apprendre plus tard : la cible du
+    /// collage et, quand ça vaut la peine, le contenu du presse-papiers.
+    ///
+    /// **Un appui pendant une dictée en cours ne fait ni l'un ni l'autre.** En
+    /// mode bascule, ce second appui est celui qui *arrête* ; en mode maintien,
+    /// c'est la répétition système de la touche tenue — `HotkeyMonitor.classify`
+    /// émet un `.triggerDown` à chaque `keyDown` répété, donc plusieurs fois par
+    /// seconde tant qu'on parle. Une touche modificatrice seule y échappe (elle
+    /// n'apparaît que dans `flagsChanged`, sur transition), mais un raccourci à
+    /// touche normale non.
+    ///
+    /// Dans les deux cas, l'application au premier plan à cet instant n'est plus
+    /// forcément celle qu'on visait : la prendre pour cible annule le point 1 de
+    /// `Paster`, qui existe très exactement pour que la dictée atterrisse là où
+    /// elle a commencé même si l'utilisateur est allé ailleurs entre-temps.
+    ///
+    /// Une correction précédente avait mis la *lecture* derrière cette condition
+    /// et laissé la mise à jour de la cible inconditionnelle. C'était se tromper
+    /// deux fois : le mode bascule réécrivait la cible avec l'application du
+    /// moment de l'arrêt, et le mode maintien la réécrivait à chaque répétition.
+    ///
+    /// **La lecture, elle, a deux conditions de plus.** Elle n'est pas gratuite :
+    /// lire un type *promis* réveille l'application source et peut durer des
+    /// secondes (`Paster`, point 6), et depuis macOS 15.4 un accès au
+    /// presse-papiers peut faire apparaître l'alerte système « bran a collé
+    /// depuis une autre application ». Payer ça pour une dictée qu'on va refuser
+    /// dans la milliseconde qui suit est un mauvais marché — et l'alerte, elle,
+    /// est visible par l'utilisateur.
+    ///
+    /// Ces refus-là se connaissent avant d'avoir enregistré la moindre trame, et
+    /// ce sont les seuls qu'on teste. Le reste — le flux audio qui ne démarre
+    /// pas, le modèle qui ne répond pas — ne se sait qu'en essayant, et attendre
+    /// de le savoir ferait perdre à la lecture sa seule raison d'être : avoir
+    /// toute la durée de la dictée devant elle.
+    private func aimAtFrontmostApp() {
+        guard machine.phase.isBusy == false else { return }
+
+        // La saisie sécurisée bloque la synthèse du ⌘V autant que la lecture du
+        // clavier (`Paster`) : le collage est déjà connu impossible, donc il n'y
+        // aura rien à restituer.
+        let secureInput = HotkeyMonitor.isSecureInputActive
+
+        // Micro refusé : `startCapture` va échouer tout de suite. Micro pas
+        // encore demandé : une fenêtre système s'ouvre et l'utilisateur mettra
+        // des secondes à répondre — deux alertes empilées, dont une évitable, et
+        // une lecture entièrement spéculative.
+        let microphoneReady = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+
+        paster.rememberTarget(readingClipboard: secureInput == false && microphoneReady)
     }
 
     func hotkeyUp() {
@@ -134,7 +188,7 @@ final class DictationController {
             apply(machine.handle(settings.triggerMode == .hold ? .hotkeyUp : .hotkeyDown))
         } else if machine.phase.isBusy == false {
             host.warmUp()
-            paster.rememberTarget()
+            aimAtFrontmostApp()
             apply(machine.handle(.hotkeyDown))
         }
     }
@@ -154,9 +208,14 @@ final class DictationController {
     /// Publie **avant** d'exécuter les effets, puis après.
     ///
     /// Sans le premier `publish()`, la phase `.pasting` n'était jamais vue : le
-    /// collage rappelle `apply` en cascade, la machine passait à `.idle` avant
+    /// collage rappelait `apply` en cascade, la machine passait à `.idle` avant
     /// qu'on ait annoncé `.pasting`, et l'encoche n'affichait jamais le texte
     /// transcrit — elle sautait de « Transcription… » à un panneau vide.
+    ///
+    /// Le collage, lui, ne cascade plus : `.pasted` n'arrive qu'au rappel de
+    /// `Paster` (voir `performPaste`). Mais la cascade existe toujours ailleurs —
+    /// `startCapture` peut échouer dans la même pile — et la garde reste donc ce
+    /// qui rend chaque phase observable, quel que soit l'effet.
     private func apply(_ effects: [DictationMachine.Effect]) {
         publish()
 
@@ -359,13 +418,36 @@ final class DictationController {
         startedAt = nil
     }
 
+    /// Colle le texte — et n'en tire aucune conclusion avant que ce soit vrai.
+    ///
+    /// **La dictée finit au rappel de `Paster`, pas au retour de `paste(_:)`.**
+    /// Celui-ci ne fait que *poster* l'écriture du presse-papiers (`Paster`,
+    /// point 8) : conclure là faisait passer la machine au repos pendant qu'un
+    /// ⌘V était encore armé, donc autorisait une nouvelle dictée à démarrer et à
+    /// écrire par-dessus la précédente — un chevauchement que les états de la
+    /// machine déclarent impossible. En attendant `whenLanded`, la phase reste
+    /// `.pasting`, donc `isBusy`, donc l'appui suivant ne démarre rien.
+    ///
+    /// La valeur de retour, elle, répond à l'autre question — « vais-je seulement
+    /// essayer ? » — et sert au journal : savoir si un collage était impossible
+    /// dès le départ ou l'est devenu pendant l'attente change le diagnostic.
     private func performPaste(_ text: String) {
         lastTranscript = text
-        let pasted = paster.paste(text)
-        pasteFallbackNotice = pasted
-            ? nil
-            : "Le texte n'a pas pu être collé — il est dans le presse-papiers, faites ⌘V."
-        apply(machine.handle(.pasted))
+
+        let willTry = paster.paste(text) { [weak self] landing in
+            guard let self else { return }
+            // Le presse-papiers porte le texte : c'est seulement maintenant que
+            // « il est dans le presse-papiers » cesse d'être une promesse.
+            pasteFallbackNotice = landing.needsManualPaste ? Paster.fallbackNotice : nil
+            apply(machine.handle(.pasted))
+        }
+
+        if willTry == false {
+            FeatureLog.record(
+                "dictée : collage impossible dès le départ (cible absente ou saisie"
+                + " sécurisée) — le texte partira quand même au presse-papiers"
+            )
+        }
     }
 
     private func announceEmpty() {

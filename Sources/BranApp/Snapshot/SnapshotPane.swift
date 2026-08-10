@@ -44,6 +44,17 @@ struct SnapshotPane: View {
     @ViewBuilder
     private var notices: some View {
         VStack(spacing: 0) {
+            // Même bandeau, même symbole et même phrase que côté dictées : une
+            // capture dont le collage automatique échoue ne disait rien du tout,
+            // et le texte semblait perdu alors qu'il était au presse-papiers.
+            if let notice = controller.pasteFallbackNotice {
+                NoticeRow(
+                    text: notice,
+                    symbol: "doc.on.clipboard",
+                    tint: .orange
+                )
+            }
+
             if controller.settings.isEnabled, isSecureInputActive {
                 NoticeRow(
                     text: "Saisie sécurisée active : macOS bloque tout raccourci global tant qu'un champ de mot de passe a le focus. Fermez-le, ou décochez « Saisie sécurisée du clavier » dans le menu Terminal.",
@@ -85,6 +96,7 @@ struct SnapshotPane: View {
     /// Ce qui doit relancer l'animation des bandeaux. Voir `DictationPane`.
     private var noticeSignature: String {
         var parts: [String] = []
+        if let notice = controller.pasteFallbackNotice { parts.append(notice) }
         if controller.settings.isEnabled, isSecureInputActive { parts.append("saisie sécurisée") }
         if let problem = controller.store.problem { parts.append(problem) }
         if case .failed(let reason) = controller.phase { parts.append(reason.summary) }

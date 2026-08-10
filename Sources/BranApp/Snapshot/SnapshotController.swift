@@ -32,6 +32,17 @@ final class SnapshotController {
     private(set) var phase: SnapshotMachine.Phase = .idle
     /// Le texte de la dernière capture réussie, pour l'aperçu dans l'encoche.
     private(set) var lastText: String?
+    /// Renseigné quand le collage automatique a été demandé mais n'a pas eu
+    /// lieu — le texte est au presse-papiers, il reste un ⌘V à faire.
+    ///
+    /// La capture ne disait rien du tout dans ce cas, là où la dictée affichait
+    /// son bandeau depuis toujours : on visait une zone, on entendait le son de
+    /// fin, et rien n'apparaissait dans l'application de départ. Même phrase,
+    /// même bandeau, même moment — voir `Paster.fallbackNotice`.
+    ///
+    /// Posé **une fois l'écriture aboutie**, jamais avant : tant que `Paster`
+    /// n'a pas rappelé, le texte n'est pas encore au presse-papiers.
+    private(set) var pasteFallbackNotice: String?
     /// Les entrées dont une relecture est en cours.
     private(set) var relisting: Set<UUID> = []
 
@@ -40,7 +51,20 @@ final class SnapshotController {
     private var machine = SnapshotMachine()
     private let capturer: RegionCapturer
     private let engine: VisionRecogniser
-    private let paster = Paster()
+    /// Le colleur de la capture, distinct de celui de la dictée : chacun a le
+    /// sien, et celui-ci **ne rend jamais le presse-papiers**.
+    ///
+    /// Le texte lu à l'écran est ce que l'utilisateur est venu chercher — le lui
+    /// reprendre 0,6 s après le collage n'aurait aucun sens. Le drapeau est donc
+    /// posé ici une fois pour toutes, et non juste avant chaque collage : ainsi
+    /// `rememberTarget()` sait dès l'appui qu'il n'a aucune lecture détachée à
+    /// lancer, et ne va pas faire fabriquer à l'application source des
+    /// représentations promises dont personne ne voudra.
+    private let paster: Paster = {
+        let paster = Paster()
+        paster.restoresClipboard = false
+        return paster
+    }()
 
     /// L'image en attente de lecture, et son contexte.
     private var pending: (image: CGImage, layout: LayoutMode, sourceApp: String?)?
@@ -143,6 +167,8 @@ final class SnapshotController {
 
         let token = UUID()
         currentToken = token
+        // Le bandeau de la capture précédente ne parle pas de celle-ci.
+        pasteFallbackNotice = nil
 
         // L'application au premier plan est mémorisée **avant** le viseur :
         // pendant la sélection, c'est bran ou `screencapture` qui est devant,
@@ -266,15 +292,64 @@ final class SnapshotController {
         }
     }
 
+    /// Pose le texte là où l'utilisateur l'attend : au presse-papiers, et dans
+    /// l'application de départ si le collage automatique est demandé.
+    ///
+    /// **Une seule écriture, sur chacun des deux chemins.** `Paster.paste(_:)`
+    /// écrit lui-même le presse-papiers avant de simuler le ⌘V — c'est son
+    /// contrat, et c'est aussi ce qui lui permet de rendre `false` sans rien
+    /// perdre quand la cible a disparu ou que la saisie sécurisée est active : le
+    /// texte est déjà au presse-papiers, il ne manque que le collage. Écrire ici
+    /// *puis* l'appeler faisait donc deux écritures du même texte :
+    ///
+    /// - deux incréments de `changeCount`, donc deux entrées pour l'historique
+    ///   de presse-papiers en cours de conception, alors qu'il ne s'est rien
+    ///   passé qu'une seule capture ;
+    /// - une fenêtre entre les deux, courte mais réelle, pendant laquelle une
+    ///   application tierce peut copier — et se faire écraser par notre seconde
+    ///   écriture.
+    ///
+    /// C'est donc `paste` qui garde l'écriture quand il est appelé, et
+    /// `copyOnly` — le même `prepareForNewContents(with: .currentHostOnly)`,
+    /// sans le ⌘V — qui s'en charge sinon. Passer par `Paster` plutôt que
+    /// d'écrire ici garde la règle du point 4 de son en-tête — sans
+    /// `.currentHostOnly`, le texte lu à l'écran repart sur l'iPhone et l'iPad
+    /// du même compte iCloud par le presse-papiers universel — à un seul
+    /// endroit.
+    ///
+    /// **Ni l'un ni l'autre n'a écrit quand il rend la main.** Les deux *postent*
+    /// l'écriture sur la file du point 8 de `Paster` : jouer le son de fin et
+    /// passer à `.copied` juste après revenait à annoncer « c'est copié » avant
+    /// que ce soit vrai. L'utilisateur entendait le son, faisait ⌘V, et collait
+    /// le contenu d'avant. Tout ce qui affirme quelque chose du presse-papiers
+    /// est donc passé dans `finishDelivery(needsManualPaste:)`, qui n'est appelé
+    /// qu'au rappel de `Paster`.
     private func deliver(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-
-        if settings.pastesAutomatically {
-            paster.restoresClipboard = false
-            _ = paster.paste(text)
+        guard settings.pastesAutomatically else {
+            // Personne n'a demandé de collage : il n'y a pas d'échec à signaler,
+            // seulement une écriture à laisser aboutir.
+            paster.copyOnly(text) { [weak self] in
+                self?.finishDelivery(needsManualPaste: false)
+            }
+            return
         }
 
+        let willTry = paster.paste(text) { [weak self] landing in
+            self?.finishDelivery(needsManualPaste: landing.needsManualPaste)
+        }
+
+        if willTry == false {
+            FeatureLog.record(
+                "capture : collage impossible dès le départ (cible absente ou saisie"
+                + " sécurisée) — le texte partira quand même au presse-papiers"
+            )
+        }
+    }
+
+    /// Le texte est au presse-papiers : c'est seulement maintenant qu'on a le
+    /// droit de le dire, de le faire entendre, et de considérer la capture finie.
+    private func finishDelivery(needsManualPaste: Bool) {
+        pasteFallbackNotice = needsManualPaste ? Paster.fallbackNotice : nil
         if settings.playsSound { Self.doneCue?.play() }
         apply(machine.handle(.copied))
     }
@@ -463,9 +538,24 @@ final class SnapshotController {
 
     func isRereading(_ id: UUID) -> Bool { relisting.contains(id) }
 
+    /// Recopie un extrait de l'historique.
+    ///
+    /// **Par `Paster`, comme tout le reste.** Les deux lignes qu'il y avait ici
+    /// touchaient `NSPasteboard.general` directement depuis le main actor, donc
+    /// hors de la file série du point 8 de `Paster` — le seul accès du programme
+    /// censé être le seul. Un clic sur « Copier » pendant qu'une lecture ou une
+    /// écriture tournait sur cette file s'y intercalait, et `NSPasteboard.general`
+    /// est bien le même objet des deux côtés : il n'y a pas d'échappatoire par
+    /// « une instance chacun ». `copyOnly` fait exactement les deux mêmes appels,
+    /// `.currentHostOnly` compris — sans lui, recopier un ancien extrait le
+    /// diffuserait sur les autres appareils du compte —, mais du bon côté.
+    ///
+    /// Pas de rappel demandé, comme du côté des dictées : la coche de la carte
+    /// accuse réception du clic, et il n'y a derrière elle ni son, ni phase, ni
+    /// ⌘V à ordonner. Le jour où l'un des trois apparaît, c'est
+    /// `copyOnly(_:whenLanded:)` qu'il faudra attendre.
     func copy(_ entry: SnippetEntry) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(entry.text, forType: .string)
+        paster.copyOnly(entry.text)
     }
 
     // MARK: - Son
