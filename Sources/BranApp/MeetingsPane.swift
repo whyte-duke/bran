@@ -207,7 +207,7 @@ private struct RecordingCard: View {
                     .disabled(recording.existsOnDisk == false)
 
                     CardAction(symbol: "folder", help: "Afficher dans le Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([recording.url])
+                        NSWorkspace.shared.activateFileViewerSelecting(recording.revealTargets)
                     }
 
                     CardAction(symbol: "trash", help: "Mettre à la corbeille", tint: Palette.broken) {
@@ -236,7 +236,7 @@ private struct RecordingCard: View {
             .disabled(recording.existsOnDisk == false)
 
             Button("Afficher dans le Finder", systemImage: "folder") {
-                NSWorkspace.shared.activateFileViewerSelecting([recording.url])
+                NSWorkspace.shared.activateFileViewerSelecting(recording.revealTargets)
             }
 
             Divider()

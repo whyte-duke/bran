@@ -15,6 +15,13 @@ struct Recording: Identifiable, Equatable, Sendable {
     /// bibliothèque, ou sidecar supprimé à la main.
     var hasMetadataFile: Bool
 
+    /// Les morceaux bruts encore présents, `<uuid>-segNNN.mp4`, dans l'ordre.
+    ///
+    /// Normalement vide : le post-traitement les efface après avoir écrit le
+    /// fichier final. Ils survivent quand la session s'est mal terminée — et
+    /// c'est alors la seule chose qui existe de la réunion.
+    var segmentURLs: [URL] = []
+
     var id: UUID { metadata.id }
 
     /// Session ouverte sans jamais être close proprement.
@@ -38,6 +45,48 @@ struct Recording: Identifiable, Equatable, Sendable {
 
     /// L'infobulle du triangle. Porte le motif quand il existe.
     var interruptionNote: String { metadata.interruptionNote }
+
+    /// Ce que « Afficher dans le Finder » doit sélectionner.
+    ///
+    /// **Un bouton qui ne fait rien est pire que pas de bouton.** Il passait
+    /// `url` sans condition, c'est-à-dire le `<uuid>.mp4` final ; quand la
+    /// session s'était mal terminée, ce fichier n'existait pas et
+    /// `activateFileViewerSelecting` ne faisait strictement rien — pas une
+    /// fenêtre, pas un message. Le 11 août 2026, la réunion était sur le disque
+    /// sous son nom de segment et l'utilisateur cherchait un fichier que bran
+    /// refusait de lui montrer, en silence.
+    ///
+    /// Dans l'ordre : le fichier final, les morceaux bruts, le dossier. Le
+    /// dossier est le dernier recours et il ouvre toujours quelque chose.
+    var revealTargets: [URL] {
+        if existsOnDisk { return [url] }
+        if segmentURLs.isEmpty == false { return segmentURLs }
+        return [url.deletingLastPathComponent()]
+    }
+
+    /// Un fichier lisible existe, sous une forme ou une autre.
+    var hasPlayableFile: Bool { existsOnDisk || segmentURLs.isEmpty == false }
+
+    /// Ce que le lecteur ouvre.
+    ///
+    /// Le fichier final, ou à défaut le premier morceau brut. Une session mal
+    /// terminée montrait un lecteur vide alors que la réunion était sur le
+    /// disque : c'est le morceau qu'il faut lire, quitte à n'en lire qu'un —
+    /// `segmentNotice` dit alors qu'il y en a d'autres.
+    var playbackURL: URL? {
+        if existsOnDisk { return url }
+        return segmentURLs.first
+    }
+
+    /// Ce qu'il faut dire quand le lecteur ne montre pas le fichier attendu.
+    var segmentNotice: String? {
+        guard existsOnDisk == false, segmentURLs.isEmpty == false else { return nil }
+
+        return segmentURLs.count == 1
+            ? "La fusion n'a pas eu lieu : c'est le morceau brut de la session qui est lu ici."
+            : "La fusion n'a pas eu lieu : c'est le premier des \(segmentURLs.count) morceaux bruts "
+            + "qui est lu ici. Les autres sont à côté, dans le dossier."
+    }
 
     /// Le titre du calendrier s'il existe, sinon la date formatée **maintenant**
     /// — dans la langue et le fuseau de celui qui regarde, pas de celui qui a

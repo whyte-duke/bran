@@ -29,6 +29,76 @@ struct RecordingBar: View {
     private var shouldPulse: Bool { isPulsing && model.isPaused == false }
 
     var body: some View {
+        Group {
+            if model.isFinalizing {
+                finalizing
+            } else {
+                controls
+            }
+        }
+        .padding(.horizontal, Space.stack)
+        .padding(.vertical, Space.inset)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
+        .onAppear {
+            isPulsing = reduceMotion == false
+            recalibrateTimer()
+        }
+        .onChange(of: model.isPaused) { recalibrateTimer() }
+    }
+
+    /// Ce que voit l'utilisateur entre le clic sur « Arrêter » et le fichier.
+    ///
+    /// **C'est l'écran qui manquait.** La barre gardait son chrono, sa pastille
+    /// rouge et ses deux boutons pendant toute la finalisation : elle disait
+    /// « j'enregistre » à un moment où plus rien n'était capturé, et le clic
+    /// suivant sur « Arrêter » ne pouvait rien faire. Ici il n'y a plus de
+    /// bouton parce qu'il n'y a plus rien à décider — seulement à attendre, et
+    /// à savoir que l'attente est normale et combien de temps elle dure.
+    private var finalizing: some View {
+        HStack(spacing: Space.stack) {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: Space.line) {
+                Text("Finalisation de l'enregistrement…")
+                    .font(Type.groupHead)
+
+                Text(finalizingDetail)
+                    .font(Type.meta)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            Spacer(minLength: Space.inset)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Finalisation de l'enregistrement. \(finalizingDetail)")
+    }
+
+    /// Trois choses, dans cet ordre : ce qui est déjà sur le disque, combien de
+    /// temps ça va durer, et ce qu'il ne faut pas faire.
+    ///
+    /// L'estimation est annoncée comme telle. La consigne — ne pas quitter bran
+    /// — est la seule action possible, donc elle a sa place ; `replayd` survit
+    /// à une fermeture, mais bran ne saurait plus quoi faire du fichier.
+    private var finalizingDetail: String {
+        var parts: [String] = []
+
+        if model.currentFileSize > 0 {
+            parts.append("\(model.currentFileSize.formatted(.byteCount(style: .file))) écrits")
+        }
+        if let estimate = model.finalizationEstimate {
+            let minutes = max(1, Int(estimate.components.seconds / 60))
+            parts.append("environ \(minutes) min")
+        }
+        parts.append("ne quittez pas bran")
+
+        return parts.joined(separator: " · ")
+    }
+
+    private var controls: some View {
         HStack(spacing: Space.stack) {
             indicator
 
@@ -71,15 +141,6 @@ struct RecordingBar: View {
             .controlSize(.large)
             .keyboardShortcut("s", modifiers: [.command, .shift])
         }
-        .padding(.horizontal, Space.stack)
-        .padding(.vertical, Space.inset)
-        .background(.bar)
-        .overlay(alignment: .top) { Divider() }
-        .onAppear {
-            isPulsing = reduceMotion == false
-            recalibrateTimer()
-        }
-        .onChange(of: model.isPaused) { recalibrateTimer() }
     }
 
     /// Le chrono.

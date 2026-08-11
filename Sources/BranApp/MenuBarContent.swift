@@ -50,7 +50,18 @@ struct MenuBarContent: View {
 
         Divider()
 
-        if model.hasOpenSession {
+        if model.isFinalizing {
+            // **Aucun bouton pendant la finalisation.** « Mettre en pause » et
+            // « Arrêter et enregistrer le fichier » restaient offerts alors que
+            // la machine ne les accepte plus : cliquer ne produisait rien, pas
+            // même un message. Un utilisateur qui vient de cliquer « Arrêter »
+            // et à qui on continue de proposer « Arrêter » en conclut,
+            // légitimement, que son premier clic n'a pas été pris.
+            //
+            // `statusSummary`, juste au-dessus, dit ce qui se passe et combien
+            // d'octets sont écrits. C'est tout ce qu'il y a à savoir.
+            Text("La capture est terminée, le fichier s'écrit. Ne quittez pas bran.")
+        } else if model.hasOpenSession {
             Button(model.isPaused ? "Reprendre l'enregistrement" : "Mettre en pause") {
                 model.togglePause()
             }

@@ -1,3 +1,4 @@
+import BranCore
 import Foundation
 import Synchronization
 
@@ -16,10 +17,6 @@ final class CaptureSignals: Sendable {
 
     private let storage = Mutex(State())
 
-    func reset() {
-        storage.withLock { $0 = State() }
-    }
-
     func markFinished() {
         storage.withLock { $0.didFinish = true }
     }
@@ -37,16 +34,36 @@ final class CaptureSignals: Sendable {
         storage.withLock { $0.failure }
     }
 
-    /// `true` si la finalisation a été signalée avant l'échéance.
-    func waitForFinish(timeout: Duration) async -> Bool {
-        let deadline = ContinuousClock.now + timeout
+    /// Attend la finalisation **aussi longtemps que le fichier grossit**.
+    ///
+    /// L'échéance sèche d'avant (`waitForFinish(timeout: .seconds(60))`) a été
+    /// retirée : `FinalizationWatch` explique pourquoi elle ne pouvait pas
+    /// marcher au-delà de trois minutes d'enregistrement. Ici il ne reste que
+    /// la mécanique — sonder, mesurer, rendre compte ; la décision est dans
+    /// `BranCore`, où elle se teste sans dormir.
+    ///
+    /// - Parameters:
+    ///   - bytesWritten: taille du fichier en cours d'écriture. Appelée deux
+    ///     fois par seconde ; un `stat` est négligeable devant le travail de
+    ///     `replayd`.
+    func awaitFinish(
+        watch: consuming FinalizationWatch,
+        bytesWritten: @Sendable () -> Int64
+    ) async -> FinalizationWatch.Verdict {
+        let started = ContinuousClock.now
 
-        while .now < deadline {
-            if storage.withLock({ $0.didFinish }) {
-                return storage.withLock { $0.failure == nil }
-            }
-            try? await Task.sleep(for: .milliseconds(100))
+        while true {
+            let (didFinish, failure) = storage.withLock { ($0.didFinish, $0.failure) }
+            let verdict = watch.observe(
+                bytesWritten: bytesWritten(),
+                didFinish: didFinish,
+                failure: failure,
+                at: ContinuousClock.now - started
+            )
+
+            guard verdict.isSettled == false else { return verdict }
+
+            try? await Task.sleep(for: .milliseconds(500))
         }
-        return false
     }
 }

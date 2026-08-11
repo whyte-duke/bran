@@ -31,7 +31,7 @@ struct RecordingDetailView: View {
         .toolbar {
             ToolbarItem {
                 Button("Afficher dans le Finder", systemImage: "folder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([recording.url])
+                    NSWorkspace.shared.activateFileViewerSelecting(recording.revealTargets)
                 }
             }
         }
@@ -39,13 +39,27 @@ struct RecordingDetailView: View {
     }
 
     private var videoPlayer: some View {
-        PlayerView(url: recording.url)
-            .aspectRatio(16 / 10, contentMode: .fit)
-            .frame(minHeight: 260)
-            // Le noir n'est le bon fond que derrière une image. Derrière un
-            // message d'absence, il ne fait que rendre le message illisible.
-            .background(recording.existsOnDisk ? AnyShapeStyle(.black) : Palette.well)
-            .accessibilityLabel("Lecteur vidéo — \(recording.displayTitle)")
+        VStack(spacing: 0) {
+            // `playbackURL` et pas `url` : après une session mal terminée, le
+            // fichier final n'existe pas et le lecteur restait noir alors que
+            // la réunion entière était sur le disque, sous son nom de morceau.
+            PlayerView(url: recording.playbackURL ?? recording.url)
+                .aspectRatio(16 / 10, contentMode: .fit)
+                .frame(minHeight: 260)
+                // Le noir n'est le bon fond que derrière une image. Derrière un
+                // message d'absence, il ne fait que rendre le message illisible.
+                .background(recording.hasPlayableFile ? AnyShapeStyle(.black) : Palette.well)
+                .accessibilityLabel("Lecteur vidéo — \(recording.displayTitle)")
+
+            if let notice = recording.segmentNotice {
+                Label(notice, systemImage: "scissors")
+                    .font(Type.meta)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Space.gutter)
+                    .padding(.vertical, Space.small)
+            }
+        }
     }
 
     private var header: some View {

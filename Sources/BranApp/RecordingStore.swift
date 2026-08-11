@@ -148,7 +148,12 @@ final class RecordingStore {
                     fileSize: attributes?[.size] as? Int64 ?? 0,
                     duration: await durationOfFile(at: url),
                     existsOnDisk: true,
-                    hasMetadataFile: hasSidecar
+                    hasMetadataFile: hasSidecar,
+                    // Relevés même quand le fichier final existe : après une
+                    // session mal terminée, le post-traitement les conserve
+                    // exprès, et ce sont eux qui portent les minutes que la
+                    // fusion n'a peut-être pas reprises.
+                    segmentURLs: identifier.map { Self.segmentURLs(of: $0, among: segments, in: root) } ?? []
                 )
             )
         }
@@ -177,12 +182,9 @@ final class RecordingStore {
                 continue
             }
 
-            let prefix = "\(identifier.uuidString)\(segmentMarker)"
-            let pieces = segments.filter { $0.hasPrefix(prefix) }
+            let pieces = Self.segmentURLs(of: identifier, among: segments, in: root)
             let size = pieces.reduce(Int64.zero) { total, piece in
-                let attributes = try? manager.attributesOfItem(
-                    atPath: root.appending(path: piece).path(percentEncoded: false)
-                )
+                let attributes = try? manager.attributesOfItem(atPath: piece.path(percentEncoded: false))
                 return total + (attributes?[.size] as? Int64 ?? 0)
             }
 
@@ -193,12 +195,29 @@ final class RecordingStore {
                     fileSize: size,
                     duration: nil,
                     existsOnDisk: false,
-                    hasMetadataFile: true
+                    hasMetadataFile: true,
+                    segmentURLs: pieces
                 )
             )
         }
 
         return Scan(recordings: found, problem: nil, faults: faults)
+    }
+
+    /// Les morceaux bruts d'une session, dans l'ordre où ils ont été écrits.
+    ///
+    /// Triés par nom, ce qui suffit : `seg000`, `seg001`… sont zéro-remplis
+    /// précisément pour que l'ordre alphabétique soit l'ordre chronologique.
+    private nonisolated static func segmentURLs(
+        of identifier: UUID,
+        among segments: [String],
+        in root: URL
+    ) -> [URL] {
+        let prefix = "\(identifier.uuidString)\(segmentMarker)"
+        return segments
+            .filter { $0.hasPrefix(prefix) }
+            .sorted()
+            .map { root.appending(path: $0) }
     }
 
     /// Lit une fiche, ou dit pourquoi elle n'est pas lisible.

@@ -125,10 +125,7 @@ actor PostProcessor {
         var cursor = CMTime.zero
 
         for url in segments {
-            let asset = AVURLAsset(url: url)
-            guard let duration = try? await asset.load(.duration), duration.isNumeric, duration > .zero else {
-                continue
-            }
+            guard let (asset, duration) = await Self.settledAsset(at: url) else { continue }
             let range = CMTimeRange(start: .zero, duration: duration)
 
             if let sourceVideo = try await asset.loadTracks(withMediaType: .video).first {
@@ -143,6 +140,46 @@ actor PostProcessor {
 
         guard cursor > .zero else { throw ProcessingError.noUsableSegment }
         return composition.copy() as! AVComposition
+    }
+
+    /// Durée d'un segment, **en attendant qu'il soit refermé s'il ne l'est pas
+    /// encore**.
+    ///
+    /// Un `.mp4` que `replayd` écrit encore n'a pas son atome `moov` : AVAsset
+    /// lui trouve une durée nulle. L'ancien code passait au segment suivant, et
+    /// une session de tous les segments non refermés levait `noUsableSegment` —
+    /// « Aucun segment exploitable » sur une réunion de 2,5 Go en cours
+    /// d'écriture. C'est ce qui s'est produit le 11 août 2026 : la fusion a été
+    /// lancée pendant que `replayd` travaillait encore, elle ne pouvait
+    /// qu'échouer, et aucun fichier final n'a été écrit.
+    ///
+    /// La règle est la même qu'à la capture : tant que le fichier grossit, on
+    /// attend. Un segment réellement vide — capture morte à la première image —
+    /// ne grossit pas, et rend `nil` au bout de deux minutes.
+    ///
+    /// **Un `AVURLAsset` neuf à chaque tour**, et c'est tout l'intérêt de la
+    /// boucle : `AVAsset` mémorise ses propriétés dès le premier chargement.
+    /// Réinterroger la même instance rendrait éternellement la durée nulle lue
+    /// au premier essai, et l'attente ne servirait à rien.
+    private static func settledAsset(at url: URL) async -> (AVURLAsset, CMTime)? {
+        var watch = FinalizationWatch(stallTimeout: .seconds(120), hardLimit: .seconds(3_600))
+        let started = ContinuousClock.now
+
+        while true {
+            let asset = AVURLAsset(url: url)
+            if let duration = try? await asset.load(.duration), duration.isNumeric, duration > .zero {
+                return (asset, duration)
+            }
+
+            let verdict = watch.observe(
+                bytesWritten: sizeOf(url),
+                didFinish: false,
+                at: ContinuousClock.now - started
+            )
+            guard verdict.isSettled == false else { return nil }
+
+            try? await Task.sleep(for: .seconds(2))
+        }
     }
 
     // MARK: - Encodage

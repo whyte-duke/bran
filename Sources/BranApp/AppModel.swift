@@ -538,7 +538,13 @@ public final class AppModel {
         case .starting:
             "Démarrage…"
         case .finalizing:
-            "Finalisation du fichier…"
+            // Le poids écrit est dans le résumé, et pas seulement dans la
+            // fenêtre : c'est depuis le menu que l'utilisateur surveille une
+            // finalisation, fenêtre fermée. « Finalisation du fichier… » tout
+            // seul est indiscernable d'un blocage.
+            currentFileSize > 0
+                ? "Finalisation — \(currentFileSize.formatted(.byteCount(style: .file))) écrits"
+                : "Finalisation du fichier…"
         case .failed(let reason):
             "Échec — \(reason)"
         case .idle:
@@ -565,6 +571,31 @@ public final class AppModel {
 
     public var isPaused: Bool {
         if case .paused = engine.state { true } else { false }
+    }
+
+    /// La capture est finie, `replayd` écrit encore.
+    ///
+    /// C'est l'état le plus long d'une fin de session — mesuré à un tiers de la
+    /// durée enregistrée — et c'était le seul que l'interface ne montrait
+    /// jamais. L'utilisateur cliquait « Arrêter », voyait la barre se figer,
+    /// recliquait, puis lisait « Échec » : trois signaux faux pour un travail
+    /// qui se déroulait normalement.
+    public var isFinalizing: Bool {
+        if case .finalizing = engine.state { true } else { false }
+    }
+
+    /// Ordre de grandeur du temps de finalisation restant, ou `nil` si on ne
+    /// peut rien en dire.
+    ///
+    /// Fondé sur une mesure et donnée comme telle : le 11 août 2026, 2 191 s
+    /// enregistrées ont demandé 729 s de finalisation, soit un tiers. C'est un
+    /// ordre de grandeur, pas une promesse — d'où l'« environ » dans le texte
+    /// qui l'affiche, et l'absence de barre de progression, qui prétendrait à
+    /// une précision qu'on n'a pas.
+    public var finalizationEstimate: Duration? {
+        let recorded = elapsed.components.seconds
+        guard recorded > 30 else { return nil }
+        return .seconds(recorded / 3)
     }
 
     /// Vrai tant qu'une session est ouverte — **y compris pendant `.starting` et
@@ -1053,8 +1084,19 @@ public final class AppModel {
 
                 // Le temps passé en pause ne compte pas : afficher une durée qui
                 // avance pendant qu'on n'enregistre rien serait un mensonge.
-                if self.isPaused == false {
+                //
+                // Pendant `.finalizing` non plus, et pour la même raison : plus
+                // rien n'est capturé, `replayd` écrit ce qui l'a déjà été. Un
+                // chrono qui continue pendant douze minutes de finalisation
+                // ferait croire à une réunion de quarante-huit minutes.
+                if self.isRecording {
                     self.elapsed = .seconds(Date.now.timeIntervalSince(started) - self.pausedDuration)
+                }
+
+                // Le poids, lui, se relève **tout le temps** : c'est le seul
+                // signe visible que la finalisation avance, et c'est justement
+                // là qu'on en a le plus besoin.
+                if self.isPaused == false {
                     self.currentFileSize = self.engine.segments.reduce(0) { $0 + Self.sizeOfFile(at: $1) }
                 }
                 try? await Task.sleep(for: .seconds(1))

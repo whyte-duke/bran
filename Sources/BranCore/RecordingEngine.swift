@@ -105,7 +105,7 @@ public final class RecordingEngine {
             try await backend.pause()
             transition(to: .paused(meeting))
         } catch {
-            transition(to: .failed(reason: "pause impossible : \(error)"))
+            transition(to: .failed(reason: "pause impossible : \(Self.explain(error))"))
         }
     }
 
@@ -116,7 +116,7 @@ public final class RecordingEngine {
             segments.append(try await backend.resume())
             transition(to: .recording(meeting))
         } catch {
-            transition(to: .failed(reason: "reprise impossible : \(error)"))
+            transition(to: .failed(reason: "reprise impossible : \(Self.explain(error))"))
         }
     }
 
@@ -147,7 +147,7 @@ public final class RecordingEngine {
         do {
             segments.append(try await backend.start(meeting))
         } catch {
-            transition(to: .failed(reason: "démarrage impossible : \(error)"))
+            transition(to: .failed(reason: "démarrage impossible : \(Self.explain(error))"))
             return
         }
 
@@ -169,11 +169,24 @@ public final class RecordingEngine {
                 try await backend.stop()
             }
         } catch {
-            transition(to: .failed(reason: "finalisation impossible : \(error)"))
+            transition(to: .failed(reason: "finalisation impossible : \(Self.explain(error))"))
             return
         }
 
         transition(to: .idle)
+    }
+
+    /// Le texte d'une erreur, écrit pour un humain.
+    ///
+    /// **`"\(error)"` interpolait le cas d'énumération.** Le 11 août 2026, la
+    /// bibliothèque et le bandeau affichaient « finalisation impossible :
+    /// finalizationTimedOut » — un identifiant Swift, en anglais, dans une
+    /// interface française, alors que `CaptureError` portait depuis toujours une
+    /// phrase complète que personne n'allait chercher. Le motif est écrit dans
+    /// le sidecar et s'y lit des mois plus tard : c'est le dernier endroit où
+    /// laisser un nom de symbole.
+    private static func explain(_ error: any Error) -> String {
+        (error as? any LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 
     private func transition(to next: RecordingState) {

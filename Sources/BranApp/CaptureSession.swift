@@ -29,7 +29,18 @@ public actor CaptureSession: CaptureBackend {
 
     private nonisolated let failureContinuation: AsyncStream<String>.Continuation
     private var settings: Settings
-    private let signals = CaptureSignals()
+
+    /// Signaux du segment courant. **Une instance neuve par segment**, et pas un
+    /// objet unique qu'on remet à zéro.
+    ///
+    /// Le delegate d'un segment abandonné reste vivant (c'est voulu : son
+    /// callback de fin peut encore arriver). S'il partageait les signaux avec
+    /// le segment suivant, ce callback tardif cocherait « terminé » sur une
+    /// finalisation qui vient à peine de commencer — et bran déclarerait écrit
+    /// un fichier dont `replayd` n'a pas posé la première image. Chaque segment
+    /// a donc les siens, et un retardataire ne parle qu'à un objet que plus
+    /// personne n'écoute.
+    private var signals = CaptureSignals()
 
     private var stream: SCStream?
     private var outputURL: URL?
@@ -45,6 +56,14 @@ public actor CaptureSession: CaptureBackend {
     /// correctement écrit par replayd.
     private var delegate: CaptureDelegate?
     private var recordingOutput: SCRecordingOutput?
+
+    /// Ouverture du segment courant, sur l'horloge monotone.
+    ///
+    /// Sert à dimensionner l'attente de finalisation : celle-ci coûte à peu
+    /// près un tiers de la durée enregistrée (cf. `FinalizationWatch`), et un
+    /// plafond fixe ne peut donc pas convenir aux deux bouts — neuf secondes de
+    /// test et trois heures de réunion.
+    private var segmentOpenedAt: ContinuousClock.Instant?
 
     public init(settings: Settings = Settings()) {
         self.settings = settings
@@ -132,7 +151,8 @@ public actor CaptureSession: CaptureBackend {
         recordingConfiguration.outputFileType = .mp4
         recordingConfiguration.videoCodecType = settings.codec
 
-        signals.reset()
+        let signals = CaptureSignals()
+        self.signals = signals
         let delegate = CaptureDelegate(signals: signals, failures: failureContinuation)
         let stream = SCStream(filter: filter, configuration: configuration, delegate: delegate)
         let recordingOutput = SCRecordingOutput(configuration: recordingConfiguration, delegate: delegate)
@@ -146,6 +166,7 @@ public actor CaptureSession: CaptureBackend {
         self.delegate = delegate
         self.recordingOutput = recordingOutput
         self.outputURL = destination
+        self.segmentOpenedAt = .now
 
         session.nextSegment += 1
         self.session = session
@@ -178,20 +199,55 @@ public actor CaptureSession: CaptureBackend {
         // et un `stop()` suivant a raison de ne rien faire.
         self.stream = nil
 
-        // `stopCapture()` rend la main plusieurs secondes avant que le fichier
-        // existe. Rendre la main ici sans attendre, c'est déclarer terminé un
-        // enregistrement qui n'est pas écrit.
+        // `stopCapture()` rend la main **très** longtemps avant que le fichier
+        // existe : mesuré le 11 août 2026, douze minutes sur une réunion de
+        // trente-six. Rendre la main ici sans attendre, c'est déclarer terminé
+        // un enregistrement dont 93 % reste à écrire.
         //
         // Le delegate est encore retenu pendant l'attente, et c'est
         // indispensable : `SCRecordingOutput` ne le tient que faiblement, et
         // c'est lui qui porte le signal de fin.
-        let finalized = await signals.waitForFinish(timeout: .seconds(60))
+        let destination = outputURL
+        let recorded = segmentOpenedAt.map { ContinuousClock.now - $0 } ?? .zero
+        segmentOpenedAt = nil
+
+        let verdict = await signals.awaitFinish(
+            watch: FinalizationWatch(recorded: recorded),
+            bytesWritten: { Self.sizeOfFile(at: destination) }
+        )
+
+        // **Rien n'est lâché tant que la finalisation n'a pas abouti.** Le
+        // delegate et la sortie d'enregistrement étaient relâchés avant même de
+        // regarder le verdict : le callback de fin, qui finissait par arriver,
+        // ne trouvait plus personne, et une reprise de l'attente était devenue
+        // impossible. On garde donc les références sur un échec — elles ne
+        // coûtent rien, et elles sont la seule chance qu'un fichier tardif soit
+        // encore reconnu.
+        guard case .finished = verdict else {
+            throw CaptureError.finalizationAbandoned(
+                verdict.failureReason(formattedBytes: { $0.formatted(.byteCount(style: .file)) })
+                    ?? "raison inconnue",
+                bytesWritten: verdict.bytesWritten
+            )
+        }
 
         outputURL = nil
         delegate = nil
         recordingOutput = nil
+    }
 
-        guard finalized else { throw CaptureError.finalizationTimedOut }
+    /// Taille du fichier, ou zéro s'il n'existe pas encore. Un fichier absent
+    /// n'est pas une erreur : `replayd` ne le crée pas instantanément.
+    ///
+    /// `FileManager` et pas `URL.resourceValues` : celui-ci sert volontiers une
+    /// valeur mise en cache sur l'URL, et toute la politique d'attente repose
+    /// sur le fait de voir la taille bouger. Un cache ici transformerait une
+    /// finalisation en bonne santé en un silence de deux minutes, c'est-à-dire
+    /// exactement la panne qu'on corrige.
+    private static func sizeOfFile(at url: URL?) -> Int64 {
+        guard let url else { return 0 }
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path(percentEncoded: false))
+        return attributes?[.size] as? Int64 ?? 0
     }
 
     /// Arrête un flux resté ouvert après un `stop()` en échec.
