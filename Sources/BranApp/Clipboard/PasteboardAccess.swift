@@ -236,6 +236,45 @@ actor PasteboardAccess {
         let expectationHeld: Bool
     }
 
+    /// Le cœur commun à **toutes** les écritures de bran : la prise du jeton, la
+    /// vérification du numéro de version, l'ouverture du presse-papiers et
+    /// l'annonce. Seul ce qu'on y dépose change d'un appelant à l'autre.
+    ///
+    /// **Il est privé et il n'a qu'un paramètre variable, parce que ces quatre
+    /// gestes-là n'ont pas le droit d'être écrits deux fois.** Le jour où
+    /// l'historique a eu besoin d'écrire autre chose qu'une chaîne, la solution
+    /// évidente était une seconde méthode complète à côté de la première ; elle
+    /// aurait recopié, dans l'ordre, quatre décisions dont chacune a coûté un
+    /// défaut réel — le jeton pris sur la file et non chez l'appelant (point 9),
+    /// la comparaison du numéro de version dans le même passage que l'écriture
+    /// qu'elle autorise (points 3 et 8), `prepareForNewContents(with:)` plutôt
+    /// que `clearContents()` (point 5), et l'annonce à l'historique sans laquelle
+    /// bran range ses propres écritures comme des copies de l'utilisateur. Une
+    /// copie de cette séquence n'aurait pas eu à se tromper pour être dangereuse :
+    /// il lui aurait suffi de ne pas suivre la correction suivante.
+    ///
+    /// `contents` est appelée **après** `prepareForNewContents` et sur la file de
+    /// l'acteur, donc au seul endroit du programme d'où l'on a le droit de
+    /// toucher `NSPasteboard.general` (point 8). Elle n'échappe pas : rien n'en
+    /// garde une référence, et elle ne peut donc pas écrire plus tard, quand le
+    /// presse-papiers appartiendra à quelqu'un d'autre.
+    private func write(
+        expecting expected: Int?,
+        claiming claim: PasteDeadline,
+        contents: (NSPasteboard) -> Void
+    ) -> WriteOutcome? {
+        guard claim.claim() else { return nil }
+
+        let pasteboard = NSPasteboard.general
+        let held = expected != nil && pasteboard.changeCount == expected
+
+        let written = pasteboard.prepareForNewContents(with: .currentHostOnly)
+        contents(pasteboard)
+
+        announce(written)
+        return WriteOutcome(changeCount: written, expectationHeld: held)
+    }
+
     /// Écrit le texte, après avoir constaté sur place si le presse-papiers
     /// portait encore le numéro de version attendu.
     ///
@@ -247,6 +286,13 @@ actor PasteboardAccess {
     /// l'option et laisse le presse-papiers universel diffuser la dictée sur les
     /// autres appareils du compte iCloud (point 5). Sa valeur de retour est le
     /// nouveau numéro de version, dont dépend la restitution.
+    ///
+    /// Ces trois gestes — le jeton, la comparaison, l'ouverture — ont déménagé
+    /// dans `write(expecting:claiming:contents:)` le jour où l'historique a eu
+    /// besoin d'écrire des représentations plutôt qu'une chaîne. **Ils sont
+    /// inchangés, et ils sont désormais les mêmes objets, pas les mêmes mots** :
+    /// c'est tout l'intérêt du déménagement. Ce qui reste ici est la seule chose
+    /// qui distinguait cette écriture-là : `setString`.
     ///
     /// - Parameter claim: le jeton du point 9. **La prise se fait ici, sur la
     ///   file, juste avant de toucher le presse-papiers** — exactement comme la
@@ -264,16 +310,123 @@ actor PasteboardAccess {
         expecting expected: Int?,
         claiming claim: PasteDeadline
     ) -> WriteOutcome? {
-        guard claim.claim() else { return nil }
+        write(expecting: expected, claiming: claim) { pasteboard in
+            pasteboard.setString(text, forType: .string)
+        }
+    }
 
-        let pasteboard = NSPasteboard.general
-        let held = expected != nil && pasteboard.changeCount == expected
+    /// Écrit **plusieurs représentations** — une image, des fichiers, un texte
+    /// enrichi avec sa mise en forme —, aux mêmes conditions exactement que
+    /// l'écriture d'une chaîne.
+    ///
+    /// Le frère de `write(_:expecting:claiming:)`, et pas son cousin : les deux
+    /// passent par le même cœur privé, donc par le même jeton, la même
+    /// comparaison de numéro de version, le même `prepareForNewContents(with:)`
+    /// et la même annonce à l'historique. Tout ce que celui-ci ajoute est
+    /// `writeObjects`, c'est-à-dire très précisément ce que `restore` faisait
+    /// déjà et qu'il fait maintenant avec le même constructeur d'éléments.
+    ///
+    /// **L'annonce n'est pas un détail de cette méthode, c'est sa condition
+    /// d'existence.** Son appelant est le panneau d'historique : sans l'annonce,
+    /// chaque recollage depuis le panneau serait vu par le guet comme une copie
+    /// de l'utilisateur et rangé une seconde fois dans la liste dont il vient de
+    /// sortir. Un doublon par recollage, produit par l'historique lui-même — le
+    /// genre de défaut circulaire qu'on met une soirée à comprendre.
+    ///
+    /// **L'ordre des représentations est celui du tableau** (point 7) :
+    /// l'application qui colle prend le premier type qu'elle comprend, donc
+    /// l'appelant qui veut être collé en RTF plutôt qu'en texte brut doit
+    /// déclarer le RTF en premier. Ce n'est pas à cette méthode d'en décider,
+    /// mais c'est à elle de ne pas le perdre.
+    ///
+    /// - Parameter items: un élément par objet copié — trois fichiers glissés
+    ///   depuis le Finder sont trois éléments, un texte enrichi est un seul
+    ///   élément à deux représentations.
+    ///
+    ///   **Un tableau vide ne s'écrit pas.** Il vaut `[]` pour `restore`, où il
+    ///   veut dire « rends le presse-papiers vide » et où c'est la bonne réponse
+    ///   (point 2) ; ici il ne peut vouloir dire que « colle rien », ce qui
+    ///   effacerait le presse-papiers de l'utilisateur juste avant de lui envoyer
+    ///   un ⌘V sans objet. Le refus est donc **avant la prise du jeton** : ne pas
+    ///   le prendre laisse le minuteur du point 9 répondre à l'appelant, qui
+    ///   n'attend donc jamais pour rien. Le message qu'il rendra parlera d'un
+    ///   presse-papiers qui n'a pas répondu, ce qui n'est pas la raison exacte —
+    ///   la vraie est dans le journal ci-dessous. On a préféré ce petit mensonge
+    ///   à une quatrième issue dans `Paster.Landing`, qui aurait fait porter à
+    ///   tous les appelants, dictée comprise, un cas qu'aucun d'eux ne peut
+    ///   produire.
+    ///
+    ///   **Le vide se décide en amont, et il s'y décide déjà.** Une entrée qui
+    ///   n'a plus rien à donner — refusée à l'écriture, blobs purgés — se
+    ///   reconnaît par `ClipboardEntry.canPaste`, et `ClipboardPastePlan.items`
+    ///   rend `[]` pour elle. C'est là que le panneau doit s'arrêter, avec un
+    ///   bouton grisé et sa raison, plutôt qu'ici avec un message approximatif.
+    ///   Ce refus-ci est le filet, pas la règle.
+    /// - Returns: `nil` quand le minuteur a renoncé le premier, ou quand il n'y
+    ///   avait rien à écrire. Dans les deux cas le presse-papiers de
+    ///   l'utilisateur reste tel qu'il l'a laissé.
+    @discardableResult
+    func write(
+        _ items: [SavedItem],
+        expecting expected: Int?,
+        claiming claim: PasteDeadline
+    ) -> WriteOutcome? {
+        guard items.isEmpty == false else {
+            FeatureLog.record(
+                "presse-papiers : écriture sans aucune représentation refusée —"
+                + " le presse-papiers n'est pas vidé, le minuteur répondra"
+            )
+            return nil
+        }
 
-        let written = pasteboard.prepareForNewContents(with: .currentHostOnly)
-        pasteboard.setString(text, forType: .string)
+        // **La valeur de retour de `writeObjects` n'est pas décorative.** AppKit
+        // rend `false` quand il refuse l'écriture, et l'ignorer laissait passer
+        // le pire enchaînement de tout ce chemin : `prepareForNewContents` a
+        // déjà vidé le presse-papiers, l'appelant reçoit un `WriteOutcome` qu'il
+        // croit bon, il envoie son ⌘V — et l'utilisateur colle **le vide**,
+        // c'est-à-dire perd à la fois ce qu'il voulait coller et ce qu'il avait
+        // avant. Avec `restoresClipboard = false`, rien ne le rattrape.
+        //
+        // On rend donc `nil`, exactement comme pour un tableau vide : le
+        // minuteur du point 9 répondra, l'appelant saura que rien n'a abouti, et
+        // aucun ⌘V ne partira.
+        var accepted = true
+        let outcome = write(expecting: expected, claiming: claim) { pasteboard in
+            accepted = pasteboard.writeObjects(Self.objects(for: items))
+        }
+        guard accepted else {
+            FeatureLog.record(
+                "presse-papiers : macOS a refusé l'écriture des représentations —"
+                + " rien ne sera collé, et le presse-papiers reste vide"
+            )
+            return nil
+        }
+        return outcome
+    }
 
-        announce(written)
-        return WriteOutcome(changeCount: written, expectationHeld: held)
+    /// Reconstruit des `NSPasteboardItem` à partir de valeurs pures.
+    ///
+    /// Un seul constructeur pour la restitution et pour l'écriture de
+    /// l'historique, parce que les deux ont la même chose à ne pas perdre :
+    /// **l'ordre des représentations** (point 7). Deux boucles écrites
+    /// séparément auraient très bien pu diverger sur ce point sans que rien ne
+    /// le signale — la même copie enrichie ressortant en RTF d'un côté et en
+    /// texte brut de l'autre est exactement le défaut qui a produit le point 7.
+    ///
+    /// `NSPasteboardItem` n'est pas `Sendable` (voir `SavedRepresentation`) :
+    /// les objets naissent ici, sur la file de l'acteur, et sont consommés dans
+    /// le même passage. Aucun ne traverse de frontière d'isolation.
+    private static func objects(for items: [SavedItem]) -> [NSPasteboardItem] {
+        items.map { item in
+            let object = NSPasteboardItem()
+            for representation in item.representations {
+                object.setData(
+                    representation.data,
+                    forType: NSPasteboard.PasteboardType(representation.type)
+                )
+            }
+            return object
+        }
     }
 
     /// Rend le contenu sauvegardé, si le presse-papiers porte toujours le numéro
@@ -296,16 +449,10 @@ actor PasteboardAccess {
         announce(pasteboard.prepareForNewContents(with: .currentHostOnly))
         guard items.isEmpty == false else { return true }
 
-        pasteboard.writeObjects(items.map { item in
-            let restored = NSPasteboardItem()
-            for representation in item.representations {
-                restored.setData(
-                    representation.data,
-                    forType: NSPasteboard.PasteboardType(representation.type)
-                )
-            }
-            return restored
-        })
+        // Le même constructeur d'éléments que l'écriture de représentations, et
+        // pas une seconde boucle qui lui ressemble : voir `objects(for:)` pour
+        // ce que deux boucles jumelles auraient fini par perdre.
+        pasteboard.writeObjects(Self.objects(for: items))
         return true
     }
 }

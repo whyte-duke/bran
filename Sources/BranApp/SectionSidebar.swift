@@ -249,9 +249,7 @@ struct SidebarItem: View {
     /// se voit sans dépendre d'une seule couleur, ce qui la rend aussi lisible
     /// en vision daltonienne.
     private var background: AnyShapeStyle {
-        if isSelected { return AnyShapeStyle(.quaternary) }
-        if isHovering { return AnyShapeStyle(.quinary) }
-        return AnyShapeStyle(.clear)
+        Palette.row(hover: isHovering, selected: isSelected)
     }
 }
 

@@ -290,6 +290,76 @@ final class Paster {
         }
     }
 
+    /// Ce qu'un collage dépose dans le presse-papiers.
+    ///
+    /// **Deux formes, parce qu'il y a deux sortes d'appelants et qu'aucune des
+    /// deux ne doit payer pour l'autre.** La dictée et la capture de texte
+    /// produisent du texte, et rien d'autre : leur donner à construire des
+    /// représentations les obligerait à savoir ce qu'est `public.utf8-plain-text`
+    /// pour dire « voici une phrase ». Le panneau d'historique, lui, doit
+    /// pouvoir recoller ce qui a été copié — une image, des fichiers, un texte
+    /// enrichi avec sa mise en forme —, et un `String` ne peut pas porter ça.
+    ///
+    /// Une énumération plutôt qu'un protocole ou une fermeture d'écriture : les
+    /// deux formes sont connues, closes, et c'est le presse-papiers qui décide
+    /// de ce qu'il accepte, pas nous. Un protocole aurait ouvert une porte que
+    /// personne ne demande et aurait laissé un appelant écrire lui-même sur
+    /// `NSPasteboard.general`, ce que le point 8 interdit.
+    ///
+    /// `Sendable` parce que la valeur traverse la frontière du main actor vers
+    /// la file série de `PasteboardAccess` — et elle ne le peut que parce que
+    /// `SavedItem` est fait de valeurs pures. Un `NSPasteboardItem` dans ce
+    /// tableau rejouerait le XPC du point 6 dans le mauvais domaine d'isolation.
+    enum Payload: Sendable {
+        /// Du texte brut, la charge utile de la dictée et de la capture.
+        case text(String)
+
+        /// Des représentations, **dans l'ordre de préférence** : l'application
+        /// qui colle prend le premier type qu'elle comprend (point 7). Un
+        /// élément par objet copié ; un texte enrichi est un seul élément à
+        /// plusieurs représentations, trois fichiers sont trois éléments.
+        ///
+        /// Un tableau vide n'est pas écrit — voir
+        /// `PasteboardAccess.write(_:expecting:claiming:)`, qui explique
+        /// pourquoi vider le presse-papiers ne peut pas être la réponse à
+        /// « colle ça ».
+        case representations([SavedItem])
+
+        /// L'écriture correspondante, sur la file de l'acteur.
+        ///
+        /// **Le seul endroit du programme où la forme de la charge utile est
+        /// examinée.** Le collage et la copie sans collage passent tous les deux
+        /// par ici, et c'est ce qui garantit qu'ils ne peuvent pas diverger sur
+        /// ce qu'ils écrivent. Les deux gestes qui entourent l'écriture, eux, ne
+        /// sont pas ici et ne doivent pas y être : la prise du jeton (point 9)
+        /// et la comparaison du numéro de version (points 3 et 8) se font sur la
+        /// file, dans le même passage que l'écriture qu'elles autorisent.
+        ///
+        /// Non isolée au main actor : une énumération imbriquée n'hérite pas de
+        /// l'isolation de son parent en Swift 6, ce qui tombe bien — cette
+        /// méthode n'a rien à faire sur le fil principal, elle ne fait que
+        /// sauter vers la file série.
+        fileprivate func write(
+            expecting expected: Int?,
+            claiming claim: PasteDeadline
+        ) async -> PasteboardAccess.WriteOutcome? {
+            switch self {
+            case .text(let text):
+                await pasteboardAccess.write(
+                    text,
+                    expecting: expected,
+                    claiming: claim
+                )
+            case .representations(let items):
+                await pasteboardAccess.write(
+                    items,
+                    expecting: expected,
+                    claiming: claim
+                )
+            }
+        }
+    }
+
     /// Ce qu'on dit à l'utilisateur quand le collage n'a pas eu lieu.
     ///
     /// La phrase vit ici, à côté de la garantie dont elle dépend : quoi qu'il
@@ -428,7 +498,20 @@ final class Paster {
         snapshot = read
     }
 
-    /// Place le texte dans le presse-papiers et le colle dans la cible.
+    /// Place la charge utile dans le presse-papiers et la colle dans la cible.
+    ///
+    /// **La forme générale, et le seul chemin de collage du programme.** Elle
+    /// s'appelait `paste(_ text: String, ...)` tant que ses deux seuls appelants
+    /// produisaient du texte ; le panneau d'historique, lui, doit recoller des
+    /// images et des fichiers. Ce qui a changé tient en une ligne : ce qu'on
+    /// écrit. Tout ce qui suit l'écriture — la cible encore vivante, la saisie
+    /// sécurisée, `activate()`, les 0,08 s, le ⌘V, `whenLanded`, la restitution
+    /// conditionnelle — est resté **ici, en un seul exemplaire**. C'est là que
+    /// sont les neuf points de l'en-tête, et une seconde copie de cette séquence
+    /// aurait reproduit les neuf défauts qui les ont écrits, dans un fichier où
+    /// personne n'aurait pensé à les chercher. `paste(_ text:whenLanded:)` est
+    /// donc devenu un appel d'une ligne vers ici, et le chemin de la dictée est
+    /// littéralement le code d'avant.
     ///
     /// **Deux questions, deux réponses, et il faut les deux** (point 8) :
     ///
@@ -461,7 +544,7 @@ final class Paster {
     ///   poser de son côté. Facultatif : un appelant qui n'a rien à enchaîner ne
     ///   doit pas avoir à écrire une fermeture vide.
     @discardableResult
-    func paste(_ text: String, whenLanded: ((Landing) -> Void)? = nil) -> Bool {
+    func paste(_ payload: Payload, whenLanded: ((Landing) -> Void)? = nil) -> Bool {
         // La lecture en cours n'a plus d'objet : on s'apprête à écrire par-
         // dessus ce qu'elle est en train de lire. L'annuler ne l'interrompra pas
         // si elle est déjà bloquée dans son XPC, mais lui épargnera tout ce
@@ -527,8 +610,12 @@ final class Paster {
             // `claiming:` est pris au même endroit et pour la même raison : la
             // décision d'écrire et l'écriture doivent être indissociables. Prise
             // ici, la course avec le minuteur se jouerait entre les deux.
-            let outcome = await pasteboardAccess.write(
-                text,
+            //
+            // La forme de la charge utile est tranchée dans `Payload.write` et
+            // pas ici : c'est la seule ligne que le texte et les représentations
+            // n'avaient pas en commun, et tout ce qui suit leur appartient aux
+            // deux.
+            let outcome = await payload.write(
                 expecting: saved?.changeCount,
                 claiming: deadline
             )
@@ -637,7 +724,35 @@ final class Paster {
         return willTry
     }
 
-    /// Place le texte dans le presse-papiers, sans coller.
+    /// Place le **texte** dans le presse-papiers et le colle dans la cible.
+    ///
+    /// Le chemin de la dictée et de la capture de texte, mot pour mot celui
+    /// d'avant : une seule ligne, qui emballe la chaîne et appelle la forme
+    /// générale. Il n'y a rien à lire ici, tout est dans
+    /// `paste(_:whenLanded:)` — y compris les deux réponses du point 8, dont la
+    /// valeur de retour que cette surcharge se contente de faire suivre.
+    ///
+    /// **Elle existe pour que les appelants n'aient pas à changer.** Leur faire
+    /// écrire `paste(.text(texte))` aurait été une modification mécanique de
+    /// deux fichiers, sans le moindre gain : ils n'ont qu'une forme de charge
+    /// utile à offrir, et la leur faire nommer à chaque appel n'aurait fait
+    /// qu'ajouter du bruit à des sites d'appel déjà denses. Elle a aussi une
+    /// valeur de preuve : tant qu'elle est là, la dictée ne peut pas dériver de
+    /// la forme générale sans qu'on le voie ici.
+    @discardableResult
+    func paste(_ text: String, whenLanded: ((Landing) -> Void)? = nil) -> Bool {
+        paste(.text(text), whenLanded: whenLanded)
+    }
+
+    /// Place la charge utile dans le presse-papiers, sans coller.
+    ///
+    /// La même généralisation qu'au collage et pour le même appelant : le
+    /// panneau d'historique a besoin de « copier sans coller » sur une image
+    /// comme sur un texte, et ce bouton-là serait le seul du panneau à ne
+    /// marcher que sur la moitié des entrées. La forme s'y applique
+    /// naturellement — il n'y a ici ni cible, ni ⌘V, ni restitution, donc rien
+    /// que la charge utile puisse compliquer : le seul geste est l'écriture, et
+    /// c'est précisément celui que `Payload` sait faire des deux façons.
     ///
     /// - Parameter whenLanded: appelé **exactement une fois**, sur le main actor.
     ///   Même règle qu'au collage : rien ne doit annoncer « c'est copié » avant
@@ -649,7 +764,7 @@ final class Paster {
     ///   Ce chemin-là avait le même trou que l'autre : sans réponse, la capture
     ///   restait en `.copying` indéfiniment. Facultatif — une copie depuis
     ///   l'historique n'a rien à enchaîner.
-    func copyOnly(_ text: String, whenLanded: ((Bool) -> Void)? = nil) {
+    func copyOnly(_ payload: Payload, whenLanded: ((Bool) -> Void)? = nil) {
         // Un geste explicite de l'utilisateur : ce qu'il vient de copier prime
         // sur tout ce que bran avait prévu de faire du presse-papiers. La
         // lecture en cours n'a plus d'objet, et une restitution en attente lui
@@ -683,16 +798,27 @@ final class Paster {
         }
 
         Task {
-            let written = await pasteboardAccess.write(
-                text,
-                expecting: nil,
-                claiming: deadline
-            )
+            // `expecting: nil` : une copie explicite ne restitue rien, donc il
+            // n'y a aucun numéro de version à faire tenir. Et la forme de la
+            // charge utile est tranchée dans `Payload.write`, au même endroit
+            // que pour le collage — c'est ce qui interdit aux deux chemins
+            // d'écrire différemment ce que l'appelant leur a donné.
+            let written = await payload.write(expecting: nil, claiming: deadline)
             // Le minuteur a renoncé le premier : il a déjà répondu `false`, et
             // rien n'a été écrit.
             guard written != nil else { return }
             whenLanded?(true)
         }
+    }
+
+    /// Place le **texte** dans le presse-papiers, sans coller.
+    ///
+    /// Le chemin de la capture de texte et des deux boutons « copier » de
+    /// l'historique, inchangé : une ligne qui emballe la chaîne. Même raison
+    /// d'exister que la surcharge jumelle du collage — les appelants qui n'ont
+    /// que du texte à offrir n'ont pas à le nommer.
+    func copyOnly(_ text: String, whenLanded: ((Bool) -> Void)? = nil) {
+        copyOnly(.text(text), whenLanded: whenLanded)
     }
 
     // MARK: - Presse-papiers

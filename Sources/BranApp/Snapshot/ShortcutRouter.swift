@@ -50,6 +50,17 @@ final class ShortcutRouter {
     /// n'ouvre de panneau.
     var openClipboardPanel: (() -> Void)?
 
+    /// « Le panneau du presse-papiers est-il ouvert ? »
+    ///
+    /// **Une fermeture, comme l'ouverture, et pour la même raison** : le
+    /// contrôleur du presse-papiers n'est pas connu de cet aiguilleur. Elle
+    /// complète l'arbitrage dans le sens qui manquait — les deux autres
+    /// fonctions faisaient taire le panneau, le panneau ne faisait taire
+    /// personne. Or il prend le clavier : démarrer une dictée pendant qu'il est
+    /// ouvert poserait l'encoche par-dessus une liste qui attend une touche, et
+    /// une capture y poserait le viseur de macOS.
+    var clipboardIsBusy: (() -> Bool)?
+
     /// « Une copie vient d'avoir lieu, et voici le compte d'avant. »
     ///
     /// Le futur contrôleur y branchera `machine.handle(.hinted(changeCount:at:))`
@@ -71,14 +82,14 @@ final class ShortcutRouter {
     private func route(_ signal: HotkeyMonitor.Signal) {
         switch signal {
         case .triggerDown(.dictation):
-            guard snapshot?.isBusy != true else { return }
+            guard snapshot?.isBusy != true, clipboardIsBusy?() != true else { return }
             dictation?.hotkeyDown()
 
         case .triggerUp(.dictation):
             dictation?.hotkeyUp()
 
         case .triggerDown(.snapshot):
-            guard dictation?.isBusy != true else { return }
+            guard dictation?.isBusy != true, clipboardIsBusy?() != true else { return }
             snapshot?.triggered()
 
         case .triggerUp(.snapshot):

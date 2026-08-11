@@ -62,6 +62,99 @@ enum Radius {
     static let pill: CGFloat = 26
 }
 
+// MARK: - Tailles fixes
+
+/// Les rares dimensions qu'une vue **ne peut pas** déduire de son contenu.
+///
+/// **Pourquoi une quatrième section de géométrie.** `Space` mesure ce qui sépare
+/// deux choses, `Radius` ce qui arrondit un coin ; ni l'un ni l'autre ne dit ce
+/// que fait 44 points de hauteur imposée à une ligne, et les ranger dans `Space`
+/// aurait cassé la promesse de son commentaire — « une échelle de 4 points, et
+/// rien d'autre » — qui n'est tenable que parce qu'aucun échelon n'y désigne
+/// autre chose qu'un écart.
+///
+/// **Cette section doit rester très courte.** Une taille fixe est un aveu :
+/// elle ne suit pas la préférence de taille de texte de macOS, exactement comme
+/// les seize tailles en points que `Type` a supprimées. Chacune de celles qui
+/// sont ici doit donc défendre pourquoi la mise en page ne peut pas être laissée
+/// au contenu. Si un jour l'une d'elles ne peut plus le défendre, elle sort.
+enum Size {
+    /// **La hauteur d'une ligne de l'historique du presse-papiers.**
+    ///
+    /// Fixe, et c'est la décision structurante du panneau. Une hauteur variable
+    /// oblige la liste à mesurer chaque ligne pour connaître sa propre géométrie
+    /// de défilement ; sur les ~500 entrées que `ClipboardStore.windowSize`
+    /// garde en mémoire, cela veut dire composer cinq cents lignes avant de
+    /// pouvoir dessiner la première, et le panneau s'ouvre au raccourci, sous un
+    /// budget de 50 ms que tout le stockage a été conçu pour tenir (voir
+    /// `ClipboardStore` : fenêtre bornée, index par jour, blobs jamais ouverts).
+    /// Perdre ces 50 ms dans la mise en page après les avoir gagnés sur le
+    /// disque serait absurde. Hauteur constante : la position de la ligne *n*
+    /// est une multiplication, le défilement de 250 lignes est régulier, et
+    /// l'ascenseur ne saute pas en cours de route.
+    ///
+    /// **44, et pas un chiffre rond au hasard.** Deux lignes de texte au réglage
+    /// par défaut — une prévisualisation en `Type.cardBody` (~16 pt d'interligne)
+    /// au-dessus d'une méta en `Type.meta` (~14 pt), séparées de `Space.line` —
+    /// occupent 31 points ; `Space.tight` en haut et en bas porte le total à 39.
+    /// Les 5 points restants sont la marge d'un cran de préférence de taille de
+    /// texte, au-delà duquel c'est la prévisualisation qui se rogne, pas la
+    /// ligne qui grandit. C'est le prix assumé de la régularité du défilement,
+    /// et 44 est sur la grille de 4 points de `Space` (11 × 4).
+    static let clipboardRow: CGFloat = 44
+
+    /// **La largeur du panneau d'historique.**
+    ///
+    /// 460 points portent une soixantaine de caractères de prévisualisation en
+    /// `Type.cardBody` — la longueur au-delà de laquelle une ligne copiée cesse
+    /// d'être reconnaissable par son début, et donc au-delà de laquelle chaque
+    /// point supplémentaire n'achète plus rien. Plus étroit, deux entrées voisines
+    /// se ressemblent ; beaucoup plus large, la fenêtre couvre le document dans
+    /// lequel on s'apprête à coller, ce qui est exactement le contraire du geste.
+    ///
+    /// La comparaison a été faite : Maccy s'en tient à ~300 et coupe trop tôt,
+    /// les lanceurs de commandes montent à ~750 parce qu'ils affichent des
+    /// résultats hétérogènes et non une liste d'une seule sorte.
+    static let clipboardPanelWidth: CGFloat = 460
+
+    /// **La hauteur du panneau d'historique.**
+    ///
+    /// Dérivée de `clipboardRow` et du clavier, pas choisie : neuf lignes de 44
+    /// font 396, et neuf est le nombre exact que ⌘1…⌘9 sait atteindre. Un
+    /// panneau qui en montrerait dix laisserait la dixième sans raccourci, à
+    /// portée de l'œil et hors de portée de la main — le genre d'écart qu'on ne
+    /// remarque pas en le dessinant et qui agace tous les jours. Le champ de
+    /// filtre et son séparateur ajoutent une quarantaine de points, les marges le
+    /// reste.
+    ///
+    /// Au-delà, la liste défile : c'est le rôle de la recherche, pas celui de la
+    /// hauteur, de retrouver une entrée d'il y a trois semaines.
+    static let clipboardPanelHeight: CGFloat = 9 * clipboardRow + 84
+
+    /// **Le carré de vignette d'une ligne de l'historique** : l'aperçu d'une
+    /// image, l'icône d'un fichier.
+    ///
+    /// 28 découle de `clipboardRow` plutôt que de le contraindre : 44 moins
+    /// `Space.tight` en haut et en bas laisse 36 au maximum, et s'en approcher
+    /// donnerait une vignette qui touche presque les bords et fait paraître la
+    /// ligne trop pleine. À 28, les 8 points qui restent de chaque côté alignent
+    /// optiquement le carré sur le bloc de deux lignes de texte qu'il accompagne
+    /// — c'est-à-dire sur le contenu, et non sur la boîte.
+    ///
+    /// Assez grand pour servir : à 28 points, soit 56 pixels sur un écran
+    /// Retina, deux captures d'écran de la même application restent
+    /// distinguables l'une de l'autre, ce qui est la seule chose qu'on demande à
+    /// une vignette d'historique — reconnaître, pas lire. Assez petit pour que
+    /// le coût de décodage reste celui des lignes visibles.
+    ///
+    /// Carré, et pas au rapport de l'image : des vignettes de largeurs
+    /// différentes désalignent les colonnes de texte d'une ligne à l'autre, et
+    /// c'est précisément ce qui rend une liste illisible en diagonale. Le
+    /// cadrage est l'affaire de la vue. Son rayon est `Radius.control` : une
+    /// vignette est de la taille d'un bouton d'icône, pas d'une carte.
+    static let clipboardThumbnail: CGFloat = 28
+}
+
 // MARK: - Typographie
 
 /// **Aucune taille en points.** Les seize tailles fixes semées dans les vues
@@ -162,6 +255,62 @@ enum Palette {
     /// Le fond d'une carte. Une seule valeur, deux états.
     static func card(hover: Bool) -> AnyShapeStyle {
         hover ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.quinary)
+    }
+
+    /// Le fond d'une **ligne sélectionnable** : trois états, aucun accent.
+    ///
+    /// **Pourquoi ce n'est pas `card(hover:)` avec un paramètre de plus.**
+    /// Une carte et une ligne ne se ressemblent qu'à l'arrêt sur image. Une
+    /// carte est une surface : elle est visible au repos (`.quinary`), elle se
+    /// survole, elle se déplie. Une ligne est un fragment de liste : au repos
+    /// elle **n'a pas de fond du tout** — deux cent cinquante rectangles gris
+    /// empilés font une texture, pas une liste — et ce qui la distingue de ses
+    /// voisines n'est pas la souris mais le **clavier**, qui y pose un point
+    /// d'insertion persistant que la souris ne connaît pas. Les deux fonctions
+    /// ne partagent donc ni leur état de repos, ni le nombre de leurs états, ni
+    /// ce qui les fait changer. Ajouter `selected:` à `card(hover:)` aurait
+    /// obligé chaque appelant de carte à passer `selected: false` pour rien, et
+    /// produit exactement le composant à huit paramètres que ce fichier existe
+    /// pour éviter : un seul point d'entrée qui, à force d'accepter tous les
+    /// cas, ne décrit plus aucune intention.
+    ///
+    /// **Jamais l'accent en fond.** La règle est démontrée, chiffres compris,
+    /// dans `SidebarItem.background` : un fond `.tint` avec du texte blanc tombe
+    /// à ~1,4:1 dès que l'accent système est jaune ou vert, et un fond
+    /// `.selection` avec du texte `.primary` donne du noir sur du bleu foncé
+    /// dans la configuration macOS **par défaut**. Aucune couleur de texte fixe
+    /// ne peut être correcte sur un fond que l'utilisateur choisit. Le fond
+    /// reste donc un matériau neutre, dont le contraste avec `.primary` est
+    /// garanti dans les deux thèmes, et la sélection se lit **hors couleur** :
+    /// c'est ce qui la rend aussi lisible en vision daltonienne. L'appelant
+    /// complète avec la graisse du libellé — `.medium` sélectionné, `.regular`
+    /// sinon — et, s'il en a un, avec l'accent sur son **symbole**, où il n'a
+    /// personne à porter. Ne pas employer `Palette.selection` ici : son propre
+    /// commentaire dit pourquoi.
+    ///
+    /// **Sélectionné l'emporte sur survolé, et il n'y a pas de quatrième état.**
+    /// On aurait pu franchir un cran de plus (`.tertiary`) quand la souris passe
+    /// sur la ligne déjà sélectionnée. C'est refusé : le curseur qui traverse la
+    /// liste sans rien faire ferait alors s'éclaircir la ligne du clavier, et ce
+    /// mouvement se lit comme un déplacement de la sélection. Une sélection au
+    /// clavier doit rester immobile tant que le clavier ne l'a pas déplacée.
+    ///
+    /// **Trois états, deux niveaux de matériau seulement**, et l'écart entre les
+    /// deux est volontairement petit : `.quaternary` sur `.quinary`, c'est le
+    /// même écart qu'entre le repos et le survol d'une carte. Le survol est une
+    /// réponse à un geste en cours, pas une information ; il doit être vu du
+    /// coin de l'œil et oublié.
+    ///
+    /// Ce jeton **existe parce qu'il était déjà écrit en dur** :
+    /// `SidebarItem.background` tranche ces trois mêmes valeurs à la main, hors
+    /// de `Palette`, et le panneau du presse-papiers allait en faire une
+    /// deuxième copie. Deux copies d'une décision de contraste, c'est une copie
+    /// qui dérivera. Voir le rapport de migration : `SidebarItem` doit appeler
+    /// cette fonction.
+    static func row(hover: Bool, selected: Bool) -> AnyShapeStyle {
+        if selected { return AnyShapeStyle(.quaternary) }
+        if hover { return AnyShapeStyle(.quinary) }
+        return AnyShapeStyle(.clear)
     }
 
     /// Un panneau encastré : tuile de fait, éditeur de notes, bandeau.
