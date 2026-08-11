@@ -1,6 +1,27 @@
 import SwiftUI
 
+/// Le point d'entrée réel, et la seule chose qu'il fait avant SwiftUI.
+///
+/// **Un type de lancement séparé, parce qu'on ne peut pas doubler `main()` sur
+/// une `App`.** Le protocole `App` fournit son propre `main()` statique, qui
+/// démarre AppKit et la scène ; le redéclarer dans `BranApp` le masquerait sans
+/// laisser aucun moyen d'appeler celui d'origine. Une vingtaine de lignes ici
+/// évitent donc de réimplémenter un démarrage SwiftUI à la main.
+///
+/// Ce qui passe avant l'interface est **une** sonde de diagnostic, qui ne
+/// s'exécute que sur un drapeau explicite et qui sort sans rien afficher. Elle
+/// est là et pas dans `BranSpike` pour une raison qui n'a pas d'échappatoire :
+/// ce qu'elle mesure est attaché à l'identité de l'application signée, et un
+/// exécutable en ligne de commande hérite de celle du terminal. Voir
+/// `PasteboardAccessProbe`.
 @main
+struct BranLaunch {
+    static func main() {
+        if PasteboardAccessProbe.runIfRequested() { return }
+        BranApp.main()
+    }
+}
+
 struct BranApp: App {
     @State private var model = AppModel()
 
