@@ -103,7 +103,10 @@ final class ShortcutRouter {
             // fonction occupée l'emporte. Ouvrir le panneau pendant une dictée
             // poserait une fenêtre par-dessus l'encoche qui enregistre, et
             // pendant une capture, par-dessus le viseur de macOS.
-            guard dictation?.isBusy != true, snapshot?.isBusy != true else { return }
+            guard dictation?.isBusy != true, snapshot?.isBusy != true else {
+                FeatureLog.record("presse-papiers : ⌘⇧V ignoré, une autre fonction est occupée")
+                return
+            }
             openClipboardPanel?()
 
         case .triggerUp(.clipboard):

@@ -87,6 +87,13 @@ final class ClipboardPanelPresenter {
 
     /// Bascule le panneau. C'est ce que ⌘⇧V appelle.
     func toggle() {
+        // Une ligne de journal de chaque côté de la bascule. Un panneau qui ne
+        // s'ouvre pas est le défaut le plus difficile à diagnostiquer de toute
+        // la fonction : il n'échoue pas, il ne se passe simplement rien, et il y
+        // a six endroits entre la frappe et la fenêtre où le signal peut se
+        // perdre. Sans ces deux lignes, la seule méthode est de regarder
+        // l'écran.
+        panelLog.notice("Panneau : bascule, ouvert = \(self.isOpen, privacy: .public)")
         if isOpen { close() } else { open() }
     }
 
@@ -102,13 +109,20 @@ final class ClipboardPanelPresenter {
         paster.rememberTarget(readingClipboard: false)
 
         let panel = existingPanel() ?? makePanel()
+        // Repositionné à chaque ouverture, jamais seulement à la construction :
+        // le panneau doit s'ouvrir sur l'écran où l'on travaille, et on change
+        // d'écran plus souvent qu'on ne relance bran.
+        panel.setFrame(Self.frame(), display: false)
         self.panel = panel
         // Un échec est un événement, pas un état : il ne survit pas à
         // l'ouverture suivante.
         model?.lastFailure = nil
         model?.announceOpening()
         panel.makeKeyAndOrderFront(nil)
-        observeDismissal()
+        observeDismissal(panel)
+        let state = "visible=\(panel.isVisible) clé=\(panel.isKeyWindow) "
+            + NSStringFromRect(panel.frame)
+        panelLog.notice("Panneau ouvert : \(state, privacy: .public)")
     }
 
     /// Ferme, et défait tout ce que l'ouverture avait posé.
@@ -120,6 +134,7 @@ final class ClipboardPanelPresenter {
     /// basculerait contre un état périmé, et les observateurs resteraient posés
     /// pour la vie du processus.
     func close() {
+        if isOpen { panelLog.notice("Panneau fermé") }
         stopObservingDismissal()
         model?.query = ""
         panel?.orderOut(nil)
@@ -143,10 +158,25 @@ final class ClipboardPanelPresenter {
         )
         self.model = model
 
-        let hosting = NSHostingView(rootView: ClipboardPanelView(model: model))
-        hosting.frame = Self.frame()
+        // **La taille est imposée à la vue, pas déduite d'elle.** Mesuré : sans
+        // cette contrainte, `NSHostingView` installe les contraintes de sa taille
+        // intrinsèque et la fenêtre s'y plie — le panneau s'ouvrait à
+        // `{{634, -1706}, {460, 2620}}`, c'est-à-dire 2 620 points de haut, la
+        // hauteur de toutes ses lignes empilées, très majoritairement sous le
+        // bord de l'écran. Il était bien visible et bien fenêtre clé ; il était
+        // simplement ailleurs.
+        //
+        // Une liste bornée par sa fenêtre défile ; une liste qui dicte sa
+        // fenêtre ne défile jamais et finit hors de l'écran dès la dixième
+        // entrée. Les deux jetons viennent de `Design.swift` — une vue ne porte
+        // aucun nombre — et ce sont les mêmes que ceux du cadre.
+        let content = ClipboardPanelView(model: model)
+            .frame(width: Size.clipboardPanelWidth, height: Size.clipboardPanelHeight)
+        let hosting = NSHostingView(rootView: content)
+        let frame = Self.frame()
+        hosting.frame = NSRect(origin: .zero, size: frame.size)
         return OverlayPanel.makeFocusable(
-            frame: Self.frame(), content: hosting, initialResponder: hosting
+            frame: frame, content: hosting, initialResponder: hosting
         )
     }
 
@@ -223,12 +253,26 @@ final class ClipboardPanelPresenter {
     /// déclenche pour *tous* les clics de la session, y compris ceux qui
     /// atterrissent sur les autres surfaces de bran : le laisser posé ferait
     /// payer une fermeture à chaque clic de la journée.
-    private func observeDismissal() {
+    private func observeDismissal(_ panel: NSPanel) {
         stopObservingDismissal()
 
+        // **La perte du statut de fenêtre clé, et surtout pas
+        // `didResignActive`.** Mesuré, et le premier essai est mort dessus : le
+        // panneau s'ouvrait correctement — visible, clé, bien placé — et se
+        // refermait 440 ms plus tard. La cause est la nature même d'un panneau
+        // *non activant* : ouvrir ne garde pas bran au premier plan, le système
+        // rend l'avant-plan à l'application d'où l'on vient, et bran perd donc
+        // `active` presque aussitôt qu'il l'a pris. Écouter `didResignActive`
+        // revenait à se congédier soi-même.
+        //
+        // Perdre la **clé**, en revanche, veut dire exactement ce qu'on cherche :
+        // les frappes ne nous arrivent plus, quelqu'un d'autre les reçoit, il n'y
+        // a plus de raison de rester à l'écran. C'est aussi le comportement que
+        // la sonde avait constaté — « quand une autre application s'active
+        // vraiment, le panneau rend la clé tout seul ».
         let resignation = NotificationCenter.default.addObserver(
-            forName: NSApplication.didResignActiveNotification,
-            object: nil,
+            forName: NSWindow.didResignKeyNotification,
+            object: panel,
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.close() }
