@@ -72,6 +72,8 @@ struct SettingsPane: View {
                 DictationSettingsSection(model: model)
             case .snapshot:
                 SnapshotSettingsSection(model: model)
+            case .clipboard:
+                ClipboardSettingsSection(model: model)
             case .watch:
                 WatchSettingsSection(model: model)
             case .connections:
@@ -107,6 +109,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     case meetings
     case dictation
     case snapshot
+    case clipboard
     case watch
     case connections
     case permissions
@@ -119,6 +122,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .meetings: "Réunions"
         case .dictation: "Dictée"
         case .snapshot: "Capture"
+        case .clipboard: "Presse-papiers"
         case .watch: "Veille"
         case .connections: "Connexions"
         case .permissions: "Autorisations"
@@ -131,6 +135,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .meetings: "film.stack"
         case .dictation: "waveform"
         case .snapshot: "text.viewfinder"
+        case .clipboard: "doc.on.clipboard"
         case .watch: "binoculars"
         case .connections: "link"
         case .permissions: "lock.shield"

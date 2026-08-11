@@ -46,6 +46,7 @@ public final class AppModel {
     /// détient déjà pour la détection de conflits. Inventer un objet de réglages
     /// vide juste pour la symétrie ferait un fichier de plus qui ne réglerait
     /// rien.
+    let clipboardSettings = ClipboardSettings()
     let clipboard: ClipboardController
 
     /// La veille des sessions parallèles. Même autonomie encore : son propre
@@ -209,9 +210,13 @@ public final class AppModel {
         self.watch = WatchController(settings: watchSettings, store: watchStore)
         self.week = WeekLoader(folder: { watchStore.folder })
 
+        let clipboardSettings = self.clipboardSettings
         self.clipboard = ClipboardController(
-            store: ClipboardStore(root: { [storage] in storage.root }),
-            binding: GlobalTriggerRegistry.clipboardBinding
+            store: ClipboardStore(
+                root: { [storage] in storage.root },
+                retention: clipboardSettings.retention
+            ),
+            settings: clipboardSettings
         )
 
         // **Les deux coutures que le guet avait laissées ouvertes.** L'indice de
@@ -224,6 +229,7 @@ public final class AppModel {
         shortcuts.openClipboardPanel = { [weak self] in
             self?.clipboard.openRequested()
         }
+        shortcuts.clipboardIsBusy = { [weak self] in self?.clipboard.isBusy ?? false }
 
         Task { [weak self, capture] in
             for await reason in capture.failures {

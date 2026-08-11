@@ -16,41 +16,7 @@ protocol GlobalTriggerSettings: AnyObject {
 
 extension DictationSettings: GlobalTriggerSettings {}
 extension SnapshotSettings: GlobalTriggerSettings {}
-
-/// La liaison d'une fonction qui n'a pas encore d'objet de réglages à elle.
-///
-/// **Ce que l'ajout du presse-papiers a révélé.** La recette annoncée plus bas
-/// — trois libellés, une ligne ici, un `case` dans l'aiguilleur — supposait sans
-/// le dire qu'un objet `…Settings` existait déjà et exposait `var trigger`.
-/// C'était vrai des deux premières fonctions parce qu'elles avaient chacune un
-/// écran de réglages complet avant d'avoir un raccourci. Le presse-papiers
-/// arrive dans l'autre sens : le raccourci d'abord, l'écran ensuite. Il fallait
-/// donc bien un quatrième morceau, et le voici — vingt lignes, pas trois.
-///
-/// Le jour où un `ClipboardSettings` naîtra avec le reste de la fonction, il
-/// exposera `var trigger` comme ses deux aînés, la conformance ne coûtera rien,
-/// et ce type-ci disparaîtra — en emportant sa clé, qui est déjà la bonne.
-@MainActor
-@Observable
-final class StandaloneTriggerBinding: GlobalTriggerSettings {
-
-    var trigger: HotkeyBinding { didSet { store() } }
-
-    private let key: String
-    private let defaults = UserDefaults.standard
-
-    init(key: String, default fallback: HotkeyBinding) {
-        self.key = key
-        let data = UserDefaults.standard.data(forKey: key)
-        trigger = data.flatMap { try? JSONDecoder().decode(HotkeyBinding.self, from: $0) }
-            ?? fallback
-    }
-
-    private func store() {
-        guard let data = try? JSONEncoder().encode(trigger) else { return }
-        defaults.set(data, forKey: key)
-    }
-}
+extension ClipboardSettings: GlobalTriggerSettings {}
 
 /// Le seul endroit où l'on déclare qu'une fonction a un raccourci global.
 ///
@@ -87,10 +53,14 @@ final class StandaloneTriggerBinding: GlobalTriggerSettings {
 /// annoncés — ici et dans `ShortcutRouter`. Trois choses manquaient à
 /// l'énoncé, toutes découvertes en le faisant :
 ///
-/// - **le quatrième morceau**. `Entry` exige un `any GlobalTriggerSettings` ;
-///   une fonction qui n'a pas encore d'écran n'a pas d'objet de réglages, donc
-///   rien à donner. D'où `StandaloneTriggerBinding`, plus haut. La recette
-///   valait pour une fonction *déjà réglable*, pas pour une fonction nouvelle ;
+/// - **le quatrième morceau, depuis retiré**. `Entry` exige un
+///   `any GlobalTriggerSettings` ; une fonction sans écran n'avait pas d'objet
+///   de réglages, donc rien à donner, et il a fallu un `StandaloneTriggerBinding`
+///   de vingt lignes pour tenir la liaison en attendant. `ClipboardSettings` est
+///   né avec son écran, a repris la clé `"bran.clipboard.trigger"` au caractère
+///   près — sans quoi le raccourci déjà réglé aurait été perdu au lancement
+///   suivant — et ce type a disparu comme annoncé. La recette valait bien pour
+///   une fonction *déjà réglable*, pas pour une fonction nouvelle ;
 /// - **la liaison par défaut**. Elle ne se déduit de rien et se choisit contre
 ///   le système d'exploitation — voir `HotkeyBinding.clipboardPanel`, où ⌘⇧C
 ///   est écarté parce que le Finder le tient. Elle vit dans `BranSpeech` avec
@@ -172,7 +142,7 @@ enum GlobalTriggerRegistry {
         case .clipboard:
             Entry(
                 trigger: .clipboard,
-                settings: clipboardBinding,
+                settings: model.clipboardSettings,
                 // Le contrôleur est arrivé, et la fermeture vide avec lui :
                 // c'est lui qui inscrit la liaison dans `HotkeyMonitor.bindings`,
                 // parce que rien ne le fait tout seul — `apply` réarme, il
@@ -183,19 +153,6 @@ enum GlobalTriggerRegistry {
             )
         }
     }
-
-    /// Où vit la liaison du presse-papiers, en attendant qu'elle rejoigne les
-    /// réglages de la fonction.
-    ///
-    /// **Une entorse assumée à la règle du dessous — « pas d'état » —, et la
-    /// seule.** Ce n'est pas une deuxième copie de quelque chose : c'est *la*
-    /// copie, écrite dans `UserDefaults` comme les deux autres, sous une clé du
-    /// même format. La désynchronisation que le registre sans état existe pour
-    /// éviter demanderait deux détenteurs de la même valeur ; il n'y en a qu'un.
-    static let clipboardBinding = StandaloneTriggerBinding(
-        key: "bran.clipboard.trigger",
-        default: .clipboardPanel
-    )
 
     static func all(in model: AppModel) -> [Entry] {
         GlobalTrigger.allCases.map { entry(for: $0, in: model) }

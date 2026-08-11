@@ -46,11 +46,12 @@ private let clipboardLog = Logger(subsystem: "com.opahventures.bran", category: 
 ///
 /// ## Ce qui n'est pas ici
 ///
-/// Le panneau. `openPanel` est le point où il se branchera ; tant qu'il n'existe
-/// pas, ⌘⇧V journalise et ne fait rien de visible. Séparé parce que la capture
-/// et l'affichage n'ont aucune dépendance l'un envers l'autre : l'historique se
-/// remplit correctement bien avant qu'il y ait de quoi le regarder, et c'est
-/// dans cet ordre qu'il faut le vérifier.
+/// La fenêtre elle-même, la cible du collage et la fermeture : tout cela vit
+/// dans `ClipboardPanelPresenter`, que ce contrôleur possède sans le connaître
+/// autrement que par `toggle()`. La séparation n'est pas de la symétrie : la
+/// capture et l'affichage n'ont aucune dépendance l'un envers l'autre —
+/// l'historique se remplit correctement bien avant qu'il y ait de quoi le
+/// regarder, et c'est dans cet ordre qu'il a été vérifié.
 @MainActor
 @Observable
 final class ClipboardController {
@@ -72,6 +73,17 @@ final class ClipboardController {
     private var machine = ClipboardMachine()
     private weak var monitor: HotkeyMonitor?
 
+    /// Les vignettes des images de l'historique.
+    ///
+    /// **Tenu ici parce que sans lui le critère des 50 ms est faux.** Décoder
+    /// 250 images pleines pour dessiner une liste détruit le budget d'ouverture
+    /// *et* la mémoire — mesuré sur un historique réel, 183 lignes de PNG
+    /// pesaient 158 Mo. Le cache est construit avec le magasin parce qu'il en
+    /// dérive le chemin des contenus lourds, et balayé au lancement à côté de la
+    /// purge : c'est le seul moment où un travail de ménage ne fait attendre
+    /// personne.
+    let thumbnails: ThumbnailCache
+
     /// La liaison du raccourci d'ouverture, tenue ici parce que rien ne
     /// l'inscrit tout seul.
     ///
@@ -80,7 +92,11 @@ final class ClipboardController {
     /// sienne depuis son propre contrôleur, à la main. Une fonction qui l'oublie
     /// a un raccourci parfaitement réglable dans les réglages et parfaitement
     /// inerte au clavier, sans un mot d'erreur.
-    private let binding: StandaloneTriggerBinding
+    /// Les réglages de la fonction. Tenus ici — et pas seulement la liaison —
+    /// parce que trois d'entre eux doivent être poussés à chaud : la rétention
+    /// au magasin, la matrice des types à la machine, et l'interrupteur de
+    /// capture aux deux voies d'observation. Voir `applySettings()`.
+    private let settings: ClipboardSettings
 
     /// La tâche d'échantillonnage en cours. Une seule : un second indice pendant
     /// une fenêtre ouverte relance la cadence, il ne la double pas.
@@ -88,6 +104,11 @@ final class ClipboardController {
 
     /// Le sondeur périodique, ou `nil` tant qu'il n'a pas démarré.
     private var polling: Task<Void, Never>?
+
+    /// Vrai une fois la bibliothèque chargée. Empêche `applySettings()` de
+    /// lancer le sondeur avant `start(monitor:)` : la fenêtre en mémoire doit
+    /// être remplie avant que quoi que ce soit puisse écrire.
+    private var hasLoaded = false
 
     /// L'application de devant au moment de l'indice.
     ///
@@ -120,9 +141,11 @@ final class ClipboardController {
     /// qu'il faut poser, jamais supposer.
     private var captureGeneration = 0
 
-    /// Ce qui ouvre le panneau d'historique. `nil` tant qu'il n'y a pas de
-    /// panneau — voir le commentaire de classe.
-    var openPanel: (() -> Void)?
+    /// Le panneau d'historique. Construit à la première ouverture, jamais
+    /// reconstruit : c'est ce qui rend tenable le budget de 50 ms.
+    @ObservationIgnored private lazy var panel = ClipboardPanelPresenter(
+        store: store, settings: settings, thumbnails: thumbnails
+    )
 
     /// La cadence du filet lent.
     ///
@@ -134,9 +157,10 @@ final class ClipboardController {
     /// immédiate, et c'est l'écrasante majorité.
     static let pollInterval: Duration = .seconds(2)
 
-    init(store: ClipboardStore, binding: StandaloneTriggerBinding) {
+    init(store: ClipboardStore, settings: ClipboardSettings) {
         self.store = store
-        self.binding = binding
+        self.settings = settings
+        self.thumbnails = ThumbnailCache(store: store)
     }
 
     // MARK: - Démarrage
@@ -192,7 +216,9 @@ final class ClipboardController {
             // le premier tour du sondeur traitait sa mesure comme la référence
             // et non comme un événement. Publier d'abord arme les deux voies
             // avant que quoi que ce soit de lent ne commence.
-            publish(changeCount: await pasteboardAccess.changeCount())
+            if settings.capturesCopies {
+                publish(changeCount: await pasteboardAccess.changeCount())
+            }
 
             await store.load()
             // Le ménage après le chargement, jamais avant : la purge et le
@@ -201,17 +227,18 @@ final class ClipboardController {
             // moment un travail qui n'intéresse personne.
             await store.purgeExpired()
             await store.collectOrphanedBlobs()
-            startPolling()
+            await thumbnails.sweep()
+            hasLoaded = true
+            if settings.capturesCopies { startPolling() }
         }
     }
 
     /// Arrête les deux tâches de fond.
     ///
-    /// Rien ne l'appelle aujourd'hui — `AppModel` vit aussi longtemps que
-    /// l'application — et c'est précisément pour ça qu'elle existe : une boucle
-    /// infinie sans moyen déclaré de s'arrêter est une fuite qui attend son
-    /// premier appelant. Le jour où le presse-papiers gagne un interrupteur,
-    /// c'est ici qu'il se branche.
+    /// **C'est l'interrupteur de capture qui l'appelle**, et il est arrivé peu
+    /// après qu'elle a été écrite « au cas où ». Une boucle infinie sans moyen
+    /// déclaré de s'arrêter est une fuite qui attend son premier appelant ;
+    /// celui-ci est `applySettings()`, quand `capturesCopies` passe à faux.
     func stop() {
         polling?.cancel()
         polling = nil
@@ -221,10 +248,46 @@ final class ClipboardController {
         publishedChangeCount = nil
     }
 
-    /// Réarme la liaison du raccourci. À appeler après tout changement de
-    /// réglage, comme ses deux sœurs.
+    /// Pousse les réglages là où ils agissent, et **à chaud**. À appeler après
+    /// tout changement, comme ses deux sœurs.
+    ///
+    /// Trois destinataires, et aucun ne se réveille tout seul : le magasin pour
+    /// la rétention, la machine pour la matrice des types, les deux voies
+    /// d'observation pour l'interrupteur de capture.
     func applySettings() {
-        monitor?.bind(.clipboard, to: binding.trigger)
+        // Le raccourci est inscrit dans tous les cas, capture éteinte comprise :
+        // ⌘⇧V ouvre l'historique déjà rangé, et cesser d'écrire ne doit pas
+        // empêcher de lire.
+        monitor?.bind(.clipboard, to: settings.trigger)
+        store.setRetention(settings.retention)
+        machine.policy = settings.typePolicy
+
+        guard settings.capturesCopies else {
+            // `stop()` désarme les deux voies d'un coup : il annule le sondeur
+            // et rend `nil` au guet, ce qui suffit à éteindre l'indice clavier —
+            // sans référence publiée, le tap ne relaie plus rien, voir
+            // `HotkeyMonitor.observeCopies`. C'est la définition exacte de « ne
+            // rien écrire du tout », et rien n'est supprimé au passage.
+            stop()
+            return
+        }
+
+        guard hasLoaded, polling == nil else { return }
+        // Rallumage après extinction : la référence d'abord — un indice sans
+        // référence ne veut rien dire —, le sondeur ensuite.
+        Task { [weak self] in
+            let count = await pasteboardAccess.changeCount()
+            // **Le réglage est relu après l'attente, et pas seulement avant.**
+            // L'acteur du presse-papiers peut rester bloqué des secondes dans un
+            // XPC ; éteindre l'interrupteur pendant ce temps laisserait cette
+            // tâche-ci rallumer le sondeur en arrivant, et les copies
+            // recommenceraient à être capturées alors que le réglage dit non.
+            // C'est la règle générale de ce fichier : après un `await`, « rien
+            // n'a changé » est une question, jamais une supposition.
+            guard let self, self.settings.capturesCopies, self.polling == nil else { return }
+            self.publish(changeCount: count)
+            self.startPolling()
+        }
     }
 
     // MARK: - La voie du clavier
@@ -240,12 +303,20 @@ final class ClipboardController {
 
     /// Le raccourci d'ouverture du panneau.
     func openRequested() {
-        guard let openPanel else {
-            clipboardLog.notice("⌘⇧V reçu, aucun panneau à ouvrir")
-            return
-        }
-        openPanel()
+        panel.toggle()
     }
+
+    /// Le panneau est-il ouvert ?
+    ///
+    /// **Lu par `ShortcutRouter`, et il a fallu l'y brancher.** La première
+    /// version portait ce commentaire en annonçant un arbitrage qui n'existait
+    /// pas : on pouvait démarrer une dictée ou une capture pendant que le
+    /// panneau était ouvert **et fenêtre clé**, c'est-à-dire poser l'encoche ou
+    /// le viseur de macOS par-dessus une liste qui attend une touche. C'est
+    /// exactement la réentrance que la doctrine de l'aiguilleur interdit — une
+    /// fonction occupée fait taire les autres — appliquée à la fonction qui
+    /// venait d'arriver.
+    var isBusy: Bool { panel.isOpen }
 
     // MARK: - La voie de l'écriture interne
 
