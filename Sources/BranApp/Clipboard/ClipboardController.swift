@@ -318,6 +318,9 @@ final class ClipboardController {
     /// venait d'arriver.
     var isBusy: Bool { panel.isOpen }
 
+    /// Referme le panneau pour laisser la place à une autre fonction.
+    func closePanel() { panel.close() }
+
     // MARK: - La voie de l'écriture interne
 
     /// bran vient d'écrire sur le presse-papiers, et voici le compte que son

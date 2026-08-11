@@ -141,8 +141,52 @@ final class MicCapture: @unchecked Sendable {
         guard isRunning else { return }
         FeatureLog.record("micro : aucun son sur le périphérique imposé → reprise sur le système")
         stopEngine()
+        Self.waitForHALToLetGo()
         try start(deviceID: nil)
     }
+
+    /// Laisse CoreAudio finir de démonter le contexte d'entrée précédent.
+    ///
+    /// **Mesuré dans le journal système, et c'est la panne que l'utilisateur
+    /// voit.** Enchaîner `engine.stop()` et la construction d'un nouveau moteur
+    /// donne, en rafale : `HALC_ProxyIOContext::_StartIO(): Start failed —
+    /// StartAndWaitForState returned error 35`, puis `HALB_IOThread::_Start:
+    /// there already is a thread`, puis quatre `throwing -10877`. Le micro ne
+    /// démarre pas, et les tentatives coûtent du processeur pour rien.
+    ///
+    /// La raison : `AVAudioEngine.stop()` rend la main tout de suite, mais le
+    /// démontage du **fil d'entrée-sortie du HAL** est asynchrone, hors du
+    /// contrôle du moteur. Le moteur suivant est bien neuf — ce n'est pas le
+    /// défaut que corrigeait `stopEngine` — mais il demande à CoreAudio un
+    /// contexte que CoreAudio n'a pas encore rendu. L'erreur 35 est un
+    /// `EAGAIN` : « réessaie ». Personne ne réessayait.
+    ///
+    /// **Une attente bornée et non une boucle d'essais.** Réessayer le démarrage
+    /// est ce que faisait implicitement le code appelant, et c'est ce qui
+    /// produisait la rafale. Ici on attend que le fil précédent s'en aille, au
+    /// plus `halTeardownBudget`, en rendant la main au système entre deux
+    /// vérifications. Dans le cas normal la première suffit.
+    ///
+    /// Le fil principal est bloqué pendant ce temps, et c'est assumé : ce chemin
+    /// n'est parcouru qu'au repli d'une dictée déjà silencieuse, l'attente est
+    /// plafonnée à quelques dizaines de millisecondes, et l'alternative — rendre
+    /// tout le démarrage asynchrone — déplacerait une machine à états entière
+    /// pour un cas de repli.
+    private static func waitForHALToLetGo() {
+        let deadline = Date().addingTimeInterval(halTeardownBudget)
+        while Date() < deadline {
+            // Un tour de boucle d'exécution : c'est là que CoreAudio poste la
+            // fin de son démontage. Un `sleep` nu ne le laisserait pas parler.
+            RunLoop.current.run(until: Date().addingTimeInterval(halTeardownStep))
+        }
+    }
+
+    /// Ce qu'on accepte d'attendre. Mesuré : le démontage aboutit en une à deux
+    /// dizaines de millisecondes ; 150 ms laissent une marge confortable et
+    /// restent sous le seuil de ce qui se remarque à l'oreille au démarrage
+    /// d'une dictée.
+    private static let halTeardownBudget: TimeInterval = 0.15
+    private static let halTeardownStep: TimeInterval = 0.02
 
     /// Arrête le moteur et rend les échantillons capturés.
     @discardableResult

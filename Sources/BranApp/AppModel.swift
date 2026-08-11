@@ -230,6 +230,7 @@ public final class AppModel {
             self?.clipboard.openRequested()
         }
         shortcuts.clipboardIsBusy = { [weak self] in self?.clipboard.isBusy ?? false }
+        shortcuts.closeClipboardPanel = { [weak self] in self?.clipboard.closePanel() }
 
         Task { [weak self, capture] in
             for await reason in capture.failures {

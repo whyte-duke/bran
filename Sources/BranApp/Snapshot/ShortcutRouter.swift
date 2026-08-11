@@ -61,6 +61,9 @@ final class ShortcutRouter {
     /// une capture y poserait le viseur de macOS.
     var clipboardIsBusy: (() -> Bool)?
 
+    /// Fermer le panneau du presse-papiers pour laisser la place.
+    var closeClipboardPanel: (() -> Void)?
+
     /// « Une copie vient d'avoir lieu, et voici le compte d'avant. »
     ///
     /// Le futur contrôleur y branchera `machine.handle(.hinted(changeCount:at:))`
@@ -82,14 +85,30 @@ final class ShortcutRouter {
     private func route(_ signal: HotkeyMonitor.Signal) {
         switch signal {
         case .triggerDown(.dictation):
-            guard snapshot?.isBusy != true, clipboardIsBusy?() != true else { return }
+            guard snapshot?.isBusy != true else { return }
+            // **Le panneau cède, il ne bloque pas.** La première version le
+            // traitait comme les deux autres fonctions — occupé, donc les autres
+            // se taisent — et c'était faux pour lui seul : les deux autres sont
+            // des gestes qui *durent* et qu'on interromprait, alors que le
+            // panneau est une liste posée à l'écran, que l'on referme d'un ⎋
+            // sans rien perdre. Le refus rendait donc ⌘ droite silencieusement
+            // inerte tant qu'une fenêtre ouverte traînait quelque part — une
+            // dictée qui « ne marche plus », sans un mot pour dire pourquoi.
+            //
+            // Fermer d'abord garde ce que le refus cherchait : jamais l'encoche
+            // par-dessus le panneau, jamais deux surfaces qui se disputent le
+            // clavier.
+            if clipboardIsBusy?() == true { closeClipboardPanel?() }
             dictation?.hotkeyDown()
 
         case .triggerUp(.dictation):
             dictation?.hotkeyUp()
 
         case .triggerDown(.snapshot):
-            guard dictation?.isBusy != true, clipboardIsBusy?() != true else { return }
+            guard dictation?.isBusy != true else { return }
+            // Même raison qu'au-dessus : le panneau cède au viseur, il ne
+            // l'empêche pas.
+            if clipboardIsBusy?() == true { closeClipboardPanel?() }
             snapshot?.triggered()
 
         case .triggerUp(.snapshot):
