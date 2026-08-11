@@ -330,7 +330,16 @@ final class DictationController {
                 do {
                     try mic.restartOnSystemDefault()
                 } catch {
+                    // **La panne est annoncée ici, avec sa vraie raison.**
+                    // Avant, l'échec n'allait qu'au journal : le repli étant le
+                    // dernier recours, la dictée continuait à vide et ne
+                    // s'arrêtait qu'à la garde suivante, 800 ms plus tard, sur
+                    // un « micro muet » générique. L'utilisateur perdait à la
+                    // fois du temps et la seule information utile — ce que
+                    // CoreAudio a refusé, et pourquoi.
                     FeatureLog.record("micro : la reprise système a échoué", error: error)
+                    apply(machine.handle(.failed(.captureFailed(error.localizedDescription))))
+                    return
                 }
             }
 

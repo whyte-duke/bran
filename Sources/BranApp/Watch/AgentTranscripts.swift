@@ -1,6 +1,7 @@
 import BranWatch
 import Darwin
 import Foundation
+import Synchronization
 
 /// **Le capteur certain**, côté disque et côté noyau.
 ///
@@ -38,7 +39,15 @@ enum AgentTranscripts {
     /// c'est quelques millisecondes, mais quelques millisecondes de disque n'ont
     /// rien à faire dans la boucle d'affichage.
     static func observations(now: Date = .now) -> [LaneObservation] {
-        let live = RunningAgents.workingDirectories()
+        // **La vivacité n'est levée que si quelque chose l'attend.**
+        // `TranscriptVerdict.gated` rend sa lecture inchangée pour tout ce qui
+        // n'est pas `.waiting` : une session qui travaille n'a pas besoin qu'on
+        // vérifie que son processus est vivant, elle vient de l'écrire. Or
+        // l'énumérer coûte un `proc_pidpath` par processus de la machine —
+        // plusieurs centaines — et la plupart des tics n'ont aucune session en
+        // attente à départager. La liste est donc calculée à la première
+        // question posée, et pas avant.
+        var live: Set<String>?
         let root = URL.homeDirectory.appending(path: ".claude/projects")
         let manager = FileManager.default
         guard let projects = try? manager.contentsOfDirectory(
@@ -47,19 +56,39 @@ enum AgentTranscripts {
 
         let cutoff = now.addingTimeInterval(-liveness)
         var byLane: [String: LaneObservation] = [:]
+        var visited: Set<String> = []
 
         for project in projects {
             guard let files = try? manager.contentsOfDirectory(
-                at: project, includingPropertiesForKeys: [.contentModificationDateKey]
+                at: project, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
             ) else { continue }
 
             for file in files where file.pathExtension == "jsonl" {
-                let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
-                    .contentModificationDate ?? .distantPast
+                // Les deux champs sont demandés d'un coup : ils viennent du même
+                // `stat`, et la taille sert à dater le mémo aussi finement que
+                // la date de modification — voir `Version`.
+                let values = try? file.resourceValues(forKeys: [
+                    .contentModificationDateKey, .fileSizeKey,
+                ])
+                let modified = values?.contentModificationDate ?? .distantPast
                 guard modified > cutoff else { continue }
-                guard let reading = read(file) else { continue }
 
-                let gated = TranscriptVerdict.gated(reading, liveWorkingDirectories: live)
+                // Pas de taille, pas de mémo : la date seule ne suffit pas à
+                // dater une transcription écrite en rafale, et une lecture de
+                // trop vaut mieux qu'un verdict figé sur un fichier qui a
+                // changé.
+                let version = values?.fileSize.map { Version(modified: modified, size: $0) }
+                visited.insert(file.path)
+                guard let reading = read(file, version: version) else { continue }
+
+                let gated: TranscriptVerdict.Reading
+                if reading.state == .waiting {
+                    let running = live ?? RunningAgents.workingDirectories()
+                    live = running
+                    gated = TranscriptVerdict.gated(reading, liveWorkingDirectories: running)
+                } else {
+                    gated = reading
+                }
                 guard let directory = gated.workingDirectory else { continue }
 
                 let identity = LaneIdentity.claudeCode(
@@ -90,6 +119,14 @@ enum AgentTranscripts {
                 let candidate = observation(for: gated, identity: identity, now: now)
                 byLane[identity.key] = elect(candidate, over: byLane[identity.key])
             }
+        }
+
+        // Le mémo ne garde que les fichiers encore vivants. Ceux qui sont
+        // tombés sous le seuil de vivacité n'ont pas été visités : les laisser
+        // ferait grandir la table à chaque session ouverte depuis le lancement,
+        // sans que rien ne la vide jamais.
+        memos.withLock { table in
+            table = table.filter { visited.contains($0.key) }
         }
 
         return Array(byLane.values)
@@ -174,7 +211,60 @@ enum AgentTranscripts {
         }
     }
 
-    static func read(_ file: URL) -> TranscriptVerdict.Reading? {
+    /// De quelle version d'un fichier un verdict a été tiré.
+    ///
+    /// La date de modification seule ne suffirait pas : deux écritures dans la
+    /// même seconde sont indiscernables sur un système de fichiers à
+    /// granularité grossière, et une transcription est écrite en rafale. La
+    /// taille les sépare — un enregistrement ajouté allonge toujours le
+    /// fichier. Les deux champs viennent du même `stat`, déjà fait pour la
+    /// porte de vivacité : le mémo ne coûte aucun accès disque de plus.
+    struct Version: Equatable, Sendable {
+        let modified: Date
+        let size: Int
+    }
+
+    private struct Memo: Sendable {
+        let version: Version
+        /// `nil` compris : un fichier illisible ou sans verdict doit rester
+        /// illisible sans être rouvert quinze fois par minute.
+        let reading: TranscriptVerdict.Reading?
+    }
+
+    /// Ce qui a déjà été lu, et de quelle version.
+    ///
+    /// **Sans ce mémo, chaque tic relisait cinquante fichiers pour n'en trouver
+    /// que deux ou trois de changés.** Le veilleur tourne toutes les quatre
+    /// secondes ; une session d'agent qui attend n'écrit rien pendant des
+    /// minutes, et une session morte depuis cinq heures reste sous le seuil de
+    /// vivacité jusqu'à la sixième. Au profil, relire ces fichiers pour
+    /// retrouver exactement le verdict précédent était le premier poste de
+    /// dépense de l'application au repos.
+    ///
+    /// `Mutex` plutôt qu'un acteur : la table est touchée depuis la tâche
+    /// détachée du veilleur, une seule à la fois, et deux `withLock` de
+    /// quelques microsecondes par tic n'ont pas besoin d'un point de suspension
+    /// — qui obligerait en retour `observations` à devenir `async` et à
+    /// remonter jusqu'au contrôleur.
+    private static let memos = Mutex<[String: Memo]>([:])
+
+    /// - Parameter version: l'état du fichier tel que l'appelant vient de le
+    ///   constater. Sans elle, la lecture est refaite systématiquement : c'est
+    ///   ce qu'on veut d'un appel isolé, qui n'a aucune raison de faire
+    ///   confiance à un mémo qu'il ne peut pas dater.
+    static func read(_ file: URL, version: Version? = nil) -> TranscriptVerdict.Reading? {
+        if let version, let memo = memos.withLock({ $0[file.path] }), memo.version == version {
+            return memo.reading
+        }
+
+        let reading = readFromDisk(file)
+        if let version {
+            memos.withLock { $0[file.path] = Memo(version: version, reading: reading) }
+        }
+        return reading
+    }
+
+    private static func readFromDisk(_ file: URL) -> TranscriptVerdict.Reading? {
         guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
         defer { try? handle.close() }
 
@@ -182,12 +272,12 @@ enum AgentTranscripts {
         let start = size > UInt64(tailBytes) ? size - UInt64(tailBytes) : 0
         try? handle.seek(toOffset: start)
 
-        guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else {
-            return nil
-        }
+        guard let data = try? handle.readToEnd() else { return nil }
 
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        let reading = TranscriptVerdict.read(lines: lines, tailIsTruncated: start > 0)
+        // Le découpage en lignes vit dans `BranWatch`, avec ses tests : il porte
+        // la règle du fragment initial, et il a une correction à défendre — voir
+        // `TranscriptVerdict.read(utf8Tail:tailIsTruncated:)`.
+        let reading = TranscriptVerdict.read(utf8Tail: data, tailIsTruncated: start > 0)
         return reading.state == .unknown ? nil : reading
     }
 }
@@ -229,6 +319,16 @@ enum RunningAgents {
     /// devinée au hasard.
     private static let pathMax = 4 * 1024
 
+    /// Les noms d'agents en octets, pour les comparer sans construire de
+    /// `String`.
+    ///
+    /// La question « ce processus est-il un agent » se pose une fois par
+    /// processus de la machine — plusieurs centaines par tic — et la réponse est
+    /// non dans la quasi-totalité des cas. Fabriquer une `String` pour chacun,
+    /// juste pour la jeter à la ligne suivante, était au profil le poste
+    /// dominant de cette énumération, devant l'appel système qui la justifie.
+    private static let nameBytes: [[UInt8]] = names.map { Array($0.utf8) }
+
     static func workingDirectories() -> Set<String> {
         var directories: Set<String> = []
 
@@ -241,24 +341,41 @@ enum RunningAgents {
         }
         guard written > 0 else { return [] }
 
+        // Le tampon de chemin est alloué **une fois** pour toute l'énumération.
+        // Un tampon de 4 Ko par processus, mis à zéro à chaque fois, coûtait
+        // plus que le `proc_pidpath` qu'il sert à recevoir.
+        var path = [CChar](repeating: 0, count: pathMax)
+
         for pid in pids where pid > 0 {
-            guard let name = executableName(of: pid), names.contains(name) else { continue }
+            guard isAgent(pid, path: &path) else { continue }
             if let directory = workingDirectory(of: pid) { directories.insert(directory) }
         }
         return directories
     }
 
-    private static func executableName(of pid: pid_t) -> String? {
-        var path = [CChar](repeating: 0, count: pathMax)
+    /// Le dernier composant du chemin de l'exécutable est-il un nom d'agent ?
+    ///
+    /// **Le dernier composant est cherché dans les octets, pas par `URL`.**
+    /// `URL(fileURLWithPath:)` fait un `lstat` sur le chemin pour décider s'il
+    /// désigne un dossier — un appel système par processus de la machine, et
+    /// c'était au profil le second poste de dépense du veilleur. Chercher le
+    /// dernier `/` répond à la même question sans toucher au disque, et sans
+    /// dépendre de l'existence du fichier : un binaire supprimé pendant que son
+    /// processus tourne est un cas réel, et son nom compte toujours.
+    private static func isAgent(_ pid: pid_t, path: inout [CChar]) -> Bool {
+        // `proc_pidpath` rend la longueur utile, sans le zéro terminal : on lit
+        // exactement ces octets plutôt que de chercher un `\0` dans 4 Ko.
         let length = proc_pidpath(pid, &path, UInt32(pathMax))
-        guard length > 0 else { return nil }
+        guard length > 0 else { return false }
 
-        // `proc_pidpath` rend la longueur utile, sans le zéro terminal : on
-        // décode exactement ces octets plutôt que de chercher un `\0` dans un
-        // tampon de 4 Ko.
-        let bytes = path.prefix(Int(length)).map { UInt8(bitPattern: $0) }
-        return URL(fileURLWithPath: String(decoding: bytes, as: UTF8.self)).lastPathComponent
+        return path.withUnsafeBytes { raw in
+            let full = UnsafeRawBufferPointer(rebasing: raw[..<Int(length)])
+            let start = full.lastIndex(of: UInt8(ascii: "/")).map { $0 + 1 } ?? 0
+            let name = UnsafeRawBufferPointer(rebasing: full[start...])
+            return nameBytes.contains { $0.elementsEqual(name) }
+        }
     }
+
 
     /// `PROC_PIDVNODEPATHINFO` rend le vnode du répertoire courant. Réservé aux
     /// processus du même utilisateur — ce qui est exactement le périmètre voulu :

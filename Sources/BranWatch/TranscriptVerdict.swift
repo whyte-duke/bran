@@ -55,6 +55,39 @@ public enum TranscriptVerdict {
     static let assistantMarker = "\"type\":\"assistant\""
     static let endTurnMarker = "\"stop_reason\":\"end_turn\""
 
+    /// Rend un verdict à partir de la **queue brute** d'une transcription.
+    ///
+    /// **Le découpage en lignes est ici, et pas chez l'appelant, parce qu'il a
+    /// une règle et que cette règle mérite d'être vérifiée.** L'appelant lisait
+    /// 256 Kio, les décodait d'un bloc en `String`, puis appelait `split` — qui
+    /// avance par **graphèmes**. Deux défauts pour le prix d'un :
+    ///
+    /// - le coût, mesuré au profil : l'essentiel du temps du veilleur au repos
+    ///   passait à chercher des frontières de caractère dont personne n'a besoin
+    ///   pour trouver des `\n` ;
+    /// - la correction, plus grave : `String(data:encoding:.utf8)` rend `nil`
+    ///   dès que la coupure de la queue tombe au milieu d'un caractère
+    ///   multi-octets. Le fichier entier disparaissait alors du veilleur, sans
+    ///   un mot, et la voie avec lui — au hasard des accents présents à 256 Kio
+    ///   de la fin.
+    ///
+    /// Couper les octets sur `0x0A` puis décoder chaque ligne rend exactement le
+    /// même découpage : l'UTF-8 réserve le bit de poids fort aux octets de
+    /// continuation, donc un `\n` ne peut jamais apparaître à l'intérieur d'un
+    /// caractère. Et la seule ligne qui puisse être coupée est la première, que
+    /// `tailIsTruncated` jette déjà.
+    ///
+    /// - Parameter utf8Tail: les derniers octets du fichier.
+    /// - Parameter tailIsTruncated: vrai si la lecture a commencé en plein
+    ///   milieu du fichier, auquel cas la première ligne est un fragment. **CR-6.**
+    public static func read(utf8Tail: Data, tailIsTruncated: Bool) -> Reading {
+        let lines: [String] = utf8Tail.withUnsafeBytes { raw in
+            raw.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true)
+                .map { String(decoding: $0, as: UTF8.self) }
+        }
+        return read(lines: lines, tailIsTruncated: tailIsTruncated)
+    }
+
     /// Rend un verdict à partir des dernières lignes d'une transcription.
     ///
     /// - Parameter lines: les lignes lues, dans l'ordre du fichier.

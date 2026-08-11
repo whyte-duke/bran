@@ -119,6 +119,22 @@ final class ClipboardPanelPresenter {
         model?.lastFailure = nil
         model?.announceOpening()
         panel.makeKeyAndOrderFront(nil)
+
+        // **Le clavier est repris à chaque ouverture, pas seulement à la
+        // première.** `makeFocusable` pose le premier répondant à la
+        // construction ; un panneau réutilisé ne repasse pas par là, et
+        // `orderOut` a entre-temps démonté la chaîne des répondants. Les deux
+        // couches sont nécessaires et ne font pas la même chose : AppKit remet
+        // la vue d'accueil dans la chaîne, SwiftUI remet le focus sur le champ
+        // de filtre — qui porte tous les raccourcis du panneau.
+        //
+        // L'ordre compte, et c'est le même que celui documenté dans
+        // `OverlayPanel.makeFocusable` : clé d'abord, focus ensuite.
+        if let content = panel.contentView {
+            panel.makeFirstResponder(content)
+        }
+        model?.requestFocus()
+
         observeDismissal(panel)
         let state = "visible=\(panel.isVisible) clé=\(panel.isKeyWindow) "
             + NSStringFromRect(panel.frame)

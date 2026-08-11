@@ -19,6 +19,30 @@ public struct ListedWindow: Sendable {
     /// **toutes** les fenêtres sans l'autorisation Enregistrement de l'écran.
     public let title: String
 
+    /// Le cadre de la fenêtre en coordonnées d'écran.
+    public let frame: CGRect
+
+    /// La couche de composition. 0 est celle des fenêtres ordinaires ; les
+    /// palettes flottantes, les info-bulles et les panneaux d'alerte vivent
+    /// au-dessus.
+    public let layer: Int
+
+    /// Faux pour une fenêtre minimisée, masquée, ou sur un autre bureau.
+    ///
+    /// Toujours vrai dans le résultat d'`onScreen`, qui ne rend que celles-là ;
+    /// c'est `all()` qui donne à ce champ son intérêt.
+    public let isOnScreen: Bool
+
+    /// Cette fenêtre accepte-t-elle d'être capturée ?
+    ///
+    /// `kCGWindowSharingState` vaut `kCGWindowSharingNone` pour les fenêtres
+    /// qu'une application déclare non partageable — gestionnaires de mots de
+    /// passe, lecteurs de vidéo protégée. C'est le critère que
+    /// `SCShareableContent` applique lui-même avant de rendre sa liste : qui
+    /// remplace cette énumération par celle-ci doit le reprendre, sinon il
+    /// hérite de fenêtres qu'aucune capture ne pourra jamais rendre.
+    public let isShareable: Bool
+
     public var bundleIdentifier: String? {
         NSRunningApplication(processIdentifier: processID)?.bundleIdentifier
     }
@@ -54,7 +78,23 @@ public enum WindowList {
     ///   non par son nom : filtrer les titres décalerait alors la réponse d'une
     ///   fenêtre.
     public static func onScreen(titled: Bool = true) -> [ListedWindow] {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        enumerate([.optionOnScreenOnly, .excludeDesktopElements], titled: titled)
+    }
+
+    /// **Toutes** les fenêtres, y compris celles qui ne sont pas à l'écran.
+    ///
+    /// Une fenêtre minimisée reste une fenêtre : elle porte un travail, et la
+    /// faire disparaître d'une liste de voies reviendrait à dire que le travail
+    /// n'existe plus. Elle ne se capture jamais pour autant — le compositeur
+    /// n'en a plus les pixels — d'où `isOnScreen`, que l'appelant lit pour
+    /// décider, plutôt qu'une seconde énumération.
+    public static func all(titled: Bool = true) -> [ListedWindow] {
+        enumerate([.optionAll, .excludeDesktopElements], titled: titled)
+    }
+
+    private static func enumerate(
+        _ options: CGWindowListOption, titled: Bool
+    ) -> [ListedWindow] {
         guard let entries = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
@@ -64,11 +104,35 @@ public enum WindowList {
             guard titled == false || title.isEmpty == false else { return nil }
             guard let pid = entry[kCGWindowOwnerPID as String] as? pid_t else { return nil }
 
+            // `kCGWindowBounds` est un dictionnaire sérialisé, pas un `CGRect` :
+            // il se relit avec la fonction qu'Apple fournit pour ça, et jamais
+            // en lisant ses clés à la main — leur nom n'est pas contractuel.
+            //
+            // Le passage par `NSDictionary` est un pont, pas une conversion
+            // forcée : ce code s'exécute sur chaque fenêtre de la machine à
+            // chaque tic du veilleur, et un `as!` y ferait tomber l'application
+            // le jour où le serveur de fenêtres rendrait autre chose. Un cadre
+            // absent donne `.zero`, que les filtres de taille écartent
+            // d'eux-mêmes.
+            var frame = CGRect.zero
+            if let bounds = entry[kCGWindowBounds as String] as? NSDictionary {
+                frame = CGRect(dictionaryRepresentation: bounds as CFDictionary) ?? .zero
+            }
+
             return ListedWindow(
                 windowID: CGWindowID(entry[kCGWindowNumber as String] as? UInt32 ?? 0),
                 processID: pid,
                 ownerName: entry[kCGWindowOwnerName as String] as? String,
-                title: title
+                title: title,
+                frame: frame,
+                layer: entry[kCGWindowLayer as String] as? Int ?? 0,
+                isOnScreen: entry[kCGWindowIsOnscreen as String] as? Bool ?? false,
+                // Absent, on suppose partageable : c'est le cas de l'immense
+                // majorité des fenêtres, et supposer l'inverse ferait disparaître
+                // des voies réelles sur une clé manquante.
+                isShareable: (entry[kCGWindowSharingState as String] as? Int
+                    ?? Int(CGWindowSharingType.readOnly.rawValue))
+                    != Int(CGWindowSharingType.none.rawValue)
             )
         }
     }

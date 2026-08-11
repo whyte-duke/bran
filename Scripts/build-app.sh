@@ -11,7 +11,22 @@ set -euo pipefail
 BUNDLE_ID="com.opahventures.bran"
 IDENTITY="bran-dev"
 APP_NAME="bran"
-CONFIG="${1:-debug}"
+# **`release` par défaut, et le défaut précédent était un vrai défaut.**
+#
+# Ce script n'est pas un script de compilation : il *installe* dans
+# ~/Applications, c'est-à-dire qu'il livre l'application qu'on va utiliser toute
+# la journée. Le défaut `debug` produisait donc un bundle signé, installé, et
+# non optimisé — sans qu'aucune ligne de sa sortie ne le dise.
+#
+# Mesuré, sur la même machine et le même travail, à quinze secondes d'écart :
+# 3,08 % de processeur au repos en debug, pics à 13,8 % ; 0,90 % en release,
+# pics à 4,4 %. Le veilleur échantillonne des fenêtres et compare des blocs de
+# pixels dans des boucles serrées, exactement le code qu'un build debug ne
+# spécialise pas — le profil le montrait, à passer son temps dans
+# `IndexingIterator.next()` et des témoins de protocole non spécialisés.
+#
+# `zsh Scripts/build-app.sh debug` reste disponible pour qui veut des symboles.
+CONFIG="${1:-release}"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 

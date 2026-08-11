@@ -129,6 +129,30 @@ final class ClipboardPanelModel {
     /// événement, pas un état.
     var lastFailure: String?
 
+    /// Incrémenté à chaque ouverture. La vue le regarde pour **reprendre** le
+    /// clavier.
+    ///
+    /// **Sans lui, les flèches ne marchaient qu'à la première ouverture.** Le
+    /// panneau est construit une fois et réutilisé ensuite — `orderOut` le
+    /// retire de l'écran, il ne le détruit pas — donc sa `NSHostingView` et son
+    /// arbre SwiftUI survivent. `onAppear`, qui posait `isFilterFocused = true`,
+    /// ne se déclenche donc **qu'une seule fois dans la vie du processus**. À la
+    /// deuxième ouverture, le champ n'avait plus le focus, et comme tous les
+    /// raccourcis du panneau sont posés sur le champ — voir `filterField`, c'est
+    /// la seule façon d'arriver avant l'interprétation par défaut du champ — ↑,
+    /// ↓, ⌘1…9 et ⌫ ne répondaient plus. Seul Échap continuait de fonctionner,
+    /// via la fermeture au clic dehors, ce qui rendait la panne d'autant plus
+    /// difficile à lire.
+    ///
+    /// Un compteur plutôt qu'un booléen : « demander le focus » est un
+    /// événement, et un booléen déjà à `true` ne redéclencherait rien.
+    private(set) var focusRequests = 0
+
+    /// Appelée par le présentateur **après** que le panneau est devenu clé :
+    /// poser un `@FocusState` sur une fenêtre qui n'a pas encore le clavier ne
+    /// tient pas.
+    func requestFocus() { focusRequests += 1 }
+
     /// Change à chaque vignette fraîchement fabriquée.
     ///
     /// **Un compteur et non les images.** Le modèle ne porte aucune image — une
@@ -471,6 +495,10 @@ struct ClipboardPanelView: View {
             isFilterFocused = true
             model.announceOpening()
         }
+        // La vue survit à la fermeture du panneau : `onAppear` ne reviendra
+        // jamais. C'est ce compteur, et lui seul, qui rend le clavier au champ
+        // aux ouvertures suivantes. Voir `ClipboardPanelModel.focusRequests`.
+        .onChange(of: model.focusRequests) { isFilterFocused = true }
     }
 
     // MARK: - Le filtre

@@ -116,7 +116,22 @@ final class MicCapture: @unchecked Sendable {
         }
 
         engine.prepare()
-        try engine.start()
+        do {
+            try startEngine()
+        } catch {
+            // **Le tap est retiré avant de renoncer.** Sans ça, le moteur en
+            // échec sortait de `start` avec son tap posé et `isRunning` à faux :
+            // `stop()` et `discard()` repartaient aussitôt sans rien démonter,
+            // et l'objet ne lâchait son contexte d'entrée qu'à sa libération,
+            // c'est-à-dire quand l'appel suivant lui réassignait `engine`.
+            // Autrement dit : le démarrage suivant réclamait le HAL au moment
+            // précis où le précédent le rendait — la course que `startEngine`
+            // existe pour absorber, réamorcée par le chemin d'erreur.
+            engine.stop()
+            engine.inputNode.removeTap(onBus: 0)
+            converter = nil
+            throw error
+        }
         isRunning = true
         FeatureLog.record("micro : moteur démarré, engine.isRunning=\(engine.isRunning)")
     }
@@ -141,11 +156,11 @@ final class MicCapture: @unchecked Sendable {
         guard isRunning else { return }
         FeatureLog.record("micro : aucun son sur le périphérique imposé → reprise sur le système")
         stopEngine()
-        Self.waitForHALToLetGo()
         try start(deviceID: nil)
     }
 
-    /// Laisse CoreAudio finir de démonter le contexte d'entrée précédent.
+    /// Démarre le moteur, en réessayant tant que CoreAudio n'a pas fini de
+    /// rendre le contexte d'entrée précédent.
     ///
     /// **Mesuré dans le journal système, et c'est la panne que l'utilisateur
     /// voit.** Enchaîner `engine.stop()` et la construction d'un nouveau moteur
@@ -158,26 +173,47 @@ final class MicCapture: @unchecked Sendable {
     /// démontage du **fil d'entrée-sortie du HAL** est asynchrone, hors du
     /// contrôle du moteur. Le moteur suivant est bien neuf — ce n'est pas le
     /// défaut que corrigeait `stopEngine` — mais il demande à CoreAudio un
-    /// contexte que CoreAudio n'a pas encore rendu. L'erreur 35 est un
-    /// `EAGAIN` : « réessaie ». Personne ne réessayait.
+    /// contexte que CoreAudio n'a pas encore rendu.
     ///
-    /// **Une attente bornée et non une boucle d'essais.** Réessayer le démarrage
-    /// est ce que faisait implicitement le code appelant, et c'est ce qui
-    /// produisait la rafale. Ici on attend que le fil précédent s'en aille, au
-    /// plus `halTeardownBudget`, en rendant la main au système entre deux
-    /// vérifications. Dans le cas normal la première suffit.
+    /// **On réessaie, on n'attend pas.** La version précédente de ce correctif
+    /// dormait 150 ms avant chaque reprise, et c'était faux sur les deux bouts :
+    /// elle payait le plein tarif même quand le HAL était libre — le cas
+    /// courant — et elle n'avait aucune condition de sortie, donc rien ne
+    /// garantissait que 150 ms suffisent quand il ne l'était pas. L'erreur 35
+    /// est un `EAGAIN` : le système demande qu'on repasse, et le seul signal
+    /// fiable que le contexte est rendu est que le démarrage réussisse. Dans le
+    /// cas normal le premier essai passe et l'attente est nulle.
     ///
-    /// Le fil principal est bloqué pendant ce temps, et c'est assumé : ce chemin
-    /// n'est parcouru qu'au repli d'une dictée déjà silencieuse, l'attente est
-    /// plafonnée à quelques dizaines de millisecondes, et l'alternative — rendre
-    /// tout le démarrage asynchrone — déplacerait une machine à états entière
-    /// pour un cas de repli.
-    private static func waitForHALToLetGo() {
-        let deadline = Date().addingTimeInterval(halTeardownBudget)
-        while Date() < deadline {
-            // Un tour de boucle d'exécution : c'est là que CoreAudio poste la
-            // fin de son démontage. Un `sleep` nu ne le laisserait pas parler.
-            RunLoop.current.run(until: Date().addingTimeInterval(halTeardownStep))
+    /// Elle dormait aussi en faisant tourner la boucle d'exécution, ce qui
+    /// laissait AppKit livrer des événements au beau milieu d'un redémarrage de
+    /// micro : une seconde frappe du raccourci pouvait rentrer dans la machine à
+    /// états pendant qu'elle se reconfigurait. `Thread.sleep` ne réentre nulle
+    /// part, et il n'est atteint que si un essai a échoué.
+    ///
+    /// Le fil principal est bloqué pendant les essais, et c'est assumé :
+    /// plafonné à `halTeardownBudget`, et l'alternative — rendre tout le
+    /// démarrage asynchrone — déplacerait une machine à états entière pour un
+    /// cas de repli.
+    private func startEngine() throws {
+        let deadline = Date().addingTimeInterval(Self.halTeardownBudget)
+        var attempts = 0
+        while true {
+            attempts += 1
+            do {
+                try engine.start()
+                if attempts > 1 {
+                    FeatureLog.record("micro : moteur démarré au \(attempts)ᵉ essai")
+                }
+                return
+            } catch {
+                guard Date() < deadline else {
+                    FeatureLog.record(
+                        "micro : démarrage refusé après \(attempts) essais — \(error.localizedDescription)"
+                    )
+                    throw error
+                }
+                Thread.sleep(forTimeInterval: Self.halTeardownStep)
+            }
         }
     }
 

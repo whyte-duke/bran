@@ -189,4 +189,55 @@ struct TranscriptVerdictTests {
         #expect(reading.state == .waiting)
         #expect(ressorti.contains(secret) == false)
     }
+
+    // MARK: - La queue brute
+
+    /// **Le défaut que ces trois tests ferment.** La lecture décodait les
+    /// 256 derniers Kio d'un bloc, avec `String(data:encoding:.utf8)`, puis
+    /// découpait la chaîne obtenue. Or cette fonction rend `nil` — pas une
+    /// chaîne partielle, `nil` — dès que le premier octet lu tombe au milieu
+    /// d'un caractère multi-octets. La transcription entière était alors
+    /// ignorée, sans un mot dans le journal, et la voie disparaissait de la
+    /// liste. Le déclencheur : qu'un accent se trouve à cheval sur la coupure,
+    /// c'est-à-dire une fois sur quelques-unes, sans rien de reproductible.
+    ///
+    /// Le découpage se fait maintenant sur les octets, et chaque ligne est
+    /// décodée seule.
+
+    @Test("Une queue coupée au milieu d'un accent ne fait pas perdre le fichier")
+    func queueCoupeeAuMilieuDunCaractere() {
+        var bytes = Data()
+        // Les deux octets de « é », amputés du premier : ce qui reste ne peut
+        // pas être décodé, et c'est exactement ce qu'une coupure à 256 Kio
+        // produit.
+        bytes.append(contentsOf: Array("é".utf8).dropFirst())
+        bytes.append(contentsOf: Array("gment de ligne\n".utf8))
+        bytes.append(contentsOf: Array(assistant(stop: "end_turn").utf8))
+
+        let reading = TranscriptVerdict.read(utf8Tail: bytes, tailIsTruncated: true)
+
+        #expect(reading.state == .waiting)
+        #expect(reading.workingDirectory == "/p/crm")
+    }
+
+    @Test("Le découpage par octets rend les mêmes lignes que par caractères")
+    func decoupageIdentique() {
+        let text = assistant(stop: "tool_use") + "\n" + assistant(stop: "end_turn")
+        let parCaracteres = text.split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+        let parOctets = TranscriptVerdict.read(utf8Tail: Data(text.utf8), tailIsTruncated: false)
+
+        #expect(parCaracteres.count == 2)
+        #expect(parOctets == TranscriptVerdict.read(lines: parCaracteres, tailIsTruncated: false))
+    }
+
+    @Test("Les lignes vides ne comptent pas, et un contenu accentué survit")
+    func lignesVidesEtAccents() {
+        let text = "\n\n" + assistant(stop: "end_turn", cwd: "/p/été") + "\n\n"
+
+        let reading = TranscriptVerdict.read(utf8Tail: Data(text.utf8), tailIsTruncated: false)
+
+        #expect(reading.state == .waiting)
+        #expect(reading.workingDirectory == "/p/été")
+    }
 }
