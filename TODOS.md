@@ -480,3 +480,48 @@ copy from the Finder carries file URLs, which are handled. It becomes reachable
 the day something calls `writeObjects([str1, str2])`. `plainText` holds one
 string, so storing both would need a format decision, which is why nothing was
 done. Where: `makeText` and `makeRichText` in `ClipboardCapture.swift`.
+
+---
+
+## Four debts left by the finalisation fix (2026-08-11)
+
+Context: a 36 min 32 s meeting was recorded, `stopCapture()` returned at 16:34:19,
+and `replayd` did not release the file until **16:46:28** — twelve minutes later,
+having grown it from 180 MB to 2.56 GB. The 60 s deadline in `CaptureSession`
+gave up at 16:35:19 and the meeting was filed as interrupted. The wait is now
+driven by observed progress (`FinalizationWatch`), not by a clock. What is still
+owed:
+
+**1. "Fusion et compression… 0 %" is shown while nothing is being merged.**
+When a session ends badly, `postProcess` starts on segments `replayd` may still
+be writing, and `PostProcessor.settledAsset` now waits — correctly — for the file
+to close. Meanwhile the library row shows a merge progress bar stuck at 0 %,
+possibly for ten minutes. The row needs a distinct "waiting for the file to be
+closed" state; `processingProgress: [UUID: Double]` cannot express it, so it
+wants a small enum rather than a fraction. Where: `AppModel.postProcess`,
+`RecordingRow`.
+
+**2. Every recording is fully re-encoded, even when a remux would do.**
+`PostProcessor.transcode` decodes to 32BGRA and re-encodes in HEVC — for this
+meeting, 63 368 frames of 2592×1676. A single segment already in HEVC needs only
+its container rewritten: measured with `ffmpeg -c copy`, 2.56 GB took about
+twenty seconds. The re-encode buys ≈60 % of disk space (−81 % on the 4 August
+test file) and costs a lossy pass plus tens of minutes of compute. The decision
+is a product one — compress by default, or offer it — but today it is not a
+decision, it is the only path. Where: `PostProcessor.process`.
+
+**3. After a failure, the banner's only button is "Démarrer".**
+`StatusBanner` shows the failure text and offers to start a *new* recording,
+which is the one action nobody wants at that moment. The useful ones are "show me
+the raw file" and "retry the merge". `Recording.revealTargets` now makes the first
+one one line of code. Where: `StatusBanner.action`.
+
+**4. The wiring around `FinalizationWatch` has no test, only the policy does.**
+`Tests/BranCoreTests/FinalizationWatchTests.swift` replays the 11 August timings
+second by second, but `CaptureSession.closeCurrentSegment` — which reads the file
+size, holds the delegate alive on failure, and gives each segment its own
+`CaptureSignals` — lives in `BranApp`, which has no test target. The size-reading
+closure in particular is the kind of thing that breaks silently: it once used
+`URL.resourceValues`, which serves cached values and would have turned a healthy
+finalisation into a two-minute silence. A `BranAppTests` target with a fake
+filesystem clock would cover it.
