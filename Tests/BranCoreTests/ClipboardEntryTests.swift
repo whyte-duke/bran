@@ -54,6 +54,13 @@ struct ClipboardEntryTests {
         #expect(entry.blobs == nil)
         #expect(entry.fileURLs == nil)
         #expect(entry.blobsPurgedAt == nil)
+        // Ajouté après coup, et donc optionnel : cette ligne-ci a été écrite
+        // avant que l'épinglage existe, et elle doit se relire sans lui. Une
+        // entrée d'avant n'est pas épinglée — c'est la seule réponse possible,
+        // et surtout la seule qui ne fasse pas garder indéfiniment un mois
+        // d'historique que personne n'a demandé à garder.
+        #expect(entry.pinnedAt == nil)
+        #expect(entry.isPinned == false)
 
         // Et les dérivations tiennent debout sans aucun de ces champs.
         #expect(entry.lastCopiedAt == entry.copiedAt)
@@ -68,6 +75,14 @@ struct ClipboardEntryTests {
         // L'autre sens du même problème : deux versions de bran peuvent lire la
         // même bibliothèque — un .app installé et un binaire de développement.
         // Une clé inconnue doit être ignorée, pas faire tomber la ligne.
+        //
+        // **Et ce test a vieilli d'une façon qui vaut d'être notée.** Sa
+        // première version citait `pinnedAt` comme exemple de clé imaginaire,
+        // écrite par une version future ; cette version future est arrivée. La
+        // clé est donc lue ici, et `tags` tient désormais le rôle de l'inconnue.
+        // C'est la démonstration en petit de ce que le test protège : le champ
+        // du futur d'aujourd'hui est le champ courant de demain, et les deux
+        // sens doivent marcher pendant tout l'intervalle.
         let json = """
         {
           "id": "3F1A9C74-6E20-4D8B-9C11-7A5E4B02D9F0",
@@ -81,6 +96,8 @@ struct ClipboardEntryTests {
 
         let entry = try decoder.decode(ClipboardEntry.self, from: Data(json.utf8))
         #expect(entry.preview == "swift test")
+        #expect(entry.pinnedAt == origin.addingTimeInterval(900))
+        #expect(entry.isPinned)
     }
 
     @Test("Un aller-retour d'encodage conserve tout")
@@ -98,11 +115,16 @@ struct ClipboardEntryTests {
             pasteboardItems: 1,
             fullTextLength: 26,
             refusedBytes: nil,
-            blobsPurgedAt: origin.addingTimeInterval(2_592_000)
+            blobsPurgedAt: origin.addingTimeInterval(2_592_000),
+            pinnedAt: origin.addingTimeInterval(60)
         )
 
         let round = try decoder.decode(ClipboardEntry.self, from: encoder.encode(entry))
         #expect(round == entry)
+        // Nommé explicitement : l'égalité de structure passerait aussi si les
+        // deux côtés perdaient le champ ensemble, ce qui est précisément ce
+        // qu'un `CodingKeys` écrit à la main oublierait un jour.
+        #expect(round.pinnedAt == origin.addingTimeInterval(60))
     }
 
     // MARK: - Compter les copies sans écrire le cas majoritaire
@@ -359,6 +381,95 @@ struct ClipboardEntryTests {
         // rétention ne touche jamais. Ce qui est perdu, c'est la mise en forme,
         // et c'est `isComplete` qui autorise l'interface à le dire.
         #expect(entry.canPaste)
+        #expect(entry.isComplete == false)
+    }
+
+    // MARK: - Garder une entrée indéfiniment
+
+    @Test("Une entrée jamais épinglée n'écrit pas le champ")
+    func epingleAbsente() throws {
+        // Le cas majoritaire — aujourd'hui, la totalité de l'historique mesuré :
+        // zéro épingle sur 250 entrées. Le champ vaut `nil`, donc l'encodeur ne
+        // l'écrit pas du tout, exactement comme `recopiedAt` et `repeatCount`.
+        // C'est ce qui rend l'ajout gratuit pour les lignes qui ne s'en servent
+        // pas, et lisible par une version qui ne le connaît pas.
+        let entry = ClipboardEntry(copiedAt: origin, kind: .text, text: "swift build")
+        #expect(entry.isPinned == false)
+        #expect(entry.pinnedAt == nil)
+
+        let json = String(decoding: try encoder.encode(entry), as: UTF8.self)
+        #expect(json.contains("pinnedAt") == false)
+    }
+
+    @Test("Épingler puis désépingler ramène l'entrée exactement où elle était")
+    func allerRetourDeLEpingle() {
+        // L'aller-retour doit être une identité et pas seulement « à peu près » :
+        // c'est le magasin qui réécrit la ligne après chacun des deux gestes, et
+        // toute différence résiduelle — un compteur qui a bougé, une date de
+        // recopie touchée — serait écrite sur le disque sans que personne ne
+        // l'ait demandée.
+        let entry = ClipboardEntry(
+            copiedAt: origin,
+            kind: .image,
+            preview: "",
+            blobs: [ClipboardBlobRef(hash: "beef", ext: "png", bytes: 2_000_000)]
+        )
+
+        let pinned = entry.pinned(at: origin.addingTimeInterval(3_600))
+        #expect(pinned.isPinned)
+        #expect(pinned.pinnedAt == origin.addingTimeInterval(3_600))
+        // Et rien d'autre n'a bougé : ni le dossier-jour, ni ce qu'on peut
+        // encore coller.
+        #expect(pinned.copiedAt == entry.copiedAt)
+        #expect(pinned.id == entry.id)
+        #expect(pinned.blobs == entry.blobs)
+        #expect(pinned.canPaste)
+        #expect(pinned.isComplete)
+
+        let released = pinned.unpinned()
+        #expect(released.isPinned == false)
+        #expect(released.pinnedAt == nil)
+        #expect(released == entry)
+    }
+
+    @Test("Épingler une entrée déjà épinglée ne déplace pas la date")
+    func epinglerDeuxFois() {
+        // Un double-clic, un état réappliqué au chargement, une commande rejouée
+        // après un échec d'écriture : trois façons d'appeler deux fois, aucune
+        // qui soit une nouvelle décision de l'utilisateur. Laisser la date se
+        // réécrire ferait avancer toute seule la ligne « épinglée le 10 août »,
+        // le même défaut que la double purge évite du côté de la rétention.
+        let once = ClipboardEntry(copiedAt: origin, kind: .text, text: "un secret")
+            .pinned(at: origin.addingTimeInterval(60))
+        let twice = once.pinned(at: origin.addingTimeInterval(86_400))
+
+        #expect(twice.pinnedAt == origin.addingTimeInterval(60))
+        #expect(twice == once)
+
+        // Déplacer la date reste possible, mais il faut décrire le geste qu'on
+        // a réellement fait : lâcher, puis reprendre.
+        let moved = once.unpinned().pinned(at: origin.addingTimeInterval(86_400))
+        #expect(moved.pinnedAt == origin.addingTimeInterval(86_400))
+    }
+
+    @Test("Une entrée épinglée dont les blobs étaient déjà partis ne les récupère pas")
+    func epinglerApresLaPurge() {
+        // Épingler n'est pas ressusciter. Le fichier a été supprimé le mois
+        // dernier ; l'épingle ne peut que promettre l'avenir, et l'entrée doit
+        // continuer à dire ce qu'elle a perdu plutôt que de laisser croire que
+        // l'épingle a tout réparé.
+        let entry = ClipboardEntry(
+            copiedAt: origin,
+            kind: .image,
+            preview: "",
+            blobs: [ClipboardBlobRef(hash: "beef", ext: "png", bytes: 2_000_000)]
+        )
+        .purgingBlobs(at: origin.addingTimeInterval(2_592_000))
+        .pinned(at: origin.addingTimeInterval(5_000_000))
+
+        #expect(entry.isPinned)
+        #expect(entry.blobsArePurged)
+        #expect(entry.canPaste == false)
         #expect(entry.isComplete == false)
     }
 

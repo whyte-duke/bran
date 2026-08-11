@@ -33,7 +33,7 @@ import Synchronization
 ///        ┌─────┴──────┬────────────┬─────────────┬──────────────┐
 ///        ▼            ▼            ▼             ▼              ▼
 ///     dictée      capture      panneau      annulation    indice de copie
-///   (⌘ droite)   (⌘⇧2 …)       (⌘⇧V)          (Échap)        (⌘C, ⌘X)
+///   (⌘ droite)   (⌘⇧2 …)       (⌘⇧C)          (Échap)        (⌘C, ⌘X)
 /// ```
 ///
 /// Les quatre premières branches sont des **fonctions** : elles se règlent, et

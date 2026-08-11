@@ -250,6 +250,108 @@ struct ClipboardRetentionTests {
         #expect(purged(policy, entry, at: instant(today)) == false)
     }
 
+    // MARK: - L'exception épinglée, et ce qu'elle exige du magasin
+
+    @Test("Le dossier des épingles n'est jamais vu comme un jour")
+    func leDossierEpingleNestJamaisUnJour() {
+        // **Le test qui garde ce que l'utilisateur a demandé à garder pour
+        // toujours.** Les contenus épinglés vivent dans `Clipboard/Pinned/blobs/`
+        // et rien d'autre ne les protège que ceci : `day(from:)` n'y reconnaît
+        // pas une date, donc `dayFoldersToPurge` ne les nomme jamais, donc le
+        // `rm` ne les voit jamais. C'est exactement le genre de propriété qu'un
+        // « nettoyage » du filtre — accepter les mois sans zéro de tête, ignorer
+        // la casse, tolérer un suffixe — casserait sans que rien ne le dise, et
+        // le dégât serait définitif.
+        //
+        // **Le nom testé est celui que le magasin écrit réellement**, et pas une
+        // copie littérale posée ici : c'est ce qui fait tomber ce test si
+        // quelqu'un renomme le dossier en « 2026-Pinned » plutôt que si
+        // quelqu'un oublie de mettre les deux à jour. Le littéral est vérifié
+        // juste à côté, pour que l'attente reste lisible sans ouvrir l'autre
+        // fichier.
+        #expect(ClipboardStore.pinnedFolderName == "Pinned")
+        #expect(ClipboardRetention.day(from: ClipboardStore.pinnedFolderName) == nil)
+        #expect(ClipboardRetention.day(from: "Pinned") == nil)
+
+        // Et au réglage le plus destructeur, le balayage ne rend que le jour.
+        let policy = ClipboardRetention.days(0)
+        let names = [
+            ClipboardStore.pinnedFolderName,
+            "Pinned/blobs",
+            "pinned",
+            "PINNED",
+            "2026-08-09",
+        ]
+        #expect(policy.dayFoldersToPurge(from: names, today: today) == ["2026-08-09"])
+    }
+
+    @Test("Une entrée épinglée n'est jamais purgée, même très ancienne")
+    func entreeEpingleeJamaisPurgee() {
+        // « Indéfiniment » veut dire à tous les réglages, y compris celui qui ne
+        // conserve rien, et à tous les âges, y compris sept ans.
+        let entry = imageEntry(copiedAt: instant("2019-01-01"))
+            .pinned(at: instant("2019-01-02"))
+
+        for blobDays in [0, 1, 7, 30, 365] {
+            let policy = ClipboardRetention.days(blobDays)
+            #expect(
+                purged(policy, entry, at: instant(today)) == false,
+                "réglage de \(blobDays) jours"
+            )
+        }
+    }
+
+    @Test("Épingler une entrée ne sauve pas le dossier de son jour")
+    func lEpingleNeSauvePasLeDossier() {
+        // **Le point difficile, écrit en test.** L'exclusion de `entriesToPurge`
+        // ne suffit pas et ne peut pas suffire : ce qui supprime réellement le
+        // PNG est un `rm` sur le sous-dossier `blobs/` d'un dossier-jour, choisi
+        // sur son seul nom, sans qu'aucune entrée soit ouverte. Le dossier part
+        // donc quand même — et si le magasin n'avait pas recopié le contenu dans
+        // `Pinned/blobs/` avant, l'entrée survivrait en promettant un fichier
+        // effacé. C'est le pire des deux mondes, et c'est ce que cette paire
+        // d'attentes rend visible : le dossier s'en va, l'entrée ne bouge pas.
+        let policy = ClipboardRetention.days(30)
+        let entry = imageEntry(copiedAt: instant("2026-05-12"))
+            .pinned(at: instant("2026-05-13"))
+
+        #expect(entry.dayFolderName(calendar: utc) == "2026-05-12")
+        #expect(policy.dayFoldersToPurge(from: ["2026-05-12"], today: today) == ["2026-05-12"])
+        #expect(purged(policy, entry, at: instant(today)) == false)
+        // Et l'entrée continue de dire qu'elle a son contenu, ce qui n'est vrai
+        // que grâce à la recopie faite par `ClipboardStore`.
+        #expect(entry.blobsArePurged == false)
+        #expect(entry.canPaste)
+    }
+
+    @Test("Une épingle dans le lot n'empêche pas les autres d'être purgées")
+    func lotMixteAvecUneEpingle() {
+        let policy = ClipboardRetention.days(30)
+        let ancienne = imageEntry(copiedAt: instant("2026-06-01"))
+        let epinglee = imageEntry(copiedAt: instant("2026-06-01")).pinned(at: instant("2026-06-02"))
+        let recente = imageEntry(copiedAt: instant("2026-08-09"))
+
+        let selected = policy.entriesToPurge(
+            from: [ancienne, epinglee, recente], now: instant(today), calendar: utc
+        )
+        let ids = selected.map { $0.id }
+        #expect(ids == [ancienne.id])
+    }
+
+    @Test("Désépingler remet l'entrée sous la rétention")
+    func desepinglerRemetSousLaRetention() {
+        // L'épingle n'est pas un aller simple. Une fois lâchée, l'entrée
+        // redevient exactement ce qu'elle était : son dossier est toujours
+        // candidat, donc le balayage suivant la marque enfin purgée — avec la
+        // date de ce balayage-là, qui est celle où le magasin supprime la copie
+        // de `Pinned/blobs/`, et non celle où le dossier d'origine a été vidé.
+        let policy = ClipboardRetention.days(30)
+        let entry = imageEntry(copiedAt: instant("2026-05-12"))
+
+        #expect(purged(policy, entry.pinned(at: instant("2026-05-13")), at: instant(today)) == false)
+        #expect(purged(policy, entry.pinned(at: instant("2026-05-13")).unpinned(), at: instant(today)))
+    }
+
     // MARK: - La date annoncée avant qu'elle arrive
 
     @Test("La date annoncée est le minuit où le dossier disparaît")
@@ -265,15 +367,40 @@ struct ClipboardRetentionTests {
     }
 
     @Test("Rien ne part avant la date annoncée, tout est parti à partir d'elle")
-    func laDateAnnonceeEstTenue() {
+    func laDateAnnonceeEstTenue() throws {
         // La promesse faite aux réglages, vérifiée à la seconde près des deux
         // côtés de l'instant annoncé.
         let policy = ClipboardRetention.days(14)
         let entry = imageEntry(copiedAt: instant("2026-07-20", hour: 7))
-        let expiry = policy.expiryDate(for: entry, calendar: utc)
+        let expiry = try #require(policy.expiryDate(for: entry, calendar: utc))
 
         #expect(purged(policy, entry, at: expiry.addingTimeInterval(-1)) == false)
         #expect(purged(policy, entry, at: expiry))
+    }
+
+    @Test("Une entrée épinglée n'annonce aucune date, et n'en invente pas une lointaine")
+    func aucuneDatePourUneEpingle() {
+        // **Le type de retour a été rendu optionnel pour cette ligne-ci.** Les
+        // trois autres réponses possibles étaient des mensonges : `copiedAt + 30
+        // jours` afficherait dans les réglages une échéance que plus rien
+        // n'honore, `.distantFuture` ferait écrire « 1 janvier 4001 » au premier
+        // appelant qui formate sans réfléchir, et une date passée dirait
+        // « déjà purgé » d'un contenu qui est là. `nil` ne se formate pas par
+        // accident : le compilateur oblige l'interface à écrire la phrase du cas
+        // épinglé au lieu de la deviner.
+        let policy = ClipboardRetention.days(30)
+        let entry = imageEntry(copiedAt: instant("2026-07-01"))
+        let pinned = entry.pinned(at: instant("2026-07-02"))
+
+        #expect(policy.expiryDate(for: entry, calendar: utc) == instant("2026-07-31", hour: 0))
+        #expect(policy.expiryDate(for: pinned, calendar: utc) == nil)
+
+        // Et lâcher l'épingle rend la date d'origine, inchangée : épingler n'a
+        // pas déplacé le dossier-jour, donc n'a pas déplacé l'échéance.
+        #expect(
+            policy.expiryDate(for: pinned.unpinned(), calendar: utc)
+                == policy.expiryDate(for: entry, calendar: utc)
+        )
     }
 
     @Test("À zéro jour, la date annoncée est le minuit suivant et non l'instant même")

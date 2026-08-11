@@ -90,6 +90,13 @@ struct SectionSidebar: View {
         case .meetings: model.store.recordings.count
         case .dictation: model.dictation.store.entries.count
         case .snapshots: model.snapshot.store.entries.count
+        // La fenêtre en mémoire, et non le contenu du disque : le compteur doit
+        // se lire sans ouvrir un fichier, et il est de toute façon borné à ce
+        // que le magasin garde sous la main. Un historique de presse-papiers
+        // grossit tous les jours ; annoncer « 3 412 » ne dirait rien de plus
+        // qu'« il y en a beaucoup », mais le dire coûterait une lecture par
+        // ouverture de la fenêtre.
+        case .clipboard: model.clipboard.store.recent.count
         // Pas le nombre de voies suivies mais celui des voies qui **attendent** :
         // un compteur qui affiche « 7 » en permanence ne dit plus rien, alors
         // qu'un « 2 » qui apparaît est exactement l'information de la section.
@@ -316,6 +323,7 @@ enum LibraryPane: String, CaseIterable, Identifiable {
     case meetings
     case dictation
     case snapshots
+    case clipboard
     case watch
 
     var id: String { rawValue }
@@ -326,6 +334,7 @@ enum LibraryPane: String, CaseIterable, Identifiable {
         case .meetings: "Réunions"
         case .dictation: "Dictées"
         case .snapshots: "Captures"
+        case .clipboard: "Presse-papiers"
         case .watch: "Veille"
         }
     }
@@ -336,6 +345,7 @@ enum LibraryPane: String, CaseIterable, Identifiable {
         case .meetings: "film.stack"
         case .dictation: "waveform"
         case .snapshots: "text.viewfinder"
+        case .clipboard: "doc.on.clipboard"
         case .watch: "binoculars"
         }
     }
@@ -350,6 +360,7 @@ enum LibraryPane: String, CaseIterable, Identifiable {
         case .meetings: "Vos enregistrements de réunions, stockés sur ce Mac."
         case .dictation: "Vos transcriptions, calculées et gardées sur ce Mac."
         case .snapshots: "Le texte lu à l'écran, sans rien envoyer nulle part."
+        case .clipboard: "Tout ce que vous avez copié, gardé et retrouvable."
         case .watch: "Laquelle de vos sessions parallèles vous attend, et depuis quand."
         }
     }

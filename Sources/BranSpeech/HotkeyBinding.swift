@@ -37,22 +37,31 @@ public struct HotkeyBinding: Codable, Equatable, Sendable {
     /// Échap pour annuler. Le geste universel pour « laisse tomber ».
     public static let escape = HotkeyBinding(keyCode: 53)
 
-    /// ⌘⇧V pour le panneau du presse-papiers.
+    /// ⌘⇧C pour le panneau du presse-papiers.
     ///
-    /// **⌘⇧V et non ⌘⇧C, et le raisonnement est le même que pour ⌘⇧2.** ⌘⇧C
-    /// n'est pas libre : le Finder en fait « Aller › Ordinateur », et un grand
-    /// nombre d'applications s'en servent pour copier une variante — le style,
-    /// le chemin, le lien. Un tap global qui s'en empare le fait **partout et en
-    /// silence** : l'utilisateur ne verrait pas bran prendre la touche, il
-    /// verrait le Finder cesser de répondre.
+    /// **Choisi par le propriétaire contre l'avis de la conception, et le
+    /// désaccord mérite d'être écrit plutôt qu'effacé.** L'argument contre était
+    /// et reste vrai : ⌘⇧C n'est pas libre. Le Finder en fait « Aller ›
+    /// Ordinateur », et un grand nombre d'applications s'en servent pour copier
+    /// une variante — le style, le chemin, le lien. Un tap global qui s'en
+    /// empare le fait **partout et en silence** : on ne voit pas bran prendre la
+    /// touche, on voit le Finder cesser de répondre.
     ///
-    /// ⌘⇧V est ce que les gestionnaires de presse-papiers emploient déjà, et
-    /// c'est la seule des deux qui dise ce que la fonction fait : on ouvre le
-    /// panneau pour **coller**, pas pour copier. La copie, elle, n'a pas de
-    /// raccourci à bran — elle en a un, ⌘C, et il appartient à l'application de
-    /// devant.
+    /// L'argument pour a été jugé plus fort par celui qui s'en sert tous les
+    /// jours : la lettre est celle de la copie, la main est déjà dessus, et un
+    /// raccourci qu'on n'a pas à apprendre vaut mieux qu'un raccourci
+    /// théoriquement plus propre. C'est un arbitrage d'usage, et l'usage n'est
+    /// pas de mon côté du clavier.
     ///
-    /// Modifiable comme les deux autres, par la même ligne de réglages.
+    /// **Ce que ça coûte concrètement**, pour que ce soit réversible en
+    /// connaissance de cause : tant que bran tourne, ⌘⇧C cesse d'atteindre
+    /// l'application de devant. Le tap est en `listenOnly`, donc la frappe
+    /// continue d'être **transmise** — les deux gestes se déclenchent, celui de
+    /// l'application et celui de bran. C'est le recouvrement, pas le vol.
+    ///
+    /// Modifiable, comme les deux autres, par la même ligne de réglages : c'est
+    /// le premier endroit où aller si le Finder se met à faire deux choses à la
+    /// fois.
     ///
     /// **Ici et non dans `BranApp`, contrairement au premier jet.** C'est une
     /// valeur, elle se lit et se compare, et `BranApp` est une cible exécutable
@@ -60,7 +69,7 @@ public struct HotkeyBinding: Codable, Equatable, Sendable {
     /// défaut que rien ne pouvait vérifier. C'est d'ailleurs par elle que le
     /// trou de `displayName` s'est vu.
     public static let clipboardPanel = HotkeyBinding(
-        keyCode: 9,                        // touche « V » en QWERTY comme en AZERTY
+        keyCode: 8,                        // touche « C » en QWERTY comme en AZERTY
         modifiers: 0x10_0000 | 0x2_0000    // ⌘ + ⇧
     )
 
@@ -86,7 +95,7 @@ public struct HotkeyBinding: Codable, Equatable, Sendable {
         22: "6", 26: "7", 28: "8", 25: "9", 29: "0",
     ]
 
-    /// Ce que les réglages affichent : « ⌘⇧V », « ⌘ droite », « Échap ».
+    /// Ce que les réglages affichent : « ⌘⇧C », « ⌘ droite », « Échap ».
     ///
     /// Interroge la disposition clavier réellement installée pour tout ce que la
     /// table ne nomme pas. Voir `displayName(naming:)` pour l'ordre des deux
@@ -121,7 +130,7 @@ public struct HotkeyBinding: Codable, Equatable, Sendable {
     /// de touche, sans modificateur, en majuscule — ou `nil` si la question n'a
     /// pas de réponse affichable.
     ///
-    /// **Le défaut que ça corrige.** ⌘⇧V s'affichait « ⌘⇧Touche 9 » dans les
+    /// **Le défaut que ça corrige.** ⌘⇧C s'affichait « ⌘⇧Touche 9 » dans les
     /// réglages : la table ne couvrait que les modificateurs, les touches de
     /// fonction et les chiffres, et aucun raccourci par défaut n'était tombé sur
     /// une lettre jusqu'à celui du presse-papiers. Le trou existait depuis le

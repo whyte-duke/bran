@@ -847,4 +847,285 @@ struct ClipboardStoreTests {
         #expect(store.problem != nil)
         #expect(names(in: blobs).count == 1, "le contenu a été supprimé sans que rien ne l'annonce")
     }
+
+    // MARK: - Épingler
+
+    /// **Le test qui justifie l'existence de `Pinned/blobs/`.** La purge ne lit
+    /// pas les entrées : elle supprime le `blobs/` d'un dossier-jour entier en
+    /// décidant sur le nom du dossier. Un simple drapeau « épinglée » sur
+    /// l'entrée n'aurait donc rien protégé du tout — son fichier serait parti
+    /// avec celui de sa voisine. Le jour est ici réellement vidé, et c'est
+    /// exprès : un test où la purge se retiendrait ne prouverait rien.
+    @Test("Un contenu épinglé survit à la purge qui emporte le dossier de son jour")
+    func epinglerSurvitALaPurge() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root, retention: .days(7))
+        let vieux = Self.noon.addingTimeInterval(-30 * Self.day)
+
+        let gardee = await store.save(
+            text("à garder", at: vieux), payloads: [payload("l'image gardée")]
+        )
+        let perdue = await store.save(
+            text("à perdre", at: vieux.addingTimeInterval(1)),
+            payloads: [payload("l'image perdue")]
+        )
+        let epinglee = try #require(await store.pin(gardee, at: Self.noon))
+        #expect(epinglee.isPinned)
+
+        // Une seule entrée marquée : l'épinglée est exclue du marquage, l'autre
+        // non.
+        #expect(await store.purgeExpired(now: Self.noon) == 1)
+        #expect(names(in: store.dayFolder(dayKey(vieux))).contains("blobs") == false)
+
+        let relu = makeStore(at: root)
+        await relu.load()
+
+        let survivante = try #require(relu.recent.first { $0.id == gardee.id })
+        #expect(survivante.isPinned)
+        #expect(survivante.blobsArePurged == false)
+        // Épingler protégerait les octets et perdrait le bouton si celle-ci
+        // tombait à faux.
+        #expect(survivante.canPaste)
+
+        let ref = try #require(survivante.blobs?.first)
+        let url = try #require(relu.blobURL(for: ref, of: survivante))
+        #expect(url.path(percentEncoded: false).contains("/Pinned/blobs/"))
+        #expect(try Data(contentsOf: url) == Data("l'image gardée".utf8))
+
+        // Et sa voisine a bien tout perdu : c'est ce qui rend le test probant.
+        let disparue = try #require(relu.recent.first { $0.id == perdue.id })
+        let perdue0 = try #require(disparue.blobs?.first)
+        #expect(disparue.blobsArePurged)
+        #expect(relu.blobURL(for: perdue0, of: disparue) == nil)
+    }
+
+    @Test("Épingler puis relire depuis un magasin neuf rend le même contenu")
+    func allerRetourEpingle() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+
+        let entree = await store.save(text("avec image"), payloads: [payload("des octets")])
+        let epinglee = try #require(await store.pin(entree, at: Self.noon))
+        #expect(epinglee.pinnedAt == Self.noon)
+
+        let relu = makeStore(at: root)
+        #expect(await relu.load() == 1)
+        let lue = try #require(relu.recent.first)
+        #expect(lue == epinglee)
+        #expect(lue.isPinned)
+
+        let ref = try #require(lue.blobs?.first)
+        let url = try #require(relu.blobURL(for: ref, of: lue))
+        #expect(url == relu.pinnedBlobsFolder.appending(path: ref.fileName))
+        #expect(try Data(contentsOf: url) == Data("des octets".utf8))
+    }
+
+    @Test("Épingler du texte ne crée même pas le dossier des contenus épinglés")
+    func epinglerDuTexteNeCreeRien() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+
+        let entree = await store.save(text("juste du texte"))
+        let epinglee = try #require(await store.pin(entree, at: Self.noon))
+        #expect(epinglee.isPinned)
+        #expect(
+            FileManager.default.fileExists(
+                atPath: store.pinnedBlobsFolder.path(percentEncoded: false)
+            ) == false
+        )
+
+        let relu = makeStore(at: root)
+        await relu.load()
+        #expect(relu.recent.first?.isPinned == true)
+    }
+
+    /// L'alternative écartée en une phrase : « déplacer » le blob au lieu de le
+    /// recopier aurait cassé, en silence, toutes les autres entrées du même jour
+    /// qui citent la même empreinte — la déduplication intra-journée les fait
+    /// partager un seul fichier. Non épinglées, non purgées, elles auraient
+    /// continué à promettre un contenu absent.
+    @Test("Épingler recopie et ne déplace pas : l'autre entrée du jour garde son contenu")
+    func epinglerNeDemenagePasLeContenuPartage() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+
+        let premiere = await store.save(text("A"), payloads: [payload("partagé")])
+        let seconde = await store.save(
+            text("B", at: Self.noon.addingTimeInterval(1)), payloads: [payload("partagé")]
+        )
+        _ = try #require(await store.pin(premiere, at: Self.noon))
+
+        let ref = try #require(seconde.blobs?.first)
+        let url = try #require(store.blobURL(for: ref, of: seconde))
+        #expect(url.path(percentEncoded: false).contains("/Pinned/") == false)
+        #expect(FileManager.default.fileExists(atPath: url.path(percentEncoded: false)))
+        #expect(seconde.canPaste)
+    }
+
+    @Test("Désépingler puis ramasser libère le fichier épinglé")
+    func desepinglerPuisRamasser() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+
+        let entree = await store.save(text("avec image"), payloads: [payload("épinglé")])
+        let epinglee = try #require(await store.pin(entree, at: Self.noon))
+        #expect(names(in: store.pinnedBlobsFolder).count == 1)
+
+        // Désépingler ne supprime rien tout de suite : l'empreinte peut être
+        // citée par une autre entrée épinglée, et seul le ramassage a la liste.
+        let liberee = try #require(await store.unpin(epinglee))
+        #expect(liberee.isPinned == false)
+        #expect(names(in: store.pinnedBlobsFolder).count == 1)
+
+        #expect(await store.collectOrphanedBlobs() == 1)
+        #expect(names(in: store.pinnedBlobsFolder).isEmpty)
+
+        // Et l'entrée n'a rien perdu : sa copie du jour n'a jamais bougé.
+        let ref = try #require(liberee.blobs?.first)
+        let url = try #require(store.blobURL(for: ref, of: liberee))
+        #expect(FileManager.default.fileExists(atPath: url.path(percentEncoded: false)))
+        #expect(liberee.canPaste)
+    }
+
+    /// La déduplication du dossier épinglé est **globale** — les deux entrées
+    /// sont ici dans deux jours différents, donc chacune a sa copie dans son
+    /// jour, mais elles ne paient qu'un seul fichier épinglé. C'est exactement
+    /// pourquoi le ramassage doit citer les empreintes de toute la bibliothèque
+    /// et non celles d'un jour.
+    @Test("Le ramassage n'emporte pas un contenu encore épinglé par une autre entrée")
+    func ramassageEpargneLeContenuEncoreEpingle() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        let hier = Self.noon.addingTimeInterval(-Self.day)
+
+        let ancienne = await store.save(text("hier", at: hier), payloads: [payload("partagé")])
+        let recente = await store.save(text("aujourd'hui"), payloads: [payload("partagé")])
+        let uneEpinglee = try #require(await store.pin(ancienne, at: Self.noon))
+        let autreEpinglee = try #require(await store.pin(recente, at: Self.noon))
+        #expect(names(in: store.pinnedBlobsFolder).count == 1)
+
+        _ = try #require(await store.unpin(uneEpinglee))
+        #expect(await store.collectOrphanedBlobs() == 0)
+        #expect(names(in: store.pinnedBlobsFolder).count == 1)
+
+        let ref = try #require(autreEpinglee.blobs?.first)
+        let url = try #require(store.blobURL(for: ref, of: autreEpinglee))
+        #expect(FileManager.default.fileExists(atPath: url.path(percentEncoded: false)))
+
+        // Les deux libérées, le fichier part.
+        _ = try #require(await store.unpin(autreEpinglee))
+        #expect(await store.collectOrphanedBlobs() == 1)
+        #expect(names(in: store.pinnedBlobsFolder).isEmpty)
+    }
+
+    /// **La propriété dont dépend tout le reste.** `Pinned` doit être un nom que
+    /// `ClipboardRetention.day(from:)` refuse : c'est ce qui empêche la purge de
+    /// le prendre pour un jour périmé. Le renommer en quelque chose qui
+    /// ressemble à une date ferait tomber ce test-ci avant qu'un utilisateur ne
+    /// perde une image.
+    @Test("Le dossier des épinglés n'est jamais pris pour un jour de l'historique")
+    func leDossierEpingleNestJamaisUnJour() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root, retention: .days(0))
+        let hier = Self.noon.addingTimeInterval(-Self.day)
+
+        let entree = await store.save(text("d'hier", at: hier), payloads: [payload("épinglé")])
+        _ = try #require(await store.pin(entree, at: Self.noon))
+
+        #expect(ClipboardRetention.day(from: ClipboardStore.pinnedFolderName) == nil)
+        #expect(await store.days().contains(ClipboardStore.pinnedFolderName) == false)
+        #expect(
+            ClipboardRetention.days(0).dayFoldersToPurge(
+                from: [ClipboardStore.pinnedFolderName], today: dayKey(Self.noon)
+            ).isEmpty
+        )
+
+        // Zéro jour de rétention : tout ce qui n'est pas d'aujourd'hui part.
+        _ = await store.purgeExpired(now: Self.noon)
+        #expect(names(in: store.dayFolder(dayKey(hier))).contains("blobs") == false)
+        #expect(names(in: store.pinnedBlobsFolder).count == 1)
+    }
+
+    /// Le prix de la règle stricte du ramassage, mesuré : **un** sidecar
+    /// illisible, n'importe où, suspend le balayage du dossier épinglé en
+    /// entier. Ce qu'on perd est de la place, et seulement jusqu'à ce que le
+    /// fichier abîmé soit réparé ou retiré ; ce qu'on éviterait en étant moins
+    /// strict est nul, et ce qu'on y risquerait est la suppression d'octets
+    /// qu'un utilisateur a demandé à garder pour toujours.
+    @Test("Un sidecar illisible ailleurs suspend le ramassage du dossier épinglé")
+    func ramassageEpingleSuspenduParUnSidecarIllisible() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        let hier = Self.noon.addingTimeInterval(-Self.day)
+
+        let ancienne = await store.save(text("d'hier", at: hier), payloads: [payload("épinglé")])
+        let epinglee = try #require(await store.pin(ancienne, at: Self.noon))
+        _ = try #require(await store.unpin(epinglee))
+        #expect(names(in: store.pinnedBlobsFolder).count == 1)   // l'orphelin est là
+
+        // Un sidecar abîmé dans un tout autre jour : l'entrée n'a pas décodé,
+        // donc on ignore si elle était épinglée et ce qu'elle citait.
+        let abimee = await store.save(text("d'aujourd'hui"))
+        let jour = store.dayFolder(dayKey(Self.noon))
+        let sidecar = jour.appending(path: "\(abimee.id.uuidString).json")
+        try Data("{ cassé".utf8).write(to: sidecar, options: .atomic)
+
+        #expect(await store.collectOrphanedBlobs() == 0)
+        #expect(names(in: store.pinnedBlobsFolder).count == 1)
+
+        // Et le prix est temporaire : le fichier douteux retiré, le passage
+        // suivant ramasse.
+        try FileManager.default.removeItem(at: sidecar)
+        #expect(await store.collectOrphanedBlobs() == 1)
+        #expect(names(in: store.pinnedBlobsFolder).isEmpty)
+    }
+
+    @Test("Épingler refuse plutôt que de promettre un contenu qui n'est plus là")
+    func epinglerRefuseUnContenuAbsent() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        let entree = await store.save(text("avec image"), payloads: [payload("des octets")])
+
+        // Le fichier disparaît sous l'entrée — un ménage à la main, un volume
+        // remonté à moitié. L'entrée, elle, le cite toujours.
+        let ref = try #require(entree.blobs?.first)
+        let url = try #require(store.blobURL(for: ref, of: entree))
+        try FileManager.default.removeItem(at: url)
+
+        #expect(await store.pin(entree, at: Self.noon) == nil)
+        #expect(store.problem != nil)
+
+        // Rien n'a été annoncé : l'entrée relue n'est pas épinglée, donc
+        // `blobURL` continue de la renvoyer dans son jour plutôt que vers un
+        // fichier épinglé qui n'a jamais été écrit.
+        let relu = makeStore(at: root)
+        await relu.load()
+        #expect(relu.recent.first?.isPinned == false)
+        #expect(names(in: store.pinnedBlobsFolder).isEmpty)
+    }
+
+    /// Le chiffre des réglages compte les épinglés — voir la documentation de
+    /// `blobBytes` pour l'arbitrage. Le point mesurable est ici : après
+    /// l'épinglage, les octets sont bien **deux fois** sur le disque, et le
+    /// total le dit ; après la purge du jour, il ne reste que la copie épinglée.
+    @Test("Les octets épinglés sont comptés dans le total, et nommés à part")
+    func comptageDesOctetsEpingles() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root, retention: .days(7))
+        let vieux = Self.noon.addingTimeInterval(-30 * Self.day)
+        let taille = Int64(Data("douze octets".utf8).count)
+
+        let entree = await store.save(
+            text("vieille", at: vieux), payloads: [payload("douze octets")]
+        )
+        _ = try #require(await store.pin(entree, at: Self.noon))
+
+        await store.load()
+        #expect(store.pinnedBlobBytes == taille)
+        #expect(store.blobBytes == 2 * taille)
+
+        _ = await store.purgeExpired(now: Self.noon)
+        #expect(store.pinnedBlobBytes == taille)
+        #expect(store.blobBytes == taille)
+    }
 }

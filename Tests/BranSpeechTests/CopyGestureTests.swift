@@ -63,12 +63,31 @@ struct CopyGestureTests {
         #expect(CopyGesture.matches(keyCode: Self.x, flags: Mask.control) == false)
     }
 
-    /// Coller ne change pas le presse-papiers — y compris ⌘⇧V, qui est le
-    /// raccourci du panneau et ne doit surtout pas s'annoncer comme une copie.
+    /// Coller ne change pas le presse-papiers, donc ni ⌘V ni ⌘⇧V ne sont des
+    /// copies.
     @Test("Coller n'est pas copier")
     func pasteIsNotACopy() {
         #expect(CopyGesture.matches(keyCode: Self.v, flags: Mask.command) == false)
         #expect(CopyGesture.matches(keyCode: Self.v, flags: Mask.command | Mask.shift) == false)
+    }
+
+    /// **Le raccourci du panneau est ⌘⇧C, donc il est AUSSI un indice de copie
+    /// — et c'est voulu.**
+    ///
+    /// Le propriétaire a choisi ⌘⇧C contre l'avis de la conception. La
+    /// conséquence est que la même frappe porte deux sens : elle ouvre le
+    /// panneau de bran, et dans beaucoup d'applications elle copie une variante
+    /// — le Finder en copie le chemin. Les deux doivent partir.
+    ///
+    /// `HotkeyMonitor.WatchedKeys` sépare exprès les touches « réclamées » des
+    /// touches « indice » au lieu de les fondre, précisément pour qu'une même
+    /// touche puisse porter les deux droits. Ce test gèle le fait que l'indice
+    /// n'a pas été perdu en chemin : le manquer voudrait dire qu'un ⌘⇧C dans le
+    /// Finder copie un chemin que l'historique ne verrait jamais.
+    @Test("⌘⇧C ouvre le panneau ET s'annonce comme une copie")
+    func panelShortcutIsAlsoACopy() {
+        #expect(HotkeyBinding.clipboardPanel.keyCode == Self.c)
+        #expect(CopyGesture.matches(keyCode: Self.c, flags: Mask.command | Mask.shift))
     }
 
     /// Ces deux codes sont ce que `HotkeyMonitor.refreshWatchedKeys` insère dans

@@ -186,7 +186,7 @@ final class ClipboardController {
         // que le tap existait « par accident » dès que l'une d'elles était
         // active. Le presse-papiers, lui, n'a pas d'interrupteur : sans cet
         // appel, quelqu'un qui a désactivé la dictée et la capture de texte
-        // aurait un ⌘⇧V et un indice ⌘C parfaitement inertes, un sondage qui
+        // aurait un ⌘⇧C et un indice ⌘C parfaitement inertes, un sondage qui
         // tourne quand même, et donc un historique à moitié vivant sans qu'un
         // seul message ne le dise.
         //
@@ -256,7 +256,7 @@ final class ClipboardController {
     /// d'observation pour l'interrupteur de capture.
     func applySettings() {
         // Le raccourci est inscrit dans tous les cas, capture éteinte comprise :
-        // ⌘⇧V ouvre l'historique déjà rangé, et cesser d'écrire ne doit pas
+        // ⌘⇧C ouvre l'historique déjà rangé, et cesser d'écrire ne doit pas
         // empêcher de lire.
         monitor?.bind(.clipboard, to: settings.trigger)
         store.setRetention(settings.retention)

@@ -82,7 +82,7 @@ public enum GlobalTrigger: String, CaseIterable, Sendable, Codable {
 /// Le geste « je viens de copier », qui n'est pas un déclencheur.
 ///
 /// **Pourquoi ce n'est pas un `GlobalTrigger`, et pourquoi la distinction est
-/// tout le sujet.** ⌘⇧V ouvre le panneau : c'est une fonction, elle se règle,
+/// tout le sujet.** ⌘⇧C ouvre le panneau : c'est une fonction, elle se règle,
 /// elle s'arbitre, une dictée en cours la fait taire. ⌘C, lui, n'est *pas* une
 /// fonction de bran — c'est une frappe adressée à l'application de devant, qu'on
 /// se contente d'observer pour savoir qu'il faudra relever le presse-papiers.
@@ -104,7 +104,7 @@ public enum CopyGesture {
     /// presse-papiers, et l'oublier perdrait une entrée sur deux dans un
     /// éditeur de texte.
     ///
-    /// Pas ⌘⇧V ni ⌘V : coller ne change pas le presse-papiers. Pas non plus les
+    /// Pas ⌘⇧C ni ⌘V : coller ne change pas le presse-papiers. Pas non plus les
     /// copies faites au menu ou à la souris — elles existent, elles ne
     /// produisent aucune frappe, et c'est le sondeur du presse-papiers qui les
     /// rattrape. L'indice clavier est l'accélérateur, pas la seule source.

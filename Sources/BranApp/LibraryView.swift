@@ -37,6 +37,7 @@ struct LibraryView: View {
     @State private var meetingsQuery = ""
     @State private var dictationQuery = ""
     @State private var snapshotQuery = ""
+    @State private var clipboardQuery = ""
     @State private var watchQuery = ""
 
     /// `pendingUpload` du modèle, présenté comme un `Identifiable` pour `.sheet`.
@@ -151,6 +152,10 @@ struct LibraryView: View {
 
         case .snapshots:
             SnapshotPane(model: model, query: $snapshotQuery)
+                .transition(.opacity)
+
+        case .clipboard:
+            ClipboardPane(model: model, query: $clipboardQuery)
                 .transition(.opacity)
 
         case .watch:

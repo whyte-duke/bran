@@ -67,7 +67,7 @@ import Foundation
 ///
 /// L'arbitrage est asymétrique, et c'est ce qui le rend facile : **personne ne
 /// regarde son historique se remplir.** La seule latence perçue est celle de
-/// ⌘⇧V → panneau ouvert, qui n'a aucun rapport. 180 ms de plus ne coûtent rien
+/// ⌘⇧C → panneau ouvert, qui n'a aucun rapport. 180 ms de plus ne coûtent rien
 /// de perceptible ; une entrée capturée à moitié écrite est fausse pour
 /// toujours.
 ///

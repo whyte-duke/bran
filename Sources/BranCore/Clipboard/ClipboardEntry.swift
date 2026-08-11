@@ -30,9 +30,20 @@ import Foundation
 /// rend la purge sûre : pouvoir décider quoi supprimer en lisant un nom de
 /// dossier, sans ouvrir un seul fichier. Voir `ClipboardRetention`.
 ///
-/// **Ce qui n'est pas ici.** Pas de champ « épinglé », pas d'étiquette, pas de
+/// **Ce qui n'était pas ici.** Pas de champ « épinglé », pas d'étiquette, pas de
 /// dossier de rangement. Ils s'ajouteront en `Optional` le jour où ils serviront
 /// ; les inventer maintenant fige un format sur une intuition.
+///
+/// **L'épinglage est arrivé, exactement par la route que ce paragraphe
+/// décrivait.** Le refuser en v1 était une décision *mesurée* — sur les 250
+/// entrées de l'historique réel du propriétaire, zéro épingle et zéro recopie à
+/// plus d'un jour d'écart : rien dans les données ne réclamait qu'une entrée
+/// vive plus longtemps qu'une autre. Le propriétaire a tranché l'inverse : il
+/// veut pouvoir garder certaines entrées indéfiniment. Une mesure dit ce qui a
+/// été fait, jamais ce qui sera voulu, et c'est une raison suffisante de
+/// renverser. La décision renversée reste écrite juste au-dessus — l'effacer
+/// ferait croire que `pinnedAt` a toujours été une évidence, et le prochain
+/// champ « évident » s'ajouterait sans mesure et sans arbitrage.
 public struct ClipboardEntry: Codable, Identifiable, Equatable, Sendable {
 
     // MARK: - Le noyau exigé
@@ -169,6 +180,46 @@ public struct ClipboardEntry: Codable, Identifiable, Equatable, Sendable {
     /// prévenir.
     public var blobsPurgedAt: Date?
 
+    /// L'instant où l'entrée a été épinglée, `nil` quand elle ne l'est pas.
+    ///
+    /// Épingler veut dire une seule chose : **cette entrée-là ne perd pas ses
+    /// contenus lourds au bout de `blobDays` jours, ni jamais.** Le texte, lui,
+    /// était déjà conservé indéfiniment pour tout le monde ; l'épingle ne
+    /// concerne donc que ce que la rétention efface.
+    ///
+    /// **Une date et non un `Bool`.** Trois questions du genre « est-ce que
+    /// c'est arrivé ? » sont déjà répondues ici par une date — `recopiedAt`,
+    /// `blobsPurgedAt`, et le `refusedBytes` qui porte sa taille plutôt qu'un
+    /// drapeau — parce qu'un booléen répond « oui » et se tait sur tout le
+    /// reste. La date, elle, coûte le même rien dans le cas majoritaire (un
+    /// encodeur JSON omet les `nil`, et le cas majoritaire est *toutes* les
+    /// entrées), se montre telle quelle dans le détail — « épinglée le
+    /// 10 août » — et donne un ordre stable à une éventuelle section épinglée en
+    /// tête de liste. Un `isPinned: Bool?` aurait écrit la même ligne pour en
+    /// dire moins, et fait lire ce type comme deux types mélangés.
+    ///
+    /// **Épingler n'est pas qu'un drapeau, et c'est le point difficile.** La
+    /// purge ne lit pas les entrées : elle supprime le sous-dossier `blobs/`
+    /// d'un dossier-jour entier, en décidant **par le nom du dossier**, sans
+    /// ouvrir un seul fichier — voir `ClipboardRetention.dayFoldersToPurge`.
+    /// Exempter l'entrée ne peut donc pas suffire : son PNG serait emporté avec
+    /// le dossier, et l'entrée survivrait en promettant un fichier effacé, c'est
+    /// exactement la référence morte que ce type entier est écrit pour rendre
+    /// impossible. La réponse est donc mécanique, pas déclarative : **épingler
+    /// recopie les contenus lourds dans `Clipboard/Pinned/blobs/`**, à la racine
+    /// de la bibliothèque, un dossier que la rétention ne peut pas voir puisque
+    /// `ClipboardRetention.day(from: "Pinned")` rend `nil`. Le champ ci-dessus
+    /// n'est que la trace de cette recopie ; c'est `ClipboardStore` qui la fait,
+    /// et `ClipboardStore.pinnedFolderName` qui nomme l'endroit une seule fois,
+    /// à côté de `blobsFolderName`, plutôt qu'en littéral des deux côtés.
+    ///
+    /// L'alternative écartée était de faire survivre le dossier-jour tant qu'il
+    /// contient une entrée épinglée : une seule épingle sauvait alors les
+    /// 158 Mo de PNG de sa journée, et surtout la purge redevenait une décision
+    /// qui exige de lire chaque index — la fin du tour de force qui rend cette
+    /// rétention sûre et instantanée.
+    public var pinnedAt: Date?
+
     // MARK: - Les seuils
 
     /// Au-delà, le texte part en blob plutôt qu'en ligne dans l'index — 512 Kio.
@@ -217,7 +268,8 @@ public struct ClipboardEntry: Codable, Identifiable, Equatable, Sendable {
         pasteboardItems: Int? = nil,
         fullTextLength: Int? = nil,
         refusedBytes: Int? = nil,
-        blobsPurgedAt: Date? = nil
+        blobsPurgedAt: Date? = nil,
+        pinnedAt: Date? = nil
     ) {
         self.id = id
         self.copiedAt = copiedAt
@@ -233,6 +285,7 @@ public struct ClipboardEntry: Codable, Identifiable, Equatable, Sendable {
         self.fullTextLength = fullTextLength
         self.refusedBytes = refusedBytes
         self.blobsPurgedAt = blobsPurgedAt
+        self.pinnedAt = pinnedAt
     }
 
     /// Construit une entrée à partir d'un texte, en tranchant seul l'aperçu, la
@@ -370,6 +423,16 @@ public struct ClipboardEntry: Codable, Identifiable, Equatable, Sendable {
     /// Les blobs ont-ils été supprimés par la rétention ? L'entrée, elle, reste.
     public var blobsArePurged: Bool { blobsPurgedAt != nil }
 
+    /// L'entrée est-elle épinglée, donc gardée indéfiniment ?
+    ///
+    /// La question est posée à deux endroits qui n'ont rien à voir — la
+    /// rétention avant d'inscrire une entrée sur sa liste de purge, la liste
+    /// avant de dessiner l'épingle — et elle doit avoir une seule réponse, pour
+    /// la même raison que `blobsArePurged` juste au-dessus : trois sites
+    /// d'appel qui écrivent `pinnedAt != nil` chacun de leur côté finissent par
+    /// écrire des conditions légèrement différentes, et c'est la purge qui perd.
+    public var isPinned: Bool { pinnedAt != nil }
+
     /// Le contenu a-t-il été refusé à l'écriture pour cause de taille ?
     public var isRefused: Bool { refusedBytes != nil }
 
@@ -462,6 +525,59 @@ public struct ClipboardEntry: Codable, Identifiable, Equatable, Sendable {
     public func purgingBlobs(at date: Date) -> ClipboardEntry {
         var copy = self
         copy.blobsPurgedAt = date
+        return copy
+    }
+
+    /// La même entrée, épinglée à cet instant — donc soustraite à la rétention.
+    ///
+    /// Une valeur rendue plutôt qu'une mutation en place, comme les deux
+    /// méthodes ci-dessus : l'entrée est une valeur, et c'est le magasin qui
+    /// décide de réécrire la ligne.
+    ///
+    /// **Épingler une entrée déjà épinglée ne change rien, pas même la date.**
+    /// Ce second geste n'arrive qu'en double — un double-clic, un état
+    /// réappliqué au chargement, une commande rejouée après un échec d'écriture
+    /// — et aucun des trois n'est une nouvelle décision de l'utilisateur.
+    /// Laisser la date se réécrire ferait avancer toute seule la ligne
+    /// « épinglée le 10 août » que le détail affiche, ce qui est mot pour mot le
+    /// défaut que `ClipboardRetention` évite en refusant de repurger une entrée
+    /// déjà purgée. Le prix de ce choix est qu'on ne peut pas *déplacer* la date
+    /// d'un coup : il faut désépingler puis réépingler, c'est-à-dire décrire le
+    /// geste qu'on a réellement fait.
+    ///
+    /// **Ce que cette méthode ne fait pas, et ne peut pas faire :** recopier les
+    /// contenus lourds dans `Clipboard/Pinned/blobs/`. Sans cette recopie,
+    /// l'épingle est une promesse que le prochain balayage contredit, puisque
+    /// la purge emporte le sous-dossier `blobs/` du jour sans jamais lire une
+    /// entrée. Un type de valeur ne touche pas au disque ; c'est `ClipboardStore`
+    /// qui écrit d'abord et n'appelle ceci qu'ensuite, dans cet ordre-là, pour
+    /// la même raison qui lui fait marquer avant de supprimer.
+    public func pinned(at date: Date) -> ClipboardEntry {
+        guard isPinned == false else { return self }
+        var copy = self
+        copy.pinnedAt = date
+        return copy
+    }
+
+    /// La même entrée, désépinglée : elle redevient soumise à la rétention.
+    ///
+    /// **Le champ est remis à `nil`, il n'est pas doublé d'un `unpinnedAt`.**
+    /// Savoir *quand* quelqu'un a cessé de vouloir garder quelque chose ne sert
+    /// à personne : ça ne s'affiche pas, ça ne se trie pas, et ça ne change
+    /// aucune décision de purge. Un champ de plus dans chaque ligne écrite pour
+    /// une information que rien ne lit est exactement ce que le paragraphe en
+    /// tête de ce fichier interdit.
+    ///
+    /// **Désépingler ne ressuscite pas la rétention rétroactivement, et n'a pas
+    /// à le faire.** Si le dossier-jour de l'entrée a perdu ses blobs pendant
+    /// qu'elle était épinglée, le balayage suivant la retrouve — son dossier est
+    /// toujours candidat — et la marque enfin purgée, avec la date de ce
+    /// balayage-là. C'est honnête : le fichier disparaît quand le magasin
+    /// supprime la copie de `Pinned/blobs/`, c'est-à-dire maintenant, et pas au
+    /// jour où le dossier d'origine a été vidé.
+    public func unpinned() -> ClipboardEntry {
+        var copy = self
+        copy.pinnedAt = nil
         return copy
     }
 }

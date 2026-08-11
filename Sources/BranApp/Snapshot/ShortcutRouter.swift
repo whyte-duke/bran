@@ -46,7 +46,7 @@ final class ShortcutRouter {
     /// référence faible se justifiera le jour où il devra l'interroger, par
     /// exemple pour un `isBusy` qui entrerait dans l'arbitrage.
     ///
-    /// Tant qu'elle est `nil`, ⌘⇧V ne fait rien — et c'est l'état actuel : rien
+    /// Tant qu'elle est `nil`, ⌘⇧C ne fait rien — et c'est l'état actuel : rien
     /// n'ouvre de panneau.
     var openClipboardPanel: (() -> Void)?
 
@@ -104,14 +104,14 @@ final class ShortcutRouter {
             // poserait une fenêtre par-dessus l'encoche qui enregistre, et
             // pendant une capture, par-dessus le viseur de macOS.
             guard dictation?.isBusy != true, snapshot?.isBusy != true else {
-                FeatureLog.record("presse-papiers : ⌘⇧V ignoré, une autre fonction est occupée")
+                FeatureLog.record("presse-papiers : ⌘⇧C ignoré, une autre fonction est occupée")
                 return
             }
             openClipboardPanel?()
 
         case .triggerUp(.clipboard):
             // Le panneau fonctionne en bascule, comme la capture : le relâchement
-            // de ⌘⇧V n'a rien à dire.
+            // de ⌘⇧C n'a rien à dire.
             break
 
         case .copyHint(let changeCount):

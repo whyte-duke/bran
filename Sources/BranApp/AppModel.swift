@@ -221,7 +221,7 @@ public final class AppModel {
 
         // **Les deux coutures que le guet avait laissées ouvertes.** L'indice de
         // copie est relayé sans arbitrage — une copie faite pendant une dictée
-        // est précisément celle qu'on voudra coller à la fin — tandis que ⌘⇧V
+        // est précisément celle qu'on voudra coller à la fin — tandis que ⌘⇧C
         // passe par l'arbitrage comme les deux autres fonctions.
         shortcuts.onCopyHint = { [weak self] changeCount in
             self?.clipboard.copyHinted(changeCount: changeCount)

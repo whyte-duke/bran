@@ -57,7 +57,50 @@ public struct ClipboardBlobPayload: Sendable, Equatable {
 ///     <uuid>.json                ← l'entrée, gardée pour toujours
 ///     index.jsonl                ← une ligne par entrée, dérivée, jetable
 ///     blobs/<sha256>.png         ← le contenu lourd, purgé après 30 jours
+///   Pinned/
+///     blobs/<sha256>.png         ← la copie épinglée, que la purge ne voit pas
 /// ```
+///
+/// ## Épingler, et pourquoi ça demande un second dossier
+///
+/// Épingler veut dire « garde ça indéfiniment, l'image comprise ». Marquer
+/// l'entrée n'y suffit pas, et c'est la seule chose qu'il faut comprendre ici :
+/// **la purge ne lit pas les entrées.** Elle supprime le sous-dossier `blobs/`
+/// d'un dossier-jour entier, en décidant sur le nom du dossier, sans ouvrir un
+/// seul fichier — c'est le tour de force de `ClipboardRetention`, et c'est ce
+/// qui rend une bibliothèque d'un an purgeable en quelques millisecondes. Une
+/// entrée épinglée qui laisserait son contenu dans le `blobs/` de son jour le
+/// verrait partir avec le dossier, épinglée ou non.
+///
+/// D'où `Pinned/blobs/`, à la racine de la bibliothèque : `pin` y **recopie**
+/// les contenus lourds de l'entrée, et `blobURL(for:of:)` y renvoie ensuite les
+/// appelants. La rétention ne le regarde jamais, et pas par convention : elle ne
+/// travaille que sur des noms qui s'analysent en `AAAA-MM-JJ`, et
+/// `ClipboardRetention.day(from: "Pinned")` rend `nil`. Le dossier n'est donc
+/// jamais un jour, donc jamais périmé, donc jamais balayé — la même protection
+/// qui garde déjà un `.DS_Store` ou un dossier « à trier » déposé à la main.
+///
+/// **L'alternative rejetée : déplacer le blob au lieu de le recopier.** Elle est
+/// tentante — elle ne coûte pas d'octets, et elle laisse une seule copie. Elle
+/// est fausse, parce que le fichier n'appartient pas à l'entrée : il est adressé
+/// par l'empreinte de son contenu, donc **partagé** avec toutes les entrées du
+/// même jour qui ont copié la même chose. C'est la déduplication intra-journée,
+/// et elle est gratuite précisément parce que personne ne tient de compteur de
+/// références. Déplacer le fichier hors du jour casserait donc, en silence,
+/// toutes les autres entrées qui le citent : elles ne sont pas épinglées, donc
+/// `blobURL` continuerait de les envoyer dans le `blobs/` du jour, où il n'y a
+/// plus rien. Elles ne sont pas purgées non plus, donc `canPaste` répondrait
+/// vrai et le bouton « coller » échouerait au clic — exactement la référence
+/// morte que l'ordre blob → sidecar → index existe pour rendre impossible.
+/// Recopier coûte des octets, une seule fois, pour un geste rare et explicite ;
+/// déplacer coûterait un correctif de compteur de références dans un magasin qui
+/// s'est construit pour ne pas en avoir.
+///
+/// Le pendant à payer est le ramassage : désépingler laisse un fichier que plus
+/// personne ne cite dans `Pinned/blobs/`. C'est `collectOrphanedBlobs()` qui le
+/// reprend, avec une contrainte de plus que pour un jour — voir sa
+/// documentation, la liste des empreintes à épargner y est celle de la
+/// bibliothèque entière.
 ///
 /// ## Pourquoi pas `ContentStore`
 ///
@@ -126,11 +169,43 @@ public final class ClipboardStore {
     /// `load()`, puis tenue à jour par les écritures.
     public private(set) var recent: [ClipboardEntry] = []
 
-    /// Octets occupés par les contenus lourds, tous jours confondus. Affiché
-    /// dans les réglages : une rétention se règle mieux quand on voit ce qu'elle
-    /// coûte. Rafraîchi par `load()` et par la purge, pas à chaque copie — c'est
-    /// un chiffre de réglages, pas un compteur temps réel.
+    /// Octets occupés par les contenus lourds, tous jours confondus **et les
+    /// contenus épinglés compris**. Affiché dans les réglages : une rétention se
+    /// règle mieux quand on voit ce qu'elle coûte. Rafraîchi par `load()`, par
+    /// la purge et par le ramassage, pas à chaque copie ni à chaque épinglage —
+    /// c'est un chiffre de réglages, pas un compteur temps réel.
+    ///
+    /// **Pourquoi les épinglés sont dedans, alors qu'ils échappent au curseur.**
+    /// L'argument inverse s'entend : ce chiffre est posé à côté du réglage de
+    /// rétention, et n'y compter que ce que le curseur peut libérer donnerait
+    /// une promesse exacte — « descendez à 7 jours et vous récupérez ceci ». Il
+    /// perd malgré tout, pour deux raisons.
+    ///
+    /// La première est que ce chiffre répond à une question d'occupation, pas de
+    /// prévision : l'utilisateur qui le regarde veut savoir ce que son
+    /// presse-papiers pèse sur son disque, et un total qui omet un dossier bien
+    /// réel ment sur ce qu'un `du` lui montrerait. La seconde est le sens dans
+    /// lequel il bougerait : épingler **recopie**, donc l'épinglage fait
+    /// grossir la bibliothèque. Un total qui exclut les épinglés **baisserait**
+    /// au moment précis où le disque se remplit — un compteur qui descend quand
+    /// la place diminue est pire que pas de compteur du tout.
+    ///
+    /// Le prix payé est qu'un utilisateur qui descend le curseur à zéro voit
+    /// rester un résidu. C'est la vérité, et `pinnedBlobBytes` existe pour que
+    /// les réglages puissent la nommer — « dont 4,2 Mo épinglés » — plutôt que
+    /// de la laisser deviner.
     public private(set) var blobBytes: Int64 = 0
+
+    /// La part de `blobBytes` qui est dans `Pinned/blobs/`, c'est-à-dire ce que
+    /// le curseur de rétention ne libérera jamais.
+    ///
+    /// **Compté en double avec le jour, tant que le jour n'est pas purgé, et
+    /// c'est exact.** Épingler recopie : les octets sont réellement deux fois
+    /// sur le disque jusqu'à ce que la purge emporte le `blobs/` du jour. Une
+    /// somme qui les dédupliquerait par empreinte annoncerait moins que ce que
+    /// le disque contient, pour un raffinement dont personne n'a l'usage à côté
+    /// d'un curseur.
+    public private(set) var pinnedBlobBytes: Int64 = 0
 
     /// **Ce qui empêche de lire ou d'écrire, quand quelque chose l'empêche.**
     ///
@@ -181,6 +256,22 @@ public final class ClipboardStore {
     /// Le sous-dossier des contenus lourds, à l'intérieur du dossier-jour.
     public nonisolated static let blobsFolderName = "blobs"
 
+    /// Le dossier des contenus épinglés, à la racine de la bibliothèque, avec
+    /// son propre `blobs/` dedans.
+    ///
+    /// **Ce nom est un choix de sûreté avant d'être un choix d'ergonomie.** Il
+    /// doit être un nom que `ClipboardRetention.day(from:)` refuse, sinon la
+    /// purge le prendrait pour un jour périmé et emporterait ce que ce dossier
+    /// existe pour garder. « Pinned » ne s'analyse en `AAAA-MM-JJ` sous aucun
+    /// angle, et le test `leDossierEpingleNestJamaisUnJour` gèle cette
+    /// propriété — une renommage vers quelque chose comme « 2026-Pinned » le
+    /// ferait tomber avant qu'un utilisateur ne perde une image.
+    ///
+    /// En anglais comme les deux autres, et à côté d'eux : ce sont des noms que
+    /// la documentation utilisateur promet stables, et un dossier qu'on invite à
+    /// ouvrir dans le Finder ne change pas de nom entre deux versions.
+    public nonisolated static let pinnedFolderName = "Pinned"
+
     /// Combien d'entrées la fenêtre garde en mémoire.
     ///
     /// ~500, soit une dizaine de jours au rythme mesuré de 53 entrées par jour.
@@ -219,6 +310,21 @@ public final class ClipboardStore {
         folder.appending(path: day, directoryHint: .isDirectory)
     }
 
+    /// Le dossier des contenus épinglés : `Clipboard/Pinned/blobs/`.
+    ///
+    /// Un seul `blobs/` pour toute la bibliothèque, et non un par jour : le
+    /// dossier n'est pas rangé par date puisque son contenu n'a justement plus
+    /// de date d'expiration. La déduplication par empreinte y devient donc
+    /// **globale** — deux entrées de deux mois différents qui ont copié la même
+    /// image partagent un seul fichier épinglé. C'est un cadeau du nommage par
+    /// empreinte, et c'est aussi ce qui oblige le ramassage à raisonner sur la
+    /// bibliothèque entière plutôt que jour par jour.
+    public var pinnedBlobsFolder: URL {
+        folder
+            .appending(path: Self.pinnedFolderName, directoryHint: .isDirectory)
+            .appending(path: Self.blobsFolderName, directoryHint: .isDirectory)
+    }
+
     /// L'emplacement d'un contenu lourd, ou `nil` s'il n'y a plus rien à ouvrir.
     ///
     /// **Rend `nil` pour une entrée purgée sans toucher au disque.** Le bouton
@@ -226,8 +332,30 @@ public final class ClipboardStore {
     /// `ClipboardEntry` sait formuler — plutôt que d'échouer au clic. Ne teste
     /// pas l'existence du fichier : ce serait un accès disque par ligne
     /// affichée, et la référence morte est déjà déclarée dans l'entrée.
+    ///
+    /// **Une entrée épinglée est envoyée dans `Pinned/blobs/`, et c'est ici que
+    /// ça se décide — nulle part ailleurs.** C'est le seul endroit du dépôt qui
+    /// sait où un contenu vit ; deux appelants qui devineraient le chemin
+    /// eux-mêmes divergeraient au premier correctif, et le symptôme serait un
+    /// « coller » qui échoue sur la moitié des entrées. Les quatre appelants
+    /// connus — la vignette, le collage, le panneau, le cache — passent tous par
+    /// ici et n'ont donc rien à savoir de l'épinglage.
+    ///
+    /// **L'ordre des deux tests compte.** La purge passe avant l'épinglage :
+    /// une entrée déjà purgée que l'on épingle après coup n'a plus de contenu à
+    /// recopier — `pin` ne fabrique rien — et rendre pour elle un chemin
+    /// épinglé serait promettre un fichier qui n'a jamais été écrit. Elle reste
+    /// donc `nil`, et continue d'annoncer sa date de purge. Dans le sens
+    /// normal — épinglée d'abord, jour purgé ensuite — la question ne se pose
+    /// pas : `ClipboardRetention` exclut les entrées épinglées du marquage,
+    /// donc `blobsArePurged` reste faux et le chemin épinglé est rendu alors
+    /// même que le `blobs/` du jour a disparu. C'est précisément ce que
+    /// l'épinglage achète.
     public func blobURL(for ref: ClipboardBlobRef, of entry: ClipboardEntry) -> URL? {
         guard entry.blobsArePurged == false else { return nil }
+        if entry.isPinned {
+            return pinnedBlobsFolder.appending(path: ref.fileName)
+        }
         return dayFolder(entry.dayFolderName())
             .appending(path: Self.blobsFolderName, directoryHint: .isDirectory)
             .appending(path: ref.fileName)
@@ -323,7 +451,7 @@ public final class ClipboardStore {
         }
 
         recent = Self.ordered(gathered).prefix(window).map { $0 }
-        blobBytes = await Self.totalBlobBytes(in: base, days: days)
+        await refreshBlobBytes(in: base, days: days)
 
         // Un dossier absent est normal — c'est le premier lancement. Un dossier
         // présent et illisible ne doit jamais ressembler à une bibliothèque
@@ -534,6 +662,172 @@ public final class ClipboardStore {
         return updated
     }
 
+    // MARK: - Épingler
+
+    /// Épingle une entrée : ses contenus lourds sont **recopiés** dans
+    /// `Pinned/blobs/`, puis l'entrée est réécrite avec sa date d'épinglage.
+    ///
+    /// **Pourquoi une recopie et pas un déplacement** : voir la documentation de
+    /// la classe. En deux mots, le fichier est adressé par son contenu, donc il
+    /// peut être partagé avec d'autres entrées du même jour, et le déplacer
+    /// laisserait celles-là citer un fichier absent sans le savoir.
+    ///
+    /// **Toute la séquence passe par `serialized`, et c'en est un cas d'école.**
+    /// Épingler écrit des fichiers *puis* réécrit un sidecar *puis* réécrit
+    /// l'index : trois gestes séparés par des `await`, donc trois occasions pour
+    /// une purge réveillée entre-temps de s'exécuter au milieu. La file d'attente
+    /// est ce qui empêche que le `blobs/` du jour disparaisse entre le moment où
+    /// l'on décide de recopier et celui où l'on recopie.
+    ///
+    /// **L'ordre est fichiers → sidecar → index, le même que celui d'une
+    /// écriture, et pour la même raison.** Un plantage après la recopie laisse au
+    /// pire un fichier épinglé que personne ne cite — ramassable. Un plantage
+    /// dans l'autre ordre laisserait une entrée épinglée dont le contenu n'a pas
+    /// encore été copié, c'est-à-dire une entrée qui promet un fichier absent, et
+    /// qui le promettrait pour toujours puisque plus rien ne repasse derrière.
+    /// L'index, lui, part avant le sidecar : `rewrite(_:)` s'en charge, et
+    /// `invalidateIndex(in:)` dit pourquoi — une entrée réécrite garde son
+    /// identifiant, donc la vérification d'identifiants de `readDay` ne peut pas
+    /// rattraper un index périmé sur elle.
+    ///
+    /// **Rien n'est marqué si la recopie a échoué.** Même arbitrage que la purge,
+    /// dans l'autre sens : là-bas on n'efface rien tant que rien ne l'a annoncé,
+    /// ici on n'annonce rien tant que rien n'a été copié. Le refus est global à
+    /// l'entrée — un `richText` dont le RTF se copie et le HTML échoue serait à
+    /// moitié protégé, ce dont l'interface ne saurait rien dire.
+    ///
+    /// **Une entrée déjà purgée peut quand même être épinglée.** Il n'y a alors
+    /// rien à recopier, et l'épinglage ne ressuscite pas les octets : il dit
+    /// seulement que cette ligne-là compte. Refuser serait défendable ; ça
+    /// reviendrait à faire dépendre un geste d'organisation d'un accident de
+    /// rétention, et à devoir l'expliquer dans l'interface.
+    ///
+    /// Une entrée dont le sidecar n'existe plus est ignorée sans bruit, comme
+    /// pour `recopy` : l'appelant travaille sur une ligne qu'une suppression
+    /// concurrente peut avoir retirée.
+    ///
+    /// - Returns: l'entrée épinglée, ou `nil` si rien n'a pu être écrit.
+    @discardableResult
+    public func pin(_ entry: ClipboardEntry, at date: Date = .now) async -> ClipboardEntry? {
+        await serialized { await self.performPin(entry, at: date) }
+    }
+
+    private func performPin(_ entry: ClipboardEntry, at date: Date) async -> ClipboardEntry? {
+        let target = dayFolder(entry.dayFolderName())
+        guard await Self.sidecarExists(entry, in: target) else { return nil }
+
+        // Une entrée purgée n'a plus de fichier à mettre à l'abri ; une entrée
+        // sans blob — le cas de l'écrasante majorité, du texte — n'en a jamais
+        // eu. Les deux s'épinglent sans toucher au disque des contenus.
+        let refs: [ClipboardBlobRef] = entry.blobsArePurged ? [] : (entry.blobs ?? [])
+        if refs.isEmpty == false {
+            do {
+                try await Self.copyBlobsToPinned(refs, from: target, to: pinnedBlobsFolder)
+            } catch {
+                writeFailure = "Épinglage impossible : \(error.localizedDescription)"
+                return nil
+            }
+        }
+
+        let updated = entry.pinned(at: date)
+        guard await rewrite(updated) else { return nil }
+
+        // `insert` et non `replaceInWindow` : épingler ne touche pas à
+        // `lastCopiedAt`, donc rien ne remonte dans le panneau — c'est la
+        // crainte qui a fait exister `replaceInWindow`, et elle ne s'applique
+        // pas ici. En revanche une entrée épinglée depuis la recherche, donc
+        // hors de la fenêtre, doit pouvoir y entrer à sa place de date. Si la
+        // fenêtre est pleine et qu'elle est plus ancienne que tout ce qu'elle
+        // contient, le rognage la ressort aussitôt : c'est exactement l'état que
+        // le prochain `load()` reconstruirait.
+        insert(updated)
+        return updated
+    }
+
+    /// Désépingle une entrée : elle redevient soumise à la rétention, et son
+    /// contenu retourne vivre dans le `blobs/` de son jour — s'il y est encore.
+    ///
+    /// **Le fichier épinglé n'est pas supprimé ici**, exactement pour la raison
+    /// qui fait que `delete` ne supprime pas de blob : l'empreinte peut être
+    /// citée par une **autre** entrée épinglée, et le vérifier au moment du
+    /// geste demanderait de relire toute la bibliothèque. La déduplication du
+    /// dossier épinglé étant globale, « toute la bibliothèque » est ici à
+    /// prendre au pied de la lettre. Le fichier devenu inutile est ramassé par
+    /// `collectOrphanedBlobs()`, qui a justement l'ensemble complet sous les
+    /// yeux et sait à quelles conditions il a le droit de conclure.
+    ///
+    /// La documentation de `ClipboardEntry.unpinned()` dit que le fichier
+    /// disparaît « maintenant » : à lire comme « au prochain ramassage, et non
+    /// au jour où le dossier d'origine a été vidé », qui est ce qu'elle oppose.
+    /// Le décalage est de quelques heures au plus — le ramassage passe au
+    /// lancement et une fois par jour — et il ne se voit nulle part, puisque
+    /// l'entrée désépinglée n'annonce rien tant que la rétention ne l'a pas
+    /// reprise.
+    ///
+    /// **Ce que désépingler peut coûter, et qui n'est pas un défaut.** Si le
+    /// jour de l'entrée a été purgé pendant qu'elle était épinglée, son `blobs/`
+    /// n'existe plus : `blobURL` la renvoie désormais vers un fichier absent, et
+    /// l'entrée n'est pourtant pas marquée purgée. Le prochain balayage de la
+    /// rétention la reprend — elle n'est plus exclue — et pose sa
+    /// `blobsPurgedAt`, ce qui remet l'interface d'accord avec le disque. La
+    /// fenêtre entre les deux est celle d'un bouton qui échoue au clic, et c'est
+    /// le seul endroit du magasin où elle existe ; la fermer demanderait de
+    /// marquer l'entrée purgée au moment du désépinglage, c'est-à-dire de
+    /// prononcer une purge que la rétention n'a pas décidée, sur un contenu
+    /// peut-être encore présent quand le jour n'a jamais été purgé. On préfère
+    /// une incohérence qui se répare toute seule au prochain balayage à un
+    /// mensonge que rien ne relit.
+    ///
+    /// - Returns: l'entrée désépinglée, ou `nil` si rien n'a pu être écrit.
+    @discardableResult
+    public func unpin(_ entry: ClipboardEntry) async -> ClipboardEntry? {
+        await serialized { await self.performUnpin(entry) }
+    }
+
+    private func performUnpin(_ entry: ClipboardEntry) async -> ClipboardEntry? {
+        var updated = entry.unpinned()
+
+        // **Désépingler doit constater ce que l'entrée retrouve, et pas
+        // seulement retirer une marque.** Une revue a trouvé la fenêtre : une
+        // entrée ancienne épinglée, son dossier-jour purgé entre-temps, puis
+        // désépinglée. En n'enlevant que l'épingle, elle repartait avec
+        // `blobsPurgedAt == nil` — donc `canPaste` vrai, donc `blobURL` rendant
+        // un chemin vers le `blobs/` du jour, qui n'existe plus. Un bouton
+        // « coller » qui échoue au clic, c'est-à-dire très exactement la
+        // référence morte que tout ce fichier est construit pour rendre
+        // impossible. Et le ramassage d'orphelins pouvait ensuite emporter la
+        // copie épinglée, ne laissant plus un octet nulle part.
+        //
+        // L'épingle protégeait donc les fichiers **et** l'honnêteté de l'entrée ;
+        // la retirer rend les deux. On vérifie sur le disque, une fois, ce que
+        // l'entrée peut encore promettre.
+        if let blobs = updated.blobs, blobs.isEmpty == false {
+            let day = dayFolder(updated.dayFolderName())
+                .appending(path: Self.blobsFolderName, directoryHint: .isDirectory)
+            let survives = await Self.allBlobsExist(blobs, in: day)
+            if survives == false { updated = updated.purgingBlobs(at: .now) }
+        }
+
+        guard await rewrite(updated) else { return nil }
+        insert(updated)                       // même arbitrage que `performPin`
+        return updated
+    }
+
+    /// Tous ces contenus sont-ils encore dans ce dossier ?
+    ///
+    /// Un accès disque par référence, et il est justifié : on ne l'appelle qu'au
+    /// désépinglage, un geste rare et volontaire, pour décider si l'entrée a
+    /// encore le droit de promettre quelque chose. Le faire à l'affichage serait
+    /// un accès disque par ligne, ce que `blobURL` refuse explicitement.
+    nonisolated static func allBlobsExist(_ refs: [ClipboardBlobRef], in folder: URL) async -> Bool {
+        let manager = FileManager.default
+        return refs.allSatisfy { reference in
+            manager.fileExists(
+                atPath: folder.appending(path: reference.fileName).path(percentEncoded: false)
+            )
+        }
+    }
+
     /// Supprime une entrée : son sidecar, puis l'index de son jour réécrit.
     ///
     /// **Pas de pierre tombale, pas de compacteur.** Cette machinerie a été
@@ -672,8 +966,20 @@ public final class ClipboardStore {
             }
         }
 
-        blobBytes = await Self.totalBlobBytes(in: base, days: names)
+        await refreshBlobBytes(in: base, days: names)
         return marked
+    }
+
+    /// Recompte les deux chiffres des réglages, jours et épinglés.
+    ///
+    /// Un seul endroit qui les pose tous les deux : ils sont lus côte à côte
+    /// dans la même phrase — « 158 Mo, dont 4,2 Mo épinglés » — et deux
+    /// rafraîchissements séparés finiraient par afficher un total plus vieux que
+    /// sa propre part.
+    private func refreshBlobBytes(in base: URL, days: [String]) async {
+        blobBytes = await Self.totalBlobBytes(in: base, days: days)
+        pinnedBlobBytes = await Self.sumBlobBytes(in: pinnedBlobsFolder)
+        blobBytes += pinnedBlobBytes
     }
 
     /// Ramasse les contenus lourds que plus aucune entrée ne cite.
@@ -712,6 +1018,41 @@ public final class ClipboardStore {
     /// l'existence, sans rien à en faire, en occupant le seul canal réservé aux
     /// pannes qui demandent une action.
     ///
+    /// ## Le dossier épinglé, et ce qu'il coûte de plus
+    ///
+    /// `Pinned/blobs/` est balayé lui aussi, aux mêmes conditions de refus, à un
+    /// détail près qui change tout : **la liste des empreintes à épargner est
+    /// celle de toutes les entrées épinglées de toute la bibliothèque**, pas
+    /// celle d'un jour. Il le faut, parce que la déduplication y est globale —
+    /// deux entrées de deux mois différents qui ont copié la même image citent
+    /// le même fichier épinglé, et n'en épargner qu'une moitié reviendrait à
+    /// supprimer le contenu de l'autre.
+    ///
+    /// Conséquence, et elle est stricte : **un seul sidecar illisible, ou un
+    /// seul dossier-jour qu'on n'a pas pu lister, n'importe où dans la
+    /// bibliothèque, suspend le balayage du dossier épinglé en entier.** Une
+    /// entrée qu'on n'a pas su lire est peut-être épinglée, et rien ne permet de
+    /// savoir ce qu'elle citait. La règle est la même que pour un jour — décider
+    /// par l'absence d'une citation exige de savoir qu'on a tout lu — appliquée
+    /// à un périmètre plus large parce que le dossier, lui, est plus large.
+    ///
+    /// **Le prix est acceptable, et il est nommé.** Ce qu'on perd est de la
+    /// place : quelques fichiers désépinglés restent jusqu'au passage suivant,
+    /// c'est-à-dire jusqu'à ce que le sidecar abîmé soit réparé ou supprimé. Ce
+    /// qu'on éviterait en étant moins strict n'est rien du tout, et ce qu'on y
+    /// risquerait est la suppression d'un contenu qu'un utilisateur a
+    /// explicitement demandé à garder pour toujours — le pire dégât que ce
+    /// magasin puisse produire, sur exactement les octets qu'il a promis de ne
+    /// jamais perdre. Le balayage ne coûte pas non plus de lecture
+    /// supplémentaire : les sidecars de tous les jours sont déjà relus par la
+    /// boucle ci-dessous, les empreintes épinglées se ramassent au passage.
+    ///
+    /// Le cas le plus dangereux est celui qui ne ressemble à rien : une racine
+    /// de bibliothèque illisible ne rend **aucun** jour, donc aucune citation,
+    /// donc tout le dossier épinglé paraîtrait orphelin. Il est traité en tête,
+    /// avant la boucle, pour la même raison que `listing(of:)` distingue
+    /// « vide » de « illisible ».
+    ///
     /// - Returns: le nombre de fichiers ramassés. Zéro dans la vie normale.
     @discardableResult
     public func collectOrphanedBlobs() async -> Int {
@@ -724,6 +1065,15 @@ public final class ClipboardStore {
         var collected = 0
         var reclaimed: Int64 = 0
 
+        // Ce que le dossier épinglé attend de la boucle : l'ensemble complet des
+        // empreintes qu'une entrée épinglée cite, et la certitude que « complet »
+        // est mérité. Le second est un `&&` de tout ce qui a été lu, et il part
+        // faux dès que la racine elle-même ne se liste pas — sans quoi une
+        // bibliothèque devenue illisible rendrait zéro jour, donc zéro citation,
+        // donc un dossier épinglé entièrement orphelin.
+        var pinnedClaims: Set<String> = []
+        var libraryFullyRead = Self.listing(of: base).unreadable == false
+
         for day in days {
             let target = base.appending(path: day, directoryHint: .isDirectory)
             let read = await Self.readSidecars(in: target)
@@ -731,6 +1081,7 @@ public final class ClipboardStore {
             // Un sidecar illisible épargne le jour entier : on ne sait pas ce
             // qu'il citait.
             guard read.faults == 0 else {
+                libraryFullyRead = false
                 clipboardLog.notice(
                     "Ramassage suspendu sur \(day, privacy: .public) : \(read.faults, privacy: .public) sidecar(s) illisible(s)"
                 )
@@ -744,6 +1095,7 @@ public final class ClipboardStore {
             // supprimer par l'absence d'une citation n'a le droit de conclure
             // que si elle sait avoir tout lu.
             guard read.unreadable == false else {
+                libraryFullyRead = false
                 clipboardLog.notice(
                     "Ramassage suspendu sur \(day, privacy: .public) : dossier illisible"
                 )
@@ -751,16 +1103,37 @@ public final class ClipboardStore {
             }
 
             let claimed = Set(read.entries.flatMap { ($0.blobs ?? []).map(\.fileName) })
+            pinnedClaims.formUnion(
+                read.entries
+                    .filter { $0.isPinned }
+                    .flatMap { ($0.blobs ?? []).map(\.fileName) }
+            )
             let swept = await Self.sweepBlobs(in: target, claimed: claimed, day: day)
             collected += swept.count
             reclaimed += swept.bytes
+        }
+
+        // Le dossier épinglé, une fois seulement, avec les citations de toute la
+        // bibliothèque — voir la documentation ci-dessus pour ce que cette
+        // condition-là refuse et pourquoi elle est plus large que celle d'un
+        // jour.
+        if libraryFullyRead {
+            let swept = await Self.sweepBlobsFolder(
+                at: pinnedBlobsFolder, claimed: pinnedClaims, place: Self.pinnedFolderName
+            )
+            collected += swept.count
+            reclaimed += swept.bytes
+        } else {
+            clipboardLog.notice(
+                "Ramassage des contenus épinglés suspendu : la bibliothèque n'a pas été lue en entier"
+            )
         }
 
         if collected > 0 {
             clipboardLog.notice(
                 "\(collected, privacy: .public) contenu(s) sans entrée ramassé(s), \(reclaimed, privacy: .public) octets"
             )
-            blobBytes = await Self.totalBlobBytes(in: base, days: days)
+            await refreshBlobBytes(in: base, days: days)
         }
         return collected
     }
@@ -1047,6 +1420,44 @@ public final class ClipboardStore {
         return refs
     }
 
+    /// Recopie les contenus lourds d'une entrée dans le dossier épinglé.
+    ///
+    /// **Un fichier déjà présent n'est pas réécrit**, même règle que
+    /// `writeBlobs` et même justification : le nom est l'empreinte du contenu,
+    /// donc un fichier de ce nom a déjà ce contenu. Ici la dédup est en plus
+    /// globale — deux entrées de deux mois différents qui ont copié la même
+    /// image ne paient qu'un fichier épinglé.
+    ///
+    /// **Lecture puis écriture `.atomic`, et surtout pas `copyItem`.** Ce n'est
+    /// pas une préférence de style : `copyItem` n'est pas atomique, et il peut
+    /// laisser à destination un fichier tronqué. Un fichier tronqué **sous un
+    /// nom qui est une empreinte** est un mensonge que rien ne détectera jamais,
+    /// parce que personne ne rehache à la lecture ; le contenu épinglé — celui
+    /// que l'utilisateur a demandé à garder pour toujours — serait
+    /// silencieusement corrompu. Le passage par la mémoire est sans risque
+    /// ici : `maximumBlobBytes` plafonne déjà chaque contenu à 32 Mio, et c'est
+    /// la même hypothèse que fait `ClipboardBlobPayload` en portant ses octets.
+    ///
+    /// Une source absente **lance**. L'épinglage est une promesse de garder des
+    /// octets ; l'annoncer sans les avoir recopiés donnerait une entrée épinglée
+    /// citant un fichier qui n'a jamais existé, exactement la référence morte
+    /// que tout ce fichier est construit pour ne pas produire.
+    nonisolated static func copyBlobsToPinned(
+        _ refs: [ClipboardBlobRef], from dayFolder: URL, to pinnedBlobs: URL
+    ) async throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: pinnedBlobs, withIntermediateDirectories: true)
+        let source = dayFolder.appending(path: blobsFolderName, directoryHint: .isDirectory)
+
+        for ref in refs {
+            let destination = pinnedBlobs.appending(path: ref.fileName)
+            guard manager.fileExists(atPath: destination.path(percentEncoded: false)) == false
+            else { continue }
+            let data = try Data(contentsOf: source.appending(path: ref.fileName))
+            try data.write(to: destination, options: .atomic)
+        }
+    }
+
     /// Pose le sidecar. `.atomic` : un `<uuid>.json` à moitié écrit serait une
     /// entrée que la reconstruction compterait comme une panne à chaque lecture.
     nonisolated static func writeSidecar(_ entry: ClipboardEntry, in dayFolder: URL) async throws {
@@ -1167,8 +1578,25 @@ public final class ClipboardStore {
     nonisolated static func sweepBlobs(
         in dayFolder: URL, claimed: Set<String>, day: String
     ) async -> (count: Int, bytes: Int64) {
+        await sweepBlobsFolder(
+            at: dayFolder.appending(path: blobsFolderName, directoryHint: .isDirectory),
+            claimed: claimed,
+            place: day
+        )
+    }
+
+    /// Le balayage lui-même, sur un dossier de contenus quelconque.
+    ///
+    /// Extrait de `sweepBlobs` le jour où le dossier épinglé est arrivé : il a
+    /// les mêmes refus mot pour mot, mais il n'est pas dans un dossier-jour et
+    /// n'a pas de nom de jour à mettre dans ses traces. Deux copies de ces
+    /// quatre conditions auraient divergé au premier correctif, et le correctif
+    /// oublié aurait supprimé le fichier d'un tiers. `place` ne sert qu'au
+    /// journal — un nom de jour, ou « Pinned ».
+    nonisolated static func sweepBlobsFolder(
+        at blobs: URL, claimed: Set<String>, place: String
+    ) async -> (count: Int, bytes: Int64) {
         let manager = FileManager.default
-        let blobs = dayFolder.appending(path: blobsFolderName, directoryHint: .isDirectory)
         let urls = (try? manager.contentsOfDirectory(
             at: blobs,
             includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
@@ -1191,7 +1619,7 @@ public final class ClipboardStore {
                 // Le nom est une empreinte : il ne nomme personne, et c'est la
                 // seule information qui rende le ménage possible à la main.
                 clipboardLog.error(
-                    "Orphelin non supprimé dans \(day, privacy: .public) : \(url.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
+                    "Orphelin non supprimé dans \(place, privacy: .public) : \(url.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
                 )
             }
         }
@@ -1222,21 +1650,33 @@ public final class ClipboardStore {
     /// n'aurions pas écrit : se tromper d'un fichier dans une somme est un défaut
     /// d'affichage, se tromper d'un fichier dans un `removeItem` ne se rattrape
     /// pas. Le ramassage, lui, est exigeant.
+    ///
+    /// **Ne compte pas les épinglés** : ils ne sont dans aucun dossier-jour, et
+    /// c'est `refreshBlobBytes(in:days:)` qui ajoute leur part. La séparation est
+    /// utile — les réglages affichent les deux chiffres, et la part épinglée est
+    /// celle que le curseur de rétention ne libérera pas.
     nonisolated static func totalBlobBytes(in folder: URL, days: [String]) async -> Int64 {
-        let manager = FileManager.default
         var total: Int64 = 0
         for day in days {
-            let blobs = folder
-                .appending(path: day, directoryHint: .isDirectory)
-                .appending(path: blobsFolderName, directoryHint: .isDirectory)
-            let urls = (try? manager.contentsOfDirectory(
-                at: blobs, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
-            )) ?? []
-            for url in urls {
-                total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-            }
+            total += await sumBlobBytes(
+                in: folder
+                    .appending(path: day, directoryHint: .isDirectory)
+                    .appending(path: blobsFolderName, directoryHint: .isDirectory)
+            )
         }
         return total
+    }
+
+    /// La somme d'un seul dossier de contenus. Même tolérance que ci-dessus :
+    /// un dossier absent pèse zéro, et tout ce qu'il contient est compté, y
+    /// compris ce que nous n'aurions pas écrit.
+    nonisolated static func sumBlobBytes(in blobs: URL) async -> Int64 {
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: blobs, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
+        )) ?? []
+        return urls.reduce(into: Int64(0)) { total, url in
+            total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        }
     }
 
     /// Ce qui empêche de lire la racine, ou `nil` si rien ne l'empêche.

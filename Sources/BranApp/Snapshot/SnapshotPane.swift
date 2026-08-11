@@ -137,9 +137,9 @@ struct SnapshotPane: View {
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Space.stack) {
-                    ForEach(grouped, id: \.day) { group in
+                    ForEach(grouped) { group in
                         Section {
-                            ForEach(group.entries) { entry in
+                            ForEach(group.items) { entry in
                                 SnapshotCard(entry: entry, controller: controller)
                                     .id(entry.id)
                             }
@@ -179,28 +179,16 @@ struct SnapshotPane: View {
         }
     }
 
-    private struct DayGroup {
-        let day: Date
-        let title: String
-        let entries: [SnippetEntry]
-    }
-
-    private var grouped: [DayGroup] {
-        let calendar = Calendar.current
-        let groups = Dictionary(grouping: visible) { calendar.startOfDay(for: $0.createdAt) }
-        return groups.keys.sorted(by: >).map { day in
-            DayGroup(
-                day: day,
-                title: Self.dayTitle(day, calendar: calendar),
-                entries: (groups[day] ?? []).sorted { $0.createdAt > $1.createdAt }
-            )
-        }
-    }
-
-    private static func dayTitle(_ day: Date, calendar: Calendar) -> String {
-        if calendar.isDateInToday(day) { return "Aujourd'hui" }
-        if calendar.isDateInYesterday(day) { return "Hier" }
-        return day.formatted(.dateTime.weekday(.wide).day().month(.wide))
+    /// Les captures, par jour. Le découpage vit dans `DayGroup.swift` : il
+    /// était recopié à l'identique ici et dans les dictées, et le presse-papiers
+    /// en aurait fait une troisième copie.
+    ///
+    /// Aucun tri ici : `visible` filtre `store.entries`, que `ContentStore`
+    /// garde du plus récent au plus ancien, et `DayGrouping` conserve cet ordre
+    /// à l'intérieur de chaque jour. Voir sa doc, qui dit pourquoi c'est mieux
+    /// que le `sorted` qu'elle remplace.
+    private var grouped: [DayGroup<SnippetEntry>] {
+        DayGrouping.groups(visible, by: \.createdAt)
     }
 }
 

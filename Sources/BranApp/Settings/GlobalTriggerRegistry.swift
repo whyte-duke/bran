@@ -67,7 +67,7 @@ extension ClipboardSettings: GlobalTriggerSettings {}
 ///   ses deux sœurs, et non ici : c'est une valeur, et une valeur posée dans une
 ///   cible exécutable n'est vérifiable par rien ;
 /// - **`HotkeyBinding.displayName` ne savait pas nommer une lettre.** Sa table
-///   de noms couvrait les modificateurs, les fonctions et les chiffres ; ⌘⇧V s'y
+///   de noms couvrait les modificateurs, les fonctions et les chiffres ; ⌘⇧C s'y
 ///   affichait « ⌘⇧Touche 9 ». Aucun raccourci par défaut n'était sur une lettre
 ///   jusqu'ici, donc le trou ne s'était jamais vu. Corrigé dans `BranSpeech` en
 ///   interrogeant la disposition clavier installée — un code de touche est une

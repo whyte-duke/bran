@@ -38,7 +38,7 @@ private let panelLog = Logger(subsystem: "com.opahventures.bran", category: "cli
 ///
 /// `orderFront` / `orderOut`, jamais une reconstruction. C'est ce qui rend
 /// tenable le budget de 50 ms à l'ouverture : reconstruire une hiérarchie
-/// SwiftUI et un `NSHostingView` à chaque ⌘⇧V le dépenserait entièrement avant
+/// SwiftUI et un `NSHostingView` à chaque ⌘⇧C le dépenserait entièrement avant
 /// d'avoir dessiné une seule ligne.
 @MainActor
 final class ClipboardPanelPresenter {
@@ -85,7 +85,7 @@ final class ClipboardPanelPresenter {
 
     // MARK: - Ouvrir et fermer
 
-    /// Bascule le panneau. C'est ce que ⌘⇧V appelle.
+    /// Bascule le panneau. C'est ce que ⌘⇧C appelle.
     func toggle() {
         // Une ligne de journal de chaque côté de la bascule. Un panneau qui ne
         // s'ouvre pas est le défaut le plus difficile à diagnostiquer de toute

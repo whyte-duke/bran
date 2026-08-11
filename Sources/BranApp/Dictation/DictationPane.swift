@@ -150,9 +150,9 @@ struct DictationPane: View {
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Space.stack) {
-                    ForEach(grouped, id: \.day) { group in
+                    ForEach(grouped) { group in
                         Section {
-                            ForEach(group.entries) { entry in
+                            ForEach(group.items) { entry in
                                 DictationCard(entry: entry, controller: controller)
                                     .id(entry.id)
                             }
@@ -186,28 +186,16 @@ struct DictationPane: View {
         return controller.store.entries.filter { $0.text.localizedStandardContains(needle) }
     }
 
-    private struct DayGroup {
-        let day: Date
-        let title: String
-        let entries: [TranscriptEntry]
-    }
-
-    private var grouped: [DayGroup] {
-        let calendar = Calendar.current
-        let groups = Dictionary(grouping: visible) { calendar.startOfDay(for: $0.createdAt) }
-        return groups.keys.sorted(by: >).map { day in
-            DayGroup(
-                day: day,
-                title: Self.dayTitle(day, calendar: calendar),
-                entries: (groups[day] ?? []).sorted { $0.createdAt > $1.createdAt }
-            )
-        }
-    }
-
-    private static func dayTitle(_ day: Date, calendar: Calendar) -> String {
-        if calendar.isDateInToday(day) { return "Aujourd'hui" }
-        if calendar.isDateInYesterday(day) { return "Hier" }
-        return day.formatted(.dateTime.weekday(.wide).day().month(.wide))
+    /// Les dictées, par jour. Même découpage que les captures, et c'est
+    /// désormais littéralement le même code : voir `DayGroup.swift`, qui dit
+    /// aussi ce qui n'a **pas** été mis en commun — la carte, la ligne — et
+    /// pourquoi les réunir coûterait plus qu'elles ne se ressemblent.
+    ///
+    /// Aucun tri ici : `visible` filtre `store.entries`, que `ContentStore`
+    /// garde du plus récent au plus ancien, et `DayGrouping` conserve cet ordre
+    /// à l'intérieur de chaque jour.
+    private var grouped: [DayGroup<TranscriptEntry>] {
+        DayGrouping.groups(visible, by: \.createdAt)
     }
 }
 

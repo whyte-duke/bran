@@ -73,10 +73,10 @@ final class ClipboardPanelModel {
 
     private let store: ClipboardStore
 
-    /// Le raccourci d'ouverture, tel qu'il est réglé — « ⌘⇧V » par défaut.
+    /// Le raccourci d'ouverture, tel qu'il est réglé — « ⌘⇧C » par défaut.
     ///
     /// Passé et non déduit : le raccourci est modifiable dans les réglages, et
-    /// un état vide qui nommerait « ⌘⇧V » à quelqu'un qui l'a changé pour ⌥V
+    /// un état vide qui nommerait « ⌘⇧C » à quelqu'un qui l'a changé pour ⌥V
     /// serait une instruction impossible à suivre. Le présentateur le tient de
     /// `StandaloneTriggerBinding.trigger.displayName`, comme les deux panes.
     let shortcutName: String

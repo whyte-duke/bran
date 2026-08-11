@@ -37,6 +37,30 @@ import Foundation
 /// revendiquer un blob que la purge des dossiers a emporté**, parce que les
 /// deux verdicts sortent de la même fonction appliquée à la même clé de jour.
 ///
+/// **Une exception, et elle ne pouvait pas être un drapeau : l'épinglage.**
+/// « Pas d'épinglage en v1 » était une décision *mesurée* — sur les 250 entrées
+/// de l'historique réel, zéro épingle et zéro recopie à plus d'un jour d'écart,
+/// donc rien qui réclame qu'une entrée vive plus longtemps que sa journée. Le
+/// propriétaire l'a renversée : il veut garder certaines entrées indéfiniment.
+/// La décision d'origine reste écrite parce qu'elle explique le format, et
+/// qu'une décision renversée s'écrit au lieu de s'effacer.
+///
+/// Le renversement ne pouvait pas se payer d'une simple exclusion dans
+/// `entriesToPurge` : ce qui supprime réellement le PNG, c'est le `rm` d'un
+/// sous-dossier `blobs/` choisi **par le nom de son dossier-jour**, sans qu'une
+/// seule entrée soit ouverte. Exempter l'entrée aurait laissé son fichier partir
+/// avec le dossier, et l'entrée aurait juré posséder un contenu effacé —
+/// précisément l'invariant que ce fichier existe pour tenir. Les deux autres
+/// réponses possibles étaient pires : faire survivre le dossier-jour entier
+/// (une épingle sauvant les 158 Mo de sa journée, et la purge redevenant une
+/// décision qui exige de lire chaque index), ou déplacer les blobs épinglés
+/// vers le jour courant à chaque balayage (des écritures disque sans fin sur
+/// des fichiers déjà écrits). La réponse retenue est de sortir les contenus
+/// épinglés du domaine : `ClipboardStore` les recopie dans
+/// `Clipboard/Pinned/blobs/`, un dossier que la rétention **ne peut pas** voir
+/// puisque `day(from:)` n'y reconnaît pas une date. Ce fichier n'a donc qu'un
+/// devoir de plus, mais il est absolu : ne jamais prendre `Pinned` pour un jour.
+///
 /// **Purger ne tue pas l'entrée.** Le dossier du jour perd son sous-dossier
 /// `blobs/`, jamais son `index.jsonl`. Les entrées restent lisibles, gardent le
 /// type et la taille de ce qu'elles montraient, et le disent — même parti pris
@@ -148,6 +172,20 @@ public struct ClipboardRetention: Equatable, Sendable, Codable {
     /// l'utilisateur d'être compté comme un jour périmé et supprimé. Rendre
     /// `nil` par défaut fait que tout ce qui n'est pas manifestement une date
     /// survit.
+    ///
+    /// **Et depuis l'épinglage, cette fonction porte les contenus que
+    /// l'utilisateur a demandé à garder pour toujours.** `Pinned` — le dossier
+    /// que nomme `ClipboardStore.pinnedFolderName` — est un nom de dossier comme
+    /// les autres pour le système de fichiers ; ce qui le protège n'est pas une
+    /// exception écrite quelque part, c'est qu'il ne s'analyse pas en
+    /// `AAAA-MM-JJ` ici. La même ligne protège donc `blobs`, `.DS_Store` et
+    /// `Pinned`, et c'est bien : une seule porte, gardée une seule fois, plutôt
+    /// qu'une liste noire à tenir à jour, où il aurait fallu penser à inscrire
+    /// chaque nouveau dossier de service. Ne jamais l'assouplir — un filtre plus
+    /// « tolérant » qui accepterait `2026-8-1` ou ignorerait la casse ne casse
+    /// rien de visible le jour où il est écrit, et
+    /// `ClipboardRetentionTests.leDossierEpingleNestJamaisUnJour` est ce qui le
+    /// fait tomber avant qu'un utilisateur ne perde une image.
     static func day(from name: String) -> String? {
         let parts = name.split(separator: "-")
         guard parts.count == 3,
@@ -231,10 +269,25 @@ public struct ClipboardRetention: Equatable, Sendable, Codable {
     /// fichier effacé. En cas de désaccord, c'est l'entrée qui cède : c'est elle
     /// que l'interface lit.
     ///
-    /// Deux exclusions, et elles comptent autant que l'inclusion : une entrée
-    /// sans blob n'a rien à perdre, et une entrée déjà purgée ne doit pas
-    /// ressortir à chaque balayage — sinon la date de purge affichée avancerait
-    /// toute seule, tous les jours.
+    /// Trois exclusions, et elles comptent autant que l'inclusion : une entrée
+    /// sans blob n'a rien à perdre, une entrée déjà purgée ne doit pas ressortir
+    /// à chaque balayage — sinon la date de purge affichée avancerait toute
+    /// seule, tous les jours — et **une entrée épinglée n'est plus dans le
+    /// domaine de la purge**.
+    ///
+    /// Cette troisième exclusion ne suffit pas à elle seule, et il faut le lire
+    /// comme un avertissement : le `rm` qui supprime réellement les fichiers ne
+    /// passe pas par ici, il efface un sous-dossier `blobs/` entier choisi sur
+    /// le nom de son dossier-jour. Si les contenus lourds d'une entrée épinglée
+    /// étaient restés dans ce dossier, ils seraient partis quand même, et cette
+    /// exclusion n'aurait servi qu'à empêcher l'entrée de *dire* qu'ils étaient
+    /// partis — le pire des deux mondes, un fichier absent et une interface qui
+    /// promet de le coller. Elle n'est correcte que parce que `ClipboardStore`
+    /// a d'abord recopié ces contenus dans `Pinned/blobs/`, hors d'atteinte de
+    /// `dayFoldersToPurge` (voir `ClipboardStore.pinnedFolderName`, dont le nom
+    /// est choisi pour que `day(from:)` le refuse). Ici, l'exclusion dit donc
+    /// simplement la vérité : rien n'a disparu pour cette entrée, donc rien ne
+    /// doit être marqué comme disparu.
     public func entriesToPurge(from entries: [ClipboardEntry], now: Date) -> [ClipboardEntry] {
         entriesToPurge(from: entries, now: now, calendar: .current)
     }
@@ -248,12 +301,37 @@ public struct ClipboardRetention: Equatable, Sendable, Codable {
         return entries.filter { entry in
             guard let blobs = entry.blobs, blobs.isEmpty == false else { return false }
             guard entry.blobsArePurged == false else { return false }
+            guard entry.isPinned == false else { return false }   // ses blobs sont ailleurs
             return purges(day: entry.dayFolderName(calendar: calendar), on: today)
         }
     }
 
     /// La date à laquelle les blobs de cette entrée s'en iront, annonçable avant
-    /// qu'elle arrive.
+    /// qu'elle arrive — ou `nil` quand ils ne s'en iront pas.
+    ///
+    /// **`nil` pour une entrée épinglée, et le type a été changé exprès pour
+    /// ça.** Les trois autres réponses envisagées étaient toutes des mensonges
+    /// d'un genre ou d'un autre : rendre `copiedAt + blobDays` annoncerait dans
+    /// les réglages une échéance que plus rien n'honore, ce qui est exactement
+    /// le défaut que cette fonction existe pour corriger — une date dérivée
+    /// d'une horloge qui ne supprime rien ; rendre `.distantFuture` ferait
+    /// afficher « 1 janvier 4001 » au premier appelant qui formate sans réfléchir
+    /// ; et rendre `copiedAt` ou une date passée dirait « déjà purgé » d'un
+    /// contenu qui est là. Un `Optional` ne se formate pas par accident : le
+    /// compilateur oblige chaque site d'appel à écrire la phrase du cas épinglé
+    /// — « conservée indéfiniment » — au lieu de la deviner. Une échéance qui
+    /// n'existe pas n'est pas une date lointaine, c'est une absence de date.
+    ///
+    /// **Pourquoi seulement l'épinglage, alors qu'une entrée sans blob ne perd
+    /// rien non plus.** Parce que ce n'est pas le même énoncé. La phrase rendue
+    /// ici est « à cette date, le sous-dossier `blobs/` du dossier de cette
+    /// entrée disparaît », et elle reste vraie d'une entrée de texte pur, qui
+    /// n'y a simplement rien déposé ; elle devient fausse, et seulement fausse,
+    /// pour une entrée dont les contenus ont été sortis du dossier. Élargir le
+    /// `nil` aux entrées sans blob et aux entrées déjà purgées serait sans doute
+    /// un meilleur contrat — « `nil` veut dire : rien ne partira » — mais c'est
+    /// un autre changement, avec ses propres appelants à relire, et il ne se
+    /// fait pas en passant.
     ///
     /// **C'est minuit qui est rendu, et c'est voulu.** La suppression est
     /// gouvernée par un nom de dossier, donc elle a la granularité du jour :
@@ -271,12 +349,13 @@ public struct ClipboardRetention: Equatable, Sendable, Codable {
     /// Arithmétique de calendrier et non `+ 86 400 × n` : un changement d'heure
     /// dans l'intervalle déplacerait la réponse d'une heure, et donc parfois
     /// d'un jour affiché.
-    public func expiryDate(for entry: ClipboardEntry) -> Date {
+    public func expiryDate(for entry: ClipboardEntry) -> Date? {
         expiryDate(for: entry, calendar: .current)
     }
 
     /// La même chose, avec le calendrier explicite.
-    func expiryDate(for entry: ClipboardEntry, calendar: Calendar) -> Date {
+    func expiryDate(for entry: ClipboardEntry, calendar: Calendar) -> Date? {
+        guard entry.isPinned == false else { return nil }
         let start = calendar.startOfDay(for: entry.copiedAt)
         return calendar.date(byAdding: .day, value: Swift.max(blobDays, 1), to: start) ?? start
     }

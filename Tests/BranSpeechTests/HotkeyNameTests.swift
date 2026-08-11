@@ -20,6 +20,7 @@ struct HotkeyNameTests {
     /// machine qui les exécute. C'est tout l'intérêt de `displayName(naming:)`.
     private static func fakeLayout(_ keyCode: UInt16) -> String? {
         switch keyCode {
+        case 8: "C"
         case 9: "V"
         case 12: "A"    // « Q » en QWERTY : la position, pas la lettre
         case 19: "É"    // ce que le code 19 produit vraiment en AZERTY
@@ -62,11 +63,13 @@ struct HotkeyNameTests {
 
     // MARK: - Le raccourci du presse-papiers
 
-    /// Le cas concret qui a révélé le trou. ⌘⇧V est le premier raccourci par
-    /// défaut posé sur une lettre.
-    @Test("⌘⇧V s'affiche ⌘⇧V, et non « Touche 9 »")
+    /// Le cas concret qui a révélé le trou. Le raccourci du presse-papiers est
+    /// le premier raccourci par défaut posé sur une lettre — ⌘⇧V à l'origine,
+    /// ⌘⇧C depuis que le propriétaire l'a tranché. Le test suit la constante et
+    /// non la lettre : c'est la *lisibilité* qu'il garde, pas le choix.
+    @Test("Le raccourci du presse-papiers s'affiche, et non « Touche 8 »")
     func clipboardPanelIsReadable() {
-        #expect(HotkeyBinding.clipboardPanel.displayName(naming: Self.fakeLayout) == "⇧⌘V")
+        #expect(HotkeyBinding.clipboardPanel.displayName(naming: Self.fakeLayout) == "⇧⌘C")
         // Et sur le vrai clavier de la machine, quelle qu'elle soit : on ne peut
         // pas prédire la lettre, on peut exiger qu'il y en ait une.
         #expect(HotkeyBinding.clipboardPanel.displayName.contains("Touche") == false)
