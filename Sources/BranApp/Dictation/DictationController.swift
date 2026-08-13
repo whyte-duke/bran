@@ -287,7 +287,7 @@ final class DictationController {
                 "dictée → micro « \(device?.name ?? "périphérique système") »"
                 + " (réglage=\(settings.inputDeviceUID ?? "aucun"))"
             )
-            try mic.start(deviceID: device?.id)
+            try mic.start(deviceUID: settings.inputDeviceUID)
             startedAt = .now
             if settings.playsSound { Self.playStartCue() }
             startTicking()
@@ -319,32 +319,16 @@ final class DictationController {
     private func startSilenceWatchdog() {
         watchdogTask?.cancel()
         watchdogTask = Task { [weak self] in
-            // Premier contrôle très tôt : si rien n'arrive au bout de 400 ms,
-            // le périphérique imposé est muet. On repart sur le défaut système
-            // avant que l'utilisateur ait fini sa première phrase, plutôt que de
-            // lui annoncer une panne qu'on sait réparer.
-            try? await Task.sleep(for: .milliseconds(400))
+            // **Il n'y a plus de repli à déclencher ici, et c'est le correctif.**
+            // Un premier contrôle à 400 ms servait à basculer sur le défaut
+            // système quand le périphérique imposé rendait du silence. Ce
+            // silence venait du périphérique agrégé que `AVAudioEngine`
+            // fabriquait — voir `MicCapture` — et le défaut système était, un
+            // casque sur les oreilles, le casque : on repartait donc sur le seul
+            // périphérique qui ne pouvait pas marcher. La capture ne construit
+            // plus d'agrégé ; il ne reste que le constat.
+            try? await Task.sleep(for: .milliseconds(1200))
             guard let self, Task.isCancelled == false, machine.phase == .capturing else { return }
-
-            if mic.duration == 0, settings.inputDeviceUID != nil {
-                do {
-                    try mic.restartOnSystemDefault()
-                } catch {
-                    // **La panne est annoncée ici, avec sa vraie raison.**
-                    // Avant, l'échec n'allait qu'au journal : le repli étant le
-                    // dernier recours, la dictée continuait à vide et ne
-                    // s'arrêtait qu'à la garde suivante, 800 ms plus tard, sur
-                    // un « micro muet » générique. L'utilisateur perdait à la
-                    // fois du temps et la seule information utile — ce que
-                    // CoreAudio a refusé, et pourquoi.
-                    FeatureLog.record("micro : la reprise système a échoué", error: error)
-                    apply(machine.handle(.failed(.captureFailed(error.localizedDescription))))
-                    return
-                }
-            }
-
-            try? await Task.sleep(for: .milliseconds(800))
-            guard Task.isCancelled == false, machine.phase == .capturing else { return }
 
             guard mic.duration > 0 else {
                 FeatureLog.record("dictée : aucun échantillon après 1,2 s — le flux ne tourne pas")

@@ -65,6 +65,25 @@ struct BranSpike {
                     language: SpeechLanguage(rawValue: code) ?? .french
                 ).run()
 
+            case "micro":
+                if arguments.contains("--devices") {
+                    MicRouteSpike.printDevices()
+                    break
+                }
+                let seconds = Double(value(of: "--seconds", in: arguments) ?? "") ?? 3
+                let path = MicRouteSpike.Path(rawValue: value(of: "--path", in: arguments) ?? "")
+                    ?? .engine
+                // Le défaut reprend le réglage réel de bran — micro intégré
+                // imposé. `--device system` mesure l'autre branche : celle du
+                // repli, qui est justement le chemin qui a cassé.
+                let requested = value(of: "--device", in: arguments) ?? "BuiltInMicrophoneDevice"
+                try await MicRouteSpike(
+                    path: path,
+                    seconds: seconds,
+                    deviceUID: requested == "system" ? nil : requested,
+                    wav: value(of: "--wav", in: arguments).map(URL.init(fileURLWithPath:))
+                ).run()
+
             case "ocr":
                 await OCRSpike.run(Array(arguments))
 
@@ -148,6 +167,24 @@ struct BranSpike {
               chargement à froid, mémoire résidente, place occupée sur le
               disque, et rapport au temps réel. Les 110-190× annoncés le sont
               sur M4 Pro ; ici on obtient le vrai chiffre.
+
+          micro [--path engine|capture] [--seconds 3] [--device <UID>|system]
+                [--devices]
+              Mesure ce que la capture du micro OUVRE D'AUTRE que le micro.
+              Le 12 août 2026 la dictée est tombée en marche, casque sur les
+              oreilles : le journal montrait qu'à chaque séance bran démarrait
+              la SORTIE des AirPods et faisait fabriquer un CADefaultDeviceAggregate
+              à CoreAudio — pour un enregistrement qui ne joue rien. Deux
+              chemins, la même mesure :
+
+                engine   `AVAudioEngine` + périphérique imposé — le chemin
+                         actuel, qui instancie toujours un nœud de sortie.
+                capture  `AVCaptureSession` — une API sans sortie audio, donc
+                         sans seconde horloge à marier.
+
+              Le spike imprime la fenêtre horaire et la commande `log show` à
+              lancer derrière : c'est le journal de CoreAudio qui tranche, pas
+              le nombre d'images.
 
         Lancer depuis le Terminal : les autorisations TCC (Enregistrement de
         l'écran, Microphone) sont celles du Terminal, pas besoin du certificat

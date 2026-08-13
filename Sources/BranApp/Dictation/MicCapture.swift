@@ -5,23 +5,88 @@ import Synchronization
 
 /// La capture du micro pour la dictée.
 ///
-/// Trois contraintes qui dictent la forme du code :
+/// ## Pourquoi ce n'est plus `AVAudioEngine`
 ///
-/// 1. **Le callback du tap tourne sur un thread audio temps réel.** Pas
-///    d'allocation, pas d'accès `@MainActor`, pas de `print`. Un dépassement de
-///    délai fait craquer le son de tout le système. On y fait donc le strict
-///    minimum : conversion, ajout au tampon, calcul du niveau.
+/// Ça l'a été jusqu'au 12 août 2026. Ce jour-là la dictée est tombée **en
+/// marche** : elle rendait quarante-huit secondes de son réel à 16h48 — rms
+/// −33 à −40 dB dans le journal de CoreAudio — et du silence numérique à 16h53
+/// puis 16h56 : `rms −120 dB, crête −240 dB`, c'est-à-dire zéro échantillon.
+/// Même processus, même binaire, aucune autre application n'avait touché
+/// l'entrée audio de l'après-midi. Rien à mettre à jour, rien à réautoriser.
+///
+/// Ce que le journal montrait, lui, **à chaque séance** :
+///
+/// ```
+/// IOWorkLoopInit: 332 70-F9-4A-A8-5F-E5:output : starting
+/// HALS_Device::Activate: activating device 870: CADefaultDeviceAggregate-682-10
+/// ```
+///
+/// bran démarrait la **sortie** d'un casque Bluetooth, et faisait fabriquer un
+/// périphérique **agrégé** à CoreAudio. Pour un enregistrement qui ne joue
+/// rien. Dix agrégés dans la journée, un par dictée.
+///
+/// La cause tient à `AVAudioEngine` : sur macOS il instancie toujours son nœud
+/// de sortie, qui atterrit sur la sortie par défaut. Quand
+/// `kAudioOutputUnitProperty_CurrentDevice` force l'entrée sur le micro
+/// intégré pendant que la sortie est ailleurs, les deux horloges diffèrent —
+/// CoreAudio n'a pas le choix, il agrège. Et un agrégé qui contient des AirPods
+/// exige le lien Bluetooth en mode casque : 24 kHz, micro du casque dans la
+/// boucle. Si ce lien ne transporte rien, l'agrégé entier rend du silence.
+///
+/// ## Ce que la mesure a donné, avant d'écrire une ligne de ceci
+///
+/// `swift run BranSpike micro` enregistre la même chose par les deux chemins et
+/// compte ce que chacun ouvre. Seize séances, même machine, même micro :
+///
+/// ```
+///                        AVAudioEngine   AVCaptureSession
+///   agrégés créés / 8          8                0
+///   sortie audio ouverte      oui            aucune
+///   séances muettes / 12        1                0
+/// ```
+///
+/// Deux résultats ont décidé de cette réécriture. Le premier : l'agrégé est
+/// créé **même sans casque**, micro intégré et haut-parleurs intégrés. Les
+/// AirPods ne créaient pas le problème, ils le rendaient permanent. Le second :
+/// une séance sur douze rendait zéro échantillon avec un micro démarré sans
+/// erreur (`Digital Mic PerformStartIO returned, result 0`) et l'autorisation
+/// accordée. C'est ça, « ça marchait toute la journée » — le chemin n'était pas
+/// cassé, il était intermittent, et il cassait au premier démarrage après un
+/// changement de route audio.
+///
+/// `AVCaptureSession` n'a pas de nœud de sortie audio. Il n'y a rien à jouer,
+/// donc pas de seconde horloge, donc pas d'agrégé, donc un casque ne peut pas
+/// entrer dans la chaîne de capture. Ce n'est pas « ça marche mieux » : c'est le
+/// mécanisme retiré par construction.
+///
+/// ## Ce qui a disparu avec le moteur
+///
+/// - **`restartOnSystemDefault()`**, le repli sur le périphérique système après
+///   un premier essai muet. Il existait pour contourner le silence de l'agrégé,
+///   et il envoyait la capture sur le casque — c'est-à-dire sur le seul
+///   périphérique qui ne pouvait pas marcher. Le 7 août il avait aussi coûté
+///   trois crashes en trois minutes.
+/// - **La reprise du HAL** (`halTeardownBudget`, l'erreur 35, les quatre
+///   `throwing -10877`). Elle absorbait une course entre le démontage
+///   asynchrone d'un contexte d'entrée et la demande du suivant.
+///   `AVCaptureSession.stopRunning()` ne rend la main qu'une fois le flux
+///   arrêté ; il n'y a plus de course à absorber.
+/// - **Le moteur neuf par séance**, qui était un correctif contre le
+///   `removeTap` sur un moteur en marche. Il n'y a plus de tap.
+///
+/// ## Ce qui n'a pas changé
+///
+/// 1. **Le tampon est partagé avec un thread qui n'est pas le nôtre.** Les
+///    images arrivent sur la file du délégué, pas sur le fil principal. Elle
+///    n'a pas les contraintes temps réel d'un tap `AVAudioEngine`, mais on y
+///    fait quand même le strict minimum : conversion, ajout, niveau.
 /// 2. **Parakeet veut du 16 kHz mono `Float32`.** Le micro intégré donne du
-///    48 kHz, les AirPods du 16 kHz mono déjà. `AVAudioConverter` gère les deux.
+///    48 kHz entier ; `AVAudioConverter` fait le reste.
 /// 3. **On ne touche jamais au disque ici.** Le `.wav` est écrit après l'arrêt,
-///    depuis un contexte normal. Écrire dans le callback marcherait presque
-///    toujours, et raterait exactement quand la machine est chargée.
-final class MicCapture: @unchecked Sendable {
+///    depuis un contexte normal.
+final class MicCapture: NSObject, @unchecked Sendable {
 
-    /// Tampon partagé entre le thread audio et le reste du monde.
-    ///
-    /// `Mutex` plutôt qu'un acteur : un acteur imposerait un `await` dans le
-    /// callback temps réel, ce qui est précisément interdit.
+    /// Tampon partagé entre la file de capture et le reste du monde.
     private struct Shared {
         var samples: [Float] = []
         /// Historique récent des niveaux, pour la forme d'onde. Volontairement
@@ -33,27 +98,20 @@ final class MicCapture: @unchecked Sendable {
 
     static let levelSlots = 56
 
-    /// **Un moteur neuf par séance, et c'est un correctif, pas une élégance.**
-    ///
-    /// Il était `let`, donc réutilisé. Le repli sur le périphérique système —
-    /// `restartOnSystemDefault` — reconfigurait ce même moteur : retirer son tap,
-    /// l'arrêter, le redémarrer sur un autre périphérique, le tout pendant que le
-    /// thread audio temps réel pouvait être *à l'intérieur* du tap qu'on retire.
-    ///
-    /// Le 7 août 2026, ça a coûté trois crashes en trois minutes, et le journal
-    /// de bran les datait à 24 ms, 2 s et 0,4 s après la ligne « reprise sur le
-    /// système ». Les piles pointaient ailleurs — le callback du guet clavier, le
-    /// `Canvas` de l'encoche —, toutes sur `swift_task_isCurrentExecutor`
-    /// déréférençant un pointeur invalide : la signature d'une mémoire corrompue
-    /// dont la victime est le premier code qui passe, pas le coupable.
-    ///
-    /// La veille, le même binaire avait tourné dix-sept heures sans une seule
-    /// chute : le micro imposé rendait du son, le repli n'était jamais emprunté.
-    /// C'est un chemin rare, et les chemins rares sont ceux qu'on écrit une fois
-    /// puis qu'on n'exécute jamais avant le jour où ils comptent.
-    private var engine = AVAudioEngine()
     private let shared = Mutex(Shared())
+
+    /// Une session neuve par séance. Pas pour la même raison que le moteur neuf
+    /// d'avant — il n'y a plus de course à éviter — mais parce qu'une session
+    /// porte son entrée, et qu'une entrée porte un périphérique qui a pu
+    /// disparaître entre deux dictées. La reconstruire coûte ce que coûte
+    /// `startRunning`, et c'est le seul prix de la séance.
+    private var session: AVCaptureSession?
+
+    /// La file du délégué. Sérielle : les images arrivent dans l'ordre, et
+    /// `converter` n'est touché que là.
+    private let queue = DispatchQueue(label: "com.opahventures.bran.micro")
     private var converter: AVAudioConverter?
+
     private var isRunning = false
 
     /// Format de sortie : celui que Parakeet attend, et rien d'autre.
@@ -66,43 +124,31 @@ final class MicCapture: @unchecked Sendable {
 
     // MARK: - Cycle de vie
 
-    func start(deviceID: AudioDeviceID?) throws {
+    /// Démarre la capture sur le micro demandé.
+    ///
+    /// `uid` est celui de `AudioInputDevice` — le même identifiant sert à
+    /// CoreAudio et à `AVCaptureDevice`, vérifié sur cette machine par le spike.
+    /// `nil` laisse le système choisir.
+    func start(deviceUID uid: String?) throws {
         guard isRunning == false else { return }
 
-        // **Un moteur qui a déjà servi ne resservira pas.** Voir la déclaration :
-        // c'est le nœud d'entrée réutilisé, reconfiguré d'un périphérique à
-        // l'autre, qui a fait tomber le processus. Un `AVAudioEngine` coûte
-        // quelques centaines de microsecondes à construire ; on le paie une fois
-        // par dictée, contre un crash par repli.
-        engine = AVAudioEngine()
+        let device = try Self.resolveDevice(uid: uid)
+        FeatureLog.record("micro : périphérique retenu « \(device.localizedName) »")
 
-        // Choisir le micro AVANT de toucher au moteur : changer de périphérique
-        // sur un moteur démarré le laisse dans un état incohérent.
-        if let deviceID {
-            try Self.setInputDevice(deviceID, on: engine)
-        }
+        let session = AVCaptureSession()
+        let input = try AVCaptureDeviceInput(device: device)
+        guard session.canAddInput(input) else { throw CaptureFailure.deviceRefused(device.localizedName) }
+        session.addInput(input)
 
-        let input = engine.inputNode
-        let inputFormat = input.outputFormat(forBus: 0)
-
-        FeatureLog.record(String(
-            format: "micro : format d'entrée %.0f Hz, %d canal/aux, périphérique imposé=%@",
-            inputFormat.sampleRate, inputFormat.channelCount,
-            deviceID == nil ? "non (système)" : "oui"
-        ))
-
-        guard inputFormat.sampleRate > 0 else {
-            // Arrive quand le périphérique choisi vient d'être débranché.
-            throw CaptureFailure.noInput
-        }
-
-        converter = AVAudioConverter(from: inputFormat, to: targetFormat)
-        guard converter != nil else { throw CaptureFailure.unsupportedFormat(inputFormat) }
+        let output = AVCaptureAudioDataOutput()
+        output.setSampleBufferDelegate(self, queue: queue)
+        guard session.canAddOutput(output) else { throw CaptureFailure.noInput }
+        session.addOutput(output)
 
         shared.withLock {
             $0.samples.removeAll(keepingCapacity: true)
-            // Réserver d'un coup la place du plafond de durée : le thread temps
-            // réel ne doit jamais déclencher une réallocation.
+            // Réserver d'un coup la place du plafond de durée : la file de
+            // capture ne doit jamais déclencher une réallocation.
             $0.samples.reserveCapacity(
                 Int(SpeechAudioFormat.sampleRate * SpeechAudioFormat.maximumDuration)
             )
@@ -110,140 +156,41 @@ final class MicCapture: @unchecked Sendable {
             $0.levelCursor = 0
             $0.peak = 0
         }
+        queue.sync { converter = nil }
 
-        input.installTap(onBus: 0, bufferSize: 2048, format: inputFormat) { [weak self] buffer, _ in
-            self?.consume(buffer)
-        }
+        // `startRunning` est bloquant. Mesuré sur cette machine, il rend la main
+        // en quelques dizaines de millisecondes — sous le seuil de ce qui se
+        // remarque au démarrage d'une dictée, et le fil principal a besoin du
+        // verdict tout de suite pour ne pas afficher « écoute » sur une capture
+        // qui n'a pas démarré.
+        let started = Date()
+        session.startRunning()
+        guard session.isRunning else { throw CaptureFailure.sessionRefused }
 
-        engine.prepare()
-        do {
-            try startEngine()
-        } catch {
-            // **Le tap est retiré avant de renoncer.** Sans ça, le moteur en
-            // échec sortait de `start` avec son tap posé et `isRunning` à faux :
-            // `stop()` et `discard()` repartaient aussitôt sans rien démonter,
-            // et l'objet ne lâchait son contexte d'entrée qu'à sa libération,
-            // c'est-à-dire quand l'appel suivant lui réassignait `engine`.
-            // Autrement dit : le démarrage suivant réclamait le HAL au moment
-            // précis où le précédent le rendait — la course que `startEngine`
-            // existe pour absorber, réamorcée par le chemin d'erreur.
-            engine.stop()
-            engine.inputNode.removeTap(onBus: 0)
-            converter = nil
-            throw error
-        }
+        self.session = session
         isRunning = true
-        FeatureLog.record("micro : moteur démarré, engine.isRunning=\(engine.isRunning)")
+        FeatureLog.record(String(
+            format: "micro : session démarrée en %.0f ms", Date().timeIntervalSince(started) * 1000
+        ))
     }
 
-    /// Reprend sur le périphérique système après un premier essai muet.
-    ///
-    /// **Pourquoi ce repli existe.** Imposer un périphérique précis à
-    /// `AVAudioEngine` via `kAudioOutputUnitProperty_CurrentDevice` réussit sans
-    /// erreur, démarre le moteur sans erreur, et peut malgré tout ne jamais
-    /// appeler le tap : zéro échantillon, aucun signal. Constaté sur ce Mac avec
-    /// le micro intégré explicitement choisi, alors que le même moteur laissé sur
-    /// le périphérique système fonctionne.
-    ///
-    /// Plutôt que de deviner quel réglage CoreAudio en est responsable, on
-    /// constate le silence et on repart sur le défaut système — qui est le
-    /// chemin le mieux testé de macOS.
-    /// **L'ordre des deux lignes suivantes est le correctif.** Retirer le tap
-    /// d'un moteur encore en marche, c'est le retirer pendant que le thread audio
-    /// peut être en train de l'exécuter. On arrête d'abord, on retire ensuite —
-    /// et le moteur suivant est neuf, donc l'ancien n'est plus touché du tout.
-    func restartOnSystemDefault() throws {
-        guard isRunning else { return }
-        FeatureLog.record("micro : aucun son sur le périphérique imposé → reprise sur le système")
-        stopEngine()
-        try start(deviceID: nil)
-    }
-
-    /// Démarre le moteur, en réessayant tant que CoreAudio n'a pas fini de
-    /// rendre le contexte d'entrée précédent.
-    ///
-    /// **Mesuré dans le journal système, et c'est la panne que l'utilisateur
-    /// voit.** Enchaîner `engine.stop()` et la construction d'un nouveau moteur
-    /// donne, en rafale : `HALC_ProxyIOContext::_StartIO(): Start failed —
-    /// StartAndWaitForState returned error 35`, puis `HALB_IOThread::_Start:
-    /// there already is a thread`, puis quatre `throwing -10877`. Le micro ne
-    /// démarre pas, et les tentatives coûtent du processeur pour rien.
-    ///
-    /// La raison : `AVAudioEngine.stop()` rend la main tout de suite, mais le
-    /// démontage du **fil d'entrée-sortie du HAL** est asynchrone, hors du
-    /// contrôle du moteur. Le moteur suivant est bien neuf — ce n'est pas le
-    /// défaut que corrigeait `stopEngine` — mais il demande à CoreAudio un
-    /// contexte que CoreAudio n'a pas encore rendu.
-    ///
-    /// **On réessaie, on n'attend pas.** La version précédente de ce correctif
-    /// dormait 150 ms avant chaque reprise, et c'était faux sur les deux bouts :
-    /// elle payait le plein tarif même quand le HAL était libre — le cas
-    /// courant — et elle n'avait aucune condition de sortie, donc rien ne
-    /// garantissait que 150 ms suffisent quand il ne l'était pas. L'erreur 35
-    /// est un `EAGAIN` : le système demande qu'on repasse, et le seul signal
-    /// fiable que le contexte est rendu est que le démarrage réussisse. Dans le
-    /// cas normal le premier essai passe et l'attente est nulle.
-    ///
-    /// Elle dormait aussi en faisant tourner la boucle d'exécution, ce qui
-    /// laissait AppKit livrer des événements au beau milieu d'un redémarrage de
-    /// micro : une seconde frappe du raccourci pouvait rentrer dans la machine à
-    /// états pendant qu'elle se reconfigurait. `Thread.sleep` ne réentre nulle
-    /// part, et il n'est atteint que si un essai a échoué.
-    ///
-    /// Le fil principal est bloqué pendant les essais, et c'est assumé :
-    /// plafonné à `halTeardownBudget`, et l'alternative — rendre tout le
-    /// démarrage asynchrone — déplacerait une machine à états entière pour un
-    /// cas de repli.
-    private func startEngine() throws {
-        let deadline = Date().addingTimeInterval(Self.halTeardownBudget)
-        var attempts = 0
-        while true {
-            attempts += 1
-            do {
-                try engine.start()
-                if attempts > 1 {
-                    FeatureLog.record("micro : moteur démarré au \(attempts)ᵉ essai")
-                }
-                return
-            } catch {
-                guard Date() < deadline else {
-                    FeatureLog.record(
-                        "micro : démarrage refusé après \(attempts) essais — \(error.localizedDescription)"
-                    )
-                    throw error
-                }
-                Thread.sleep(forTimeInterval: Self.halTeardownStep)
-            }
-        }
-    }
-
-    /// Ce qu'on accepte d'attendre. Mesuré : le démontage aboutit en une à deux
-    /// dizaines de millisecondes ; 150 ms laissent une marge confortable et
-    /// restent sous le seuil de ce qui se remarque à l'oreille au démarrage
-    /// d'une dictée.
-    private static let halTeardownBudget: TimeInterval = 0.15
-    private static let halTeardownStep: TimeInterval = 0.02
-
-    /// Arrête le moteur et rend les échantillons capturés.
+    /// Arrête la capture et rend les échantillons.
     @discardableResult
     func stop() -> [Float] {
         guard isRunning else { return [] }
-        stopEngine()
+        stopSession()
         return shared.withLock { $0.samples }
     }
 
-    /// L'arrêt, en un seul endroit — il était écrit deux fois, dans deux ordres
-    /// dont l'un était dangereux.
-    ///
-    /// `stop()` avant `removeTap(onBus:)` : le moteur arrêté ne rend plus la main
-    /// au thread audio, donc retirer le tap ne peut plus croiser une exécution en
-    /// cours. Dans l'autre ordre, les deux se chevauchent — et c'est la course
-    /// qui a coûté les trois crashes du 7 août.
-    private func stopEngine() {
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
+    /// `stopRunning()` ne rend la main qu'une fois le flux arrêté : après lui,
+    /// plus aucune image n'arrive. Le `queue.sync` qui suit attend simplement
+    /// que la dernière déjà partie ait fini d'être consommée, ce qui rend le
+    /// nettoyage du convertisseur sûr sans verrou supplémentaire.
+    private func stopSession() {
+        session?.stopRunning()
+        session = nil
+        queue.sync { converter = nil }
         isRunning = false
-        converter = nil
     }
 
     func discard() {
@@ -269,10 +216,101 @@ final class MicCapture: @unchecked Sendable {
     /// Y a-t-il eu du son ? Sert à distinguer « rien dit » de « micro muet ».
     var peakLevel: Float { shared.withLock { $0.peak } }
 
-    // MARK: - Thread temps réel
+    // MARK: - Choix du périphérique
 
-    private func consume(_ buffer: AVAudioPCMBuffer) {
-        guard let converter, let targetBuffer = makeTargetBuffer(for: buffer) else { return }
+    /// Résout le micro à employer, sans jamais choisir un casque tout seul.
+    ///
+    /// **La règle est un enseignement de la panne, pas une préférence.** Quand
+    /// le périphérique réglé manque, l'ancien code repartait sur « le défaut
+    /// système » — qui, casque sur les oreilles, est le casque. C'est ce repli
+    /// qui a envoyé la capture sur le seul périphérique qui ne pouvait pas
+    /// marcher. On préfère donc explicitement le micro intégré, qui est aussi
+    /// ce que les réglages recommandent : activer le micro d'AirPods bascule le
+    /// lien Bluetooth en mode casque et fait retomber la qualité d'écoute, y
+    /// compris celle d'un appel en cours.
+    private static func resolveDevice(uid: String?) throws -> AVCaptureDevice {
+        if let uid, let device = AVCaptureDevice(uniqueID: uid) {
+            return device
+        }
+        if let uid {
+            FeatureLog.record("micro : « \(uid) » absent — repli sur le micro intégré")
+        }
+        if let builtIn = AudioInputDevice.builtIn?.uid,
+           let device = AVCaptureDevice(uniqueID: builtIn) {
+            return device
+        }
+        guard let fallback = AVCaptureDevice.default(for: .audio) else {
+            throw CaptureFailure.noInput
+        }
+        FeatureLog.record("micro : aucun micro intégré — repli sur « \(fallback.localizedName) »")
+        return fallback
+    }
+
+    // MARK: - Erreurs
+
+    enum CaptureFailure: LocalizedError {
+        case noInput
+        case unsupportedFormat(AVAudioFormat)
+        case deviceRefused(String)
+        case sessionRefused
+
+        var errorDescription: String? {
+            switch self {
+            case .noInput:
+                "aucune entrée audio disponible"
+            case .unsupportedFormat(let format):
+                "format d'entrée non converti (\(Int(format.sampleRate)) Hz)"
+            case .deviceRefused(let name):
+                "le micro « \(name) » a été refusé par le système"
+            case .sessionRefused:
+                "la capture n'a pas démarré"
+            }
+        }
+    }
+}
+
+// MARK: - La file de capture
+
+extension MicCapture: AVCaptureAudioDataOutputSampleBufferDelegate {
+
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard let description = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
+        let format = AVAudioFormat(cmAudioFormatDescription: description)
+
+        // **Le convertisseur est construit à la première image, pas au
+        // démarrage.** `AVCaptureSession` ne publie pas le format d'entrée avant
+        // de livrer : le demander plus tôt donnerait une supposition, et une
+        // supposition fausse ici rend du bruit blanc plutôt qu'une erreur.
+        if converter == nil || converter?.inputFormat != format {
+            converter = AVAudioConverter(from: format, to: targetFormat)
+            FeatureLog.record(String(
+                format: "micro : format d'entrée %.0f Hz, %d canal/aux",
+                format.sampleRate, format.channelCount
+            ))
+        }
+        guard let converter else { return }
+
+        let frames = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frames > 0, let source = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else {
+            return
+        }
+        source.frameLength = frames
+        guard CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer,
+            at: 0,
+            frameCount: Int32(frames),
+            into: source.mutableAudioBufferList
+        ) == noErr else { return }
+
+        consume(source, through: converter)
+    }
+
+    private func consume(_ buffer: AVAudioPCMBuffer, through converter: AVAudioConverter) {
+        guard let targetBuffer = makeTargetBuffer(for: buffer) else { return }
 
         // `AVAudioConverter` réclame ses données par rappel, et n'accepte le
         // tampon qu'une fois. Une boîte plutôt qu'un `var` capturé : Swift 6
@@ -315,26 +353,6 @@ final class MicCapture: @unchecked Sendable {
         return AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)
     }
 
-    // MARK: - Choix du périphérique
-
-    /// Impose un périphérique d'entrée au moteur.
-    ///
-    /// `AVAudioEngine` n'expose pas ça directement sur macOS : il faut descendre
-    /// jusqu'à l'unité audio sous-jacente.
-    private static func setInputDevice(_ deviceID: AudioDeviceID, on engine: AVAudioEngine) throws {
-        guard let unit = engine.inputNode.audioUnit else { throw CaptureFailure.noInput }
-        var identifier = deviceID
-        let status = AudioUnitSetProperty(
-            unit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &identifier,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard status == noErr else { throw CaptureFailure.deviceRefused(status) }
-    }
-
     /// Verrou à usage unique : le premier appel rend `true`, les suivants
     /// `false`.
     private final class Latch: @unchecked Sendable {
@@ -342,23 +360,6 @@ final class MicCapture: @unchecked Sendable {
         func close() -> Bool {
             defer { isOpen = false }
             return isOpen
-        }
-    }
-
-    enum CaptureFailure: LocalizedError {
-        case noInput
-        case unsupportedFormat(AVAudioFormat)
-        case deviceRefused(OSStatus)
-
-        var errorDescription: String? {
-            switch self {
-            case .noInput:
-                "aucune entrée audio disponible"
-            case .unsupportedFormat(let format):
-                "format d'entrée non converti (\(Int(format.sampleRate)) Hz)"
-            case .deviceRefused(let status):
-                "le micro choisi a été refusé par le système (code \(status))"
-            }
         }
     }
 }
