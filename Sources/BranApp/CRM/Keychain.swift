@@ -148,16 +148,24 @@ enum Keychain {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            // **Les attributs, jamais la donnée.** Poser `kSecReturnData` ici
-            // reviendrait à écrire `get` une seconde fois, avec l'alerte qui va
-            // avec — et personne ne verrait la différence avant le prochain
-            // redémarrage du Mac.
-            kSecReturnAttributes as String: true,
+            // **Rien n'est réclamé : ni la donnée, ni même les attributs.**
+            //
+            // La première version demandait `kSecReturnAttributes`, sur la foi
+            // d'un essai en ligne de commande — `security find-generic-password`
+            // sans `-g` rend les attributs sans un mot. Mesuré depuis
+            // l'application elle-même, c'était faux : l'alerte « bran veut
+            // accéder à la clé … » revenait à chaque lancement, et une sonde de
+            // pile d'appel a montré que `get` n'était pour rien dedans. C'est
+            // bien la demande d'attributs qui la déclenchait.
+            //
+            // Sans aucune clé de retour, `SecItemCopyMatching` ne rapporte que
+            // son `OSStatus` : `errSecSuccess` si un élément correspond,
+            // `errSecItemNotFound` sinon. Il n'a alors rien à déchiffrer ni à
+            // copier, donc rien à faire autoriser.
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
 
-        var item: CFTypeRef?
-        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 
     static func get(_ account: String) -> String? {

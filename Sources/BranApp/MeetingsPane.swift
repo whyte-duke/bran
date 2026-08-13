@@ -62,6 +62,15 @@ struct MeetingsPane: View {
                 // d'erreur CRM était inatteignable pour la même raison.
                 if model.uploads.configuration.isConfigured {
                     UpcomingMeetingsPanel(directory: model.directory)
+                        // **C'est ici que les rendez-vous se chargent, et pas au
+                        // lancement.** Venir sur cet onglet est le geste qui dit
+                        // « montre-moi mes rendez-vous » ; la fenêtre qui se
+                        // restaure toute seule au démarrage, non. La distinction
+                        // n'est pas cosmétique : le CRM réclame le jeton, donc
+                        // le Trousseau, donc une alerte système — et la poser
+                        // avant que l'utilisateur ait demandé quoi que ce soit
+                        // était le défaut. Voir `MeetingDirectory.refresh(userDriven:)`.
+                        .task { await model.directory.refresh() }
                 }
 
                 if isLoadingLibrary {

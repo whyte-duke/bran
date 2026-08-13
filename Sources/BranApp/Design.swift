@@ -216,6 +216,17 @@ enum Size {
     /// Au-delà, c'est la méta qui se rogne : elle se relit dans le détail, le
     /// titre non.
     static let clipboardMeta: CGFloat = 200
+
+    /// Combien de lignes de texte une entrée ouverte montre.
+    ///
+    /// **Cinq, et surtout pas tout.** Une entrée peut porter deux mille
+    /// caractères ; les afficher ferait une ligne haute comme la fenêtre, qui
+    /// chasserait toutes les autres et transformerait une liste en document.
+    /// Cinq lignes suffisent à reconnaître un paragraphe, un bloc de code ou une
+    /// adresse complète — c'est-à-dire à répondre à la seule question qu'on se
+    /// pose en s'arrêtant sur une ligne : « est-ce bien celui-là ? ». Lire en
+    /// entier est l'affaire de l'onglet Presse-papiers, qui a la place.
+    static let clipboardExpandedLines = 5
 }
 
 // MARK: - Typographie
@@ -460,6 +471,22 @@ enum Motion {
     /// cadre pendant deux images, le temps que le tracé finisse de s'ouvrir.
     static let notchContent = Animation.smooth(duration: 0.3)
     static let notchContentDelay: TimeInterval = 0.09
+
+    /// Le temps qu'il faut rester sur une ligne d'historique avant qu'elle
+    /// s'ouvre sur son contenu.
+    ///
+    /// **Un délai, et pas un survol immédiat.** Sans lui, traverser la liste à
+    /// la souris ou à la flèche ferait grandir et rétrécir chaque ligne au
+    /// passage : la liste bougerait sous le curseur, et la ligne qu'on visait ne
+    /// serait plus là où on l'a vue. Une demi-seconde est le seuil au-delà
+    /// duquel s'arrêter sur une ligne veut dire quelque chose — c'est aussi
+    /// celui d'une infobulle de macOS, et l'accord n'est pas fortuit : c'est le
+    /// même geste, « je m'arrête pour regarder ».
+    static let dwell: TimeInterval = 0.5
+
+    /// L'ouverture d'une ligne : plus lente que le survol, parce qu'elle
+    /// déplace ce qui est en dessous.
+    static let expand = Animation.smooth(duration: 0.22)
 
     /// Le temps que met l'encoche à se refermer — **et donc le temps qu'il faut
     /// attendre avant de retirer la fenêtre.**

@@ -259,17 +259,33 @@ final class UploadService {
     /// Le CRM n'envoie aucune notification : c'est à bran de redemander. L'état
     /// complet étant en base, il suffit de réinterroger `/status`.
     func resumeTracking(_ recordings: [Recording]) {
-        guard let client = client() else { return }
-
-        for recording in recordings {
-            guard let transcriptionID = recording.metadata.transcriptionID,
+        // **Ce qu'il y a à reprendre est décidé avant qu'un client existe**, et
+        // l'ordre inverse était un défaut qui se voyait au démarrage :
+        // `client()` lit le jeton dans le Trousseau, donc ouvre l'alerte système
+        // « bran veut accéder à la clé … » — et il le faisait même quand aucun
+        // enregistrement n'était en cours de traitement, c'est-à-dire dans
+        // l'immense majorité des lancements. Cette méthode est appelée à
+        // l'ouverture de la fenêtre, que macOS restaure tout seul à l'ouverture
+        // de session : l'alerte arrivait donc à chaque démarrage du Mac, pour un
+        // travail qui n'existait pas.
+        //
+        // Filtrer d'abord ne coûte rien — c'est de la lecture de métadonnées
+        // déjà en mémoire — et ne change rien au comportement quand il y a
+        // vraiment un suivi à reprendre.
+        let pending = recordings.filter { recording in
+            guard recording.metadata.transcriptionID != nil,
                   trackers[recording.id] == nil,
                   states[recording.id]?.isFinished != true
-            else { continue }
+            else { return false }
 
             let stage = recording.metadata.crmStage.flatMap(CRMStage.init(rawValue:))
-            guard stage?.isTerminal != true else { continue }
+            return stage?.isTerminal != true
+        }
 
+        guard pending.isEmpty == false, let client = client() else { return }
+
+        for recording in pending {
+            guard let transcriptionID = recording.metadata.transcriptionID else { continue }
             trackers[recording.id] = Task { [weak self] in
                 await self?.track(recording.id, transcriptionID: transcriptionID, client: client)
                 self?.trackers[recording.id] = nil

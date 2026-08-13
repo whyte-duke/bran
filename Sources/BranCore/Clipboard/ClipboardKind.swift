@@ -140,4 +140,49 @@ public struct ClipboardSource: Sendable, Codable, Equatable, Hashable {
     /// Vrai quand on ne sait rien de la source. L'interface doit alors se taire
     /// plutôt qu'écrire « Inconnu », qui occupe la même place en ne disant rien.
     public var isUnknown: Bool { bundleIdentifier == nil && name == nil }
+
+    /// Ce qu'une ligne de liste écrit à droite : **court, et qui distingue.**
+    ///
+    /// Le titre de fenêtre brut ne convient pas tel quel. « Diagnostic
+    /// stratégique cyber | Castral | Cal.com » dit trois fois plus de choses que
+    /// la place ne le permet, et le rogner par la fin coupe précisément la
+    /// partie qui situe — un titre tronqué à « Diagnostic stratég… » ne dit pas
+    /// d'où vient l'entrée, il redit ce que le titre de la ligne dit déjà.
+    ///
+    /// **La convention du web décide à notre place.** Les sites écrivent leur
+    /// nom en **dernier**, après une barre ou un tiret : « Mon document — Google
+    /// Docs », « Type d'événement | Cal.com », « bran/README at main · GitHub ».
+    /// Prendre le dernier segment rend donc le nom du site, qui est court par
+    /// construction et qui est exactement ce dont on se souvient.
+    ///
+    /// **Seulement quand c'est nécessaire, et seulement si ça aide.** Un titre
+    /// qui tient déjà — « Castral CRM » — est rendu tel quel : le découper
+    /// perdrait de l'information pour rien. Et un dernier segment plus long que
+    /// le seuil n'est pas un nom de site, c'est une phrase qui contenait un
+    /// tiret ; on garde alors le titre entier et c'est l'affichage qui le
+    /// rognera, comme avant.
+    public var shortOrigin: String? {
+        guard let title = windowTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+              title.isEmpty == false
+        else { return name }
+
+        guard title.count > Self.originLimit else { return title }
+
+        let segments = title
+            .components(separatedBy: CharacterSet(charactersIn: "|—–·"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+
+        guard let last = segments.last, segments.count > 1, last.count <= Self.originLimit else {
+            return title
+        }
+        return last
+    }
+
+    /// Au-delà, un texte n'est plus une étiquette de provenance.
+    ///
+    /// Vingt-quatre caractères tiennent dans la place que la ligne accorde à la
+    /// méta sans repousser le titre, et couvrent les noms de site réels —
+    /// « Cal.com », « Google Docs », « GitHub », « secure.castral.fr ».
+    private static let originLimit = 24
 }

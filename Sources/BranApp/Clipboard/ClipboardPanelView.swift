@@ -827,46 +827,116 @@ private struct ClipboardRow: View {
 
     @State private var isHovering = false
 
+    /// La ligne est-elle ouverte sur son contenu ?
+    ///
+    /// **Un état de la vue et non du modèle.** Il ne survit pas à la fermeture
+    /// du panneau, il ne concerne personne d'autre que cette ligne, et le
+    /// remonter au modèle obligerait à y tenir un identifiant de plus dont la
+    /// seule fonction serait de redescendre ici.
+    @State private var isExpanded = false
+
+    /// La minuterie de l'arrêt en cours. Annulée dès qu'on repart, ce qui est
+    /// tout ce qui empêche la liste de s'ouvrir sous un curseur qui la traverse.
+    @State private var dwell: Task<Void, Never>?
+
     private var row: ClipboardFilter.RowText { ClipboardFilter.rowText(for: entry) }
 
+    /// Cette entrée a-t-elle quelque chose de plus à montrer qu'une ligne ?
+    ///
+    /// Une image l'a déjà montré — sa vignette est là — et un fichier n'a que
+    /// son nom. Ouvrir ces deux-là ferait grandir la ligne pour révéler du vide.
+    private var hasMoreToShow: Bool {
+        entry.kind == .text || entry.kind == .richText
+    }
+
+    /// La suite du texte, ou `nil` quand la ligne montre déjà tout.
+    ///
+    /// `plainText` porte le texte complet quand il tient dans l'index ; sinon
+    /// c'est `preview`, déjà rogné, qui reste la meilleure réponse disponible
+    /// sans toucher au disque. Ouvrir une ligne ne doit pas coûter une lecture
+    /// de fichier : c'est un geste de survol, pas une consultation.
+    private var expandedText: String? {
+        let full = entry.plainText ?? entry.preview
+        let text = full.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.isEmpty == false else { return nil }
+        // Rien de plus à révéler qu'un titre déjà entier : la ligne le dit déjà,
+        // et l'ouvrir répéterait la même phrase sous elle-même.
+        guard text != row.text || row.isClipped else { return nil }
+        return text
+    }
+
+    /// Arme — ou désarme — l'ouverture différée.
+    ///
+    /// L'ancienne minuterie est **toujours** annulée d'abord, y compris quand on
+    /// vient d'arriver : traverser la liste ligne à ligne crée sinon autant de
+    /// minuteries que de lignes traversées, et la dernière ouvrirait une ligne
+    /// qu'on a déjà quittée.
+    ///
+    /// La fermeture, elle, est immédiate. Attendre pour refermer laisserait la
+    /// liste se réorganiser sous le curseur après qu'on en est parti — le défaut
+    /// exact que le délai d'ouverture existe pour éviter.
+    private func scheduleDwell(_ isDesignated: Bool) {
+        dwell?.cancel()
+        guard isDesignated else {
+            isExpanded = false
+            return
+        }
+        dwell = Task {
+            try? await Task.sleep(for: .seconds(Motion.dwell))
+            guard Task.isCancelled == false else { return }
+            isExpanded = true
+        }
+    }
+
     var body: some View {
-        HStack(spacing: Space.small) {
-            leading
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: Space.small) {
+                leading
 
-            title
+                title
 
-            Spacer(minLength: Space.small)
+                Spacer(minLength: Space.small)
 
-            // **La méta à droite du titre, plus au-dessous.** Empilées, les deux
-            // imposaient 44 points par entrée pour une seule ligne utile : le
-            // titre est ce qu'on cherche, la provenance est ce qui aide à le
-            // reconnaître une fois qu'on l'a sous les yeux. Côte à côte, elles
-            // tiennent en 34 points, et la fenêtre montre onze entrées au lieu
-            // de neuf sans grandir d'un pixel.
-            // **La méta garde sa taille, c'est le titre qui se rogne.** Sans
-            // cette priorité, SwiftUI répartit la place au prorata et le titre —
-            // qui peut faire deux cents caractères — écrase la provenance
-            // jusqu'à la faire disparaître. C'est l'inverse qu'on veut : le
-            // titre est déjà tronqué par nature, la provenance ne l'est pas.
-            // …mais elle est bornée. Sans plafond, une application au nom long
-            // et un « il y a 3 semaines » repoussent le titre jusqu'à le réduire
-            // à une ellipse — et le titre est l'information principale, la
-            // provenance seulement ce qui aide à la reconnaître. Au-delà du
-            // plafond, c'est la méta qui se rogne.
-            meta
-                .lineLimit(1)
-                .frame(maxWidth: Size.clipboardMeta, alignment: .trailing)
-                .fixedSize(horizontal: false, vertical: true)
+                // **La méta à droite du titre, plus au-dessous.** Empilées, les
+                // deux imposaient 44 points par entrée pour une seule ligne
+                // utile : le titre est ce qu'on cherche, la provenance est ce
+                // qui aide à le reconnaître une fois qu'on l'a sous les yeux.
+                // Côte à côte, elles tiennent en 34 points, et la fenêtre montre
+                // onze entrées au lieu de neuf sans grandir d'un pixel.
+                //
+                // Elle est bornée, et c'est le titre qui gagne le reste : sans
+                // plafond, une provenance longue repousserait le titre jusqu'à
+                // le réduire à une ellipse — or c'est lui, l'information qu'on
+                // cherche.
+                meta
+                    .lineLimit(1)
+                    .frame(maxWidth: Size.clipboardMeta, alignment: .trailing)
+                    .fixedSize(horizontal: false, vertical: true)
 
-            trailing
+                trailing
+            }
+            // Deux hauteurs, une par sorte de contenu, et le chiffre se défend
+            // dans `Design.swift` : un texte se lit sur une ligne serrée, une
+            // image se regarde et mérite la place de sa vignette. Ce qui tient
+            // le parcours en diagonale, c'est l'alignement à gauche du titre —
+            // identique dans les deux cas — et non l'égalité des hauteurs.
+            .frame(height: showsThumbnail ? Size.clipboardMediaRow : Size.clipboardRow)
+
+            // Ce que l'arrêt révèle : **sous** la ligne, jamais à sa place. La
+            // ligne garde sa hauteur et son contenu ; c'est la suite du texte
+            // qui apparaît dessous. La remplacer aurait fait sauter le titre à
+            // l'instant précis où on le lisait.
+            if isExpanded, hasMoreToShow, let more = expandedText {
+                Text(more)
+                    .font(Type.meta)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(Size.clipboardExpandedLines)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, Space.small)
+            }
         }
         .padding(.horizontal, Space.inset)
-        // Deux hauteurs, une par sorte de contenu, et le chiffre se défend dans
-        // `Design.swift` : un texte se lit sur une ligne serrée, une image se
-        // regarde et mérite la place de sa vignette. Ce qui tient le parcours en
-        // diagonale, c'est l'alignement à gauche du titre — identique dans les
-        // deux cas — et non l'égalité des hauteurs.
-        .frame(height: showsThumbnail ? Size.clipboardMediaRow : Size.clipboardRow)
         .background(
             Palette.row(hover: isHovering, selected: isSelected),
             in: .rect(cornerRadius: Radius.field)
@@ -875,6 +945,15 @@ private struct ClipboardRow: View {
         .onHover { isHovering = $0 }
         .branAnimation(Motion.hover, value: isHovering)
         .branAnimation(Motion.hover, value: isSelected)
+        .branAnimation(Motion.expand, value: isExpanded)
+        // **L'arrêt, pas le passage.** Les deux façons de désigner une ligne —
+        // la souris qui s'y pose, le clavier qui s'y arrête — ouvrent la même
+        // chose et par le même chemin. Repartir annule : c'est l'annulation, et
+        // elle seule, qui empêche la liste de s'ouvrir et se refermer sous un
+        // curseur qui la traverse.
+        .onChange(of: isHovering) { scheduleDwell(isHovering || isSelected) }
+        .onChange(of: isSelected) { scheduleDwell(isHovering || isSelected) }
+        .onDisappear { dwell?.cancel() }
         // Le double clic avant le simple : déclaré dans l'autre ordre, le simple
         // avale le premier des deux clics.
         .onTapGesture(count: 2) { onActivate(.paste) }
@@ -1001,7 +1080,7 @@ private struct ClipboardRow: View {
     /// Enregistrement de l'écran aucun titre n'est lisible, et les entrées
     /// écrites avant que ce champ existe n'en portent pas.
     private var origin: String? {
-        entry.source?.windowTitle ?? entry.source?.name
+        entry.source?.shortOrigin ?? entry.source?.name
     }
 
     /// Le poids d'un fichier copié, quand on le connaît.

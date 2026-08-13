@@ -101,7 +101,17 @@ struct LibraryView: View {
             // Le CRM n'envoie aucune notification : c'est à bran de redemander
             // l'état des jobs laissés en plan par une fermeture de l'app.
             model.uploads.resumeTracking(model.store.recordings)
-            await model.directory.refresh()
+
+            // **`userDriven: false`, alors que la fenêtre vient de s'ouvrir.**
+            // Ouvrir la fenêtre ressemble à un geste, et c'en est un — sauf au
+            // lancement, où macOS la restaure tout seul si elle était ouverte à
+            // la fermeture. Ce cas-là est le plus fréquent, et c'est celui qui
+            // ramenait l'alerte du Trousseau à chaque démarrage de session.
+            //
+            // La liste des rendez-vous se remplit donc quand on va la voir —
+            // l'onglet Réunions le demande explicitement — ou quand un envoi la
+            // réclame. Voir `MeetingDirectory.refresh(userDriven:)`.
+            await model.directory.refresh(userDriven: false)
         }
         .sheet(isPresented: $model.showsSettings) {
             SettingsPane(model: model)

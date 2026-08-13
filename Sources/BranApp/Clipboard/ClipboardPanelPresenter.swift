@@ -351,7 +351,62 @@ final class ClipboardPanelPresenter {
             MainActor.assumeIsolated { self?.close() }
         }
 
-        observers = DismissalObservers(resignation: resignation, outsideClick: outsideClick)
+        // **⌘1…⌘9 ne pouvait pas marcher, et l'affichage promettait le
+        // contraire.** Chaque ligne porte son badge « ⌘3 » ; la touche, elle,
+        // n'arrivait nulle part.
+        //
+        // La raison est dans AppKit et non dans le panneau : une frappe qui
+        // porte Commande est un **équivalent clavier**. macOS la propose
+        // d'abord aux menus, puis descend la chaîne des répondants par
+        // `performKeyEquivalent(with:)`, et ne la livre en `keyDown` que si
+        // personne ne l'a prise. Or `onKeyPress` de SwiftUI est branché sur
+        // `keyDown` : il voit ↑, ↓, ↵, Échap — tout ce qui n'a pas de
+        // modificateur — et ne verra jamais un ⌘chiffre. ⇧↵ et ⌘↵ fonctionnent
+        // parce qu'ils portent une touche *de retour*, qu'aucun menu ne
+        // revendique.
+        //
+        // Un moniteur **local** est posé avant ce tri : il voit l'événement dès
+        // qu'il est retiré de la file, avant les menus. Rendre `nil` le retire
+        // du flux, comme le tap global le fait pour le raccourci d'ouverture.
+        //
+        // Local et non global, et la distinction est de sécurité : un moniteur
+        // global observe les frappes de **toutes** les applications, ce qu'on
+        // n'a aucune raison de faire pour un chiffre. Celui-ci ne voit que ce
+        // qui est destiné à bran, et ne fait quelque chose que si le panneau est
+        // la fenêtre clé.
+        let digits = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // Le verdict traverse la frontière d'isolement, pas l'événement :
+            // `NSEvent` n'est pas `Sendable`, et le rendre depuis la fermeture
+            // isolée ne compile pas. Un `Bool` suffit à décider ici.
+            let consumed = MainActor.assumeIsolated { () -> Bool in
+                guard let self, panel.isKeyWindow else { return false }
+                return self.handleShortcutDigit(event)
+            }
+            return consumed ? nil : event
+        }
+
+        observers = DismissalObservers(
+            resignation: resignation, outsideClick: outsideClick, digits: digits
+        )
+    }
+
+    /// ⌘1…⌘9 : colle l'entrée de ce rang. Rend `true` quand la frappe a été
+    /// consommée.
+    private func handleShortcutDigit(_ event: NSEvent) -> Bool {
+        let significant = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Commande **seule** : ⌘⌥3 et ⌘⇧3 sont des captures d'écran du système,
+        // et les avaler serait un dégât bien plus grand que le service rendu.
+        guard significant == .command else { return false }
+        guard let characters = event.charactersIgnoringModifiers,
+              let digit = characters.first,
+              let number = digit.wholeNumberValue,
+              (1...9).contains(number),
+              let model,
+              let entry = model.entry(forShortcut: number)
+        else { return false }
+
+        model.activate(.paste, on: entry)
+        return true
     }
 
     private func stopObservingDismissal() {
@@ -490,14 +545,17 @@ private final class DismissalObservers {
 
     private let resignation: any NSObjectProtocol
     private let outsideClick: Any
+    private let digits: Any?
 
-    init(resignation: any NSObjectProtocol, outsideClick: Any) {
+    init(resignation: any NSObjectProtocol, outsideClick: Any, digits: Any?) {
         self.resignation = resignation
         self.outsideClick = outsideClick
+        self.digits = digits
     }
 
     deinit {
         NotificationCenter.default.removeObserver(resignation)
         NSEvent.removeMonitor(outsideClick)
+        if let digits { NSEvent.removeMonitor(digits) }
     }
 }
