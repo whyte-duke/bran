@@ -20,6 +20,11 @@ public final class AppModel {
     public let engine: RecordingEngine
     let store = RecordingStore()
     let loginItem = LoginItemService()
+
+    /// Les mises à jour. Aussi autonome que l'éveil ou le moniteur : elle ne
+    /// connaît rien du reste de bran, et rien du reste de bran ne la connaît en
+    /// dehors de l'entrée de menu qui la déclenche.
+    let updates = UpdateService()
     let storage = StorageLocation()
     let uploads: UploadService
     let directory: MeetingDirectory

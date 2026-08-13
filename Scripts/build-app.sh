@@ -47,6 +47,17 @@ CONFIG="${1:-release}"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
+# **Le numéro de version vit dans un fichier, et dans un seul.**
+#
+# Il était écrit en clair dans l'Info.plist ci-dessous. Tant que personne ne
+# distribuait, ça ne coûtait rien ; depuis que les mises à jour sont
+# automatiques, c'est ce numéro que Sparkle compare pour décider s'il y a
+# quelque chose à installer. Deux endroits à tenir — le paquet et la
+# publication — auraient fini par diverger, et une version publiée sous un
+# numéro inférieur à celui déjà installé ne s'installe jamais, sans un mot
+# d'explication nulle part.
+VERSION=$(cat "$ROOT/VERSION" 2>/dev/null || echo "0.0.0")
+
 # La destination est surchargeable, et ce n'est pas de la souplesse gratuite :
 # sans ça, la seule façon de vérifier que ce script produit encore un bundle
 # valide est d'écraser l'application installée — donc de la faire quitter, alors
@@ -84,6 +95,27 @@ rm -rf -- "$DEST"
 mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
 cp "$BINARY" "$DEST/Contents/MacOS/$APP_NAME"
 
+# ── Sparkle ──────────────────────────────────────────────────────────────────
+#
+# Le framework est COPIÉ dans le paquet, et pas seulement lié : `Updater.app`,
+# `Autoupdate` et les deux services XPC qu'il contient doivent exister à
+# l'exécution, sur la machine du destinataire, qui n'a évidemment pas de
+# `.build`. Sans cette copie, bran se lance et meurt à la première vérification.
+#
+# La tranche est prise dans le `.xcframework` livré par SwiftPM. Son chemin
+# contient le numéro de version de Sparkle : on le résout par motif plutôt que
+# de l'écrire, sinon la prochaine montée de version casserait la construction
+# avec un message parlant d'un dossier introuvable.
+echo "→ embarquement de Sparkle"
+SPARKLE=$(find "$ROOT/.build/artifacts" -type d -name "Sparkle.framework" -path "*macos*" 2>/dev/null | head -1)
+if [[ -z "$SPARKLE" ]]; then
+  echo "✗ Sparkle.framework introuvable dans .build/artifacts."
+  echo "  Lancez d'abord : swift package resolve"
+  exit 1
+fi
+mkdir -p "$DEST/Contents/Frameworks"
+cp -R "$SPARKLE" "$DEST/Contents/Frameworks/"
+
 if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
   cp "$ROOT/Resources/AppIcon.icns" "$DEST/Contents/Resources/AppIcon.icns"
   ICON_ENTRY='    <key>CFBundleIconFile</key>          <string>AppIcon</string>'
@@ -101,10 +133,43 @@ cat > "$DEST/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>        <string>$BUNDLE_ID</string>
     <key>CFBundleExecutable</key>        <string>$APP_NAME</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key>           <string>1</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <!-- Le même numéro que ci-dessus, volontairement. Sparkle compare d'abord
+         CFBundleVersion ; en tenir un second, distinct, obligerait à
+         l'incrémenter séparément et à se souvenir lequel des deux décide. -->
+    <key>CFBundleVersion</key>           <string>$VERSION</string>
     <key>LSMinimumSystemVersion</key>    <string>15.0</string>
 $ICON_ENTRY
+
+    <!-- Les mises à jour. Voir UpdateService.swift pour ce que ça porte.
+
+         Le flux est un fichier attaché à la DERNIÈRE publication GitHub, et
+         l'URL ci-dessous est stable : GitHub la fait toujours pointer sur la
+         version la plus récente. Une URL qui contiendrait le numéro de version
+         aurait dû être changée à chaque publication — c'est-à-dire dans le
+         paquet déjà installé chez les gens, ce qui est précisément impossible.
+
+         La clé publique est la moitié qui protège. bran refuse d'installer une
+         archive qui n'est pas signée par la clé privée correspondante, laquelle
+         ne quitte jamais le trousseau de celui qui publie : un compte GitHub
+         compromis ne suffit donc pas à pousser un binaire sur les machines de
+         l'équipe.
+
+         SUAutomaticallyUpdate télécharge et installe sans rien demander, puis
+         propose de relancer. C'est ce qu'on veut ici : les destinataires ne
+         sont pas des testeurs, ils n'ont aucune décision utile à prendre sur
+         une correction de défaut, et une fenêtre qui demande la permission
+         d'installer finit par être fermée sans être lue. -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/whyte-duke/bran/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>CGJLcuWsf6qEB7+7lFUOWCkWfu99/S6hGgSpE2hseMQ=</string>
+    <key>SUEnableAutomaticChecks</key>       <true/>
+    <key>SUAutomaticallyUpdate</key>         <true/>
+    <!-- Une heure. Assez court pour qu'un correctif signalé le matin soit en
+         place l'après-midi, assez long pour ne pas interroger GitHub à chaque
+         réveil de la machine. -->
+    <key>SUScheduledCheckInterval</key>      <integer>3600</integer>
 
     <!-- **Une application normale, que l'utilisateur peut démoter.**
 
@@ -182,6 +247,37 @@ else
   SIGN_FLAGS+=(--timestamp=none)
   echo "→ signature ($IDENTITY, usage local)"
 fi
+
+# **De l'intérieur vers l'extérieur, et jamais `--deep`.**
+#
+# Le sceau d'un paquet couvre ce qu'il contient : signer bran d'abord scellerait
+# un framework encore non signé, et la signature extérieure deviendrait fausse à
+# la seconde où on signerait l'intérieur. `codesign --deep` prétend s'en occuper,
+# et Apple déconseille explicitement de s'en servir pour distribuer : il applique
+# les mêmes options à des exécutables qui n'ont pas les mêmes besoins, et masque
+# les échecs des composants imbriqués.
+#
+# L'ordre ci-dessous est celui que Sparkle documente. Les composants imbriqués ne
+# reçoivent ni notre identifiant de paquet — ils ont le leur — ni nos droits :
+# `Updater.app` n'a aucune raison de réclamer le micro.
+NESTED_FLAGS=(--force --sign "$IDENTITY")
+if [[ "$IDENTITY" == Developer\ ID* ]]; then
+  NESTED_FLAGS+=(--options runtime --timestamp)
+else
+  NESTED_FLAGS+=(--timestamp=none)
+fi
+
+SPARKLE_IN_APP="$DEST/Contents/Frameworks/Sparkle.framework"
+for nested in \
+  "Versions/B/XPCServices/Downloader.xpc" \
+  "Versions/B/XPCServices/Installer.xpc" \
+  "Versions/B/Autoupdate" \
+  "Versions/B/Updater.app"
+do
+  [[ -e "$SPARKLE_IN_APP/$nested" ]] || continue
+  codesign "${NESTED_FLAGS[@]}" "$SPARKLE_IN_APP/$nested"
+done
+codesign "${NESTED_FLAGS[@]}" "$SPARKLE_IN_APP"
 
 codesign "${SIGN_FLAGS[@]}" "$DEST"
 

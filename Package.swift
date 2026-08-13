@@ -8,7 +8,10 @@ let package = Package(
         // Parakeet TDT 0.6B v3 converti en CoreML, exécuté sur le Neural Engine.
         // Apache 2.0. On ne convertit rien nous-mêmes : porter une conversion
         // NeMo → CoreML serait une dette à vie, à chaque publication de NVIDIA.
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.5")
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.5"),
+        // Les mises à jour automatiques. Voir `UpdateService` pour ce qu'elle porte
+        // et `Scripts/release.sh` pour ce qui les publie.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
     ],
     targets: [
         // Logique pure. Aucune permission, aucun écran, aucun framework système.
@@ -59,6 +62,7 @@ let package = Package(
                 "BranWatch",
                 "BranWindows",
                 .product(name: "FluidAudio", package: "FluidAudio"),
+                .product(name: "Sparkle", package: "Sparkle"),
             ]
         ),
 
