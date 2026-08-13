@@ -170,6 +170,25 @@ struct MenuBarContent: View {
             Divider()
         }
 
+        // **La vérification à la demande, en plus de l'horaire.**
+        //
+        // Les deux ne répondent pas à la même question. L'horaire dit
+        // « tiens-moi à jour » ; celle-ci dit « je viens de signaler un défaut,
+        // est-ce qu'il est corrigé ? » — et cette question-là se pose dans la
+        // minute, pas au prochain intervalle. C'est aussi le seul endroit d'où
+        // l'on peut lire la version installée, ce qu'on cherche exactement quand
+        // on ne sait plus si l'on a la correction dont quelqu'un parle.
+        //
+        // Éteinte pendant qu'une vérification ou une installation tourne, plutôt
+        // que de ne rien faire quand on clique : la même règle que les boutons de
+        // la barre de session pendant la finalisation.
+        Button("Rechercher des mises à jour — version \(model.updates.installedVersion)") {
+            model.updates.checkForUpdates()
+        }
+        .disabled(model.updates.canCheckForUpdates == false)
+
+        Divider()
+
         Button("Quitter bran") {
             NSApplication.shared.terminate(nil)
         }
