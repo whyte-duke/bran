@@ -50,18 +50,64 @@ struct MenuBarContent: View {
 
         Divider()
 
-        if model.isFinalizing {
-            // **Aucun bouton pendant la finalisation.** « Mettre en pause » et
+        // **Ce que la chaîne de fin raconte, et les boutons, sont deux blocs
+        // séparés.** Les avoir mis dans la même chaîne de `else if` fabriquait
+        // un défaut discret : pendant qu'une compression tourne — vingt minutes
+        // sur une réunion d'une demi-heure — plus aucune session n'est ouverte,
+        // donc « Démarrer un enregistrement » tombait dans une branche qu'on
+        // n'atteignait jamais. Quelqu'un dont la réunion suivante commence cinq
+        // minutes après la précédente se retrouvait devant un menu qui ne
+        // proposait plus d'enregistrer, sans rien pour l'expliquer.
+        //
+        // Rien n'interdit d'enregistrer pendant que bran compresse : la
+        // compression tourne hors du flux de capture, c'est même la raison pour
+        // laquelle elle est lancée après la finalisation et pas pendant.
+        if isPilotable == false, model.isFinalizing || model.currentStep != nil {
+            // **Aucun bouton pendant la chaîne de fin.** « Mettre en pause » et
             // « Arrêter et enregistrer le fichier » restaient offerts alors que
             // la machine ne les accepte plus : cliquer ne produisait rien, pas
             // même un message. Un utilisateur qui vient de cliquer « Arrêter »
             // et à qui on continue de proposer « Arrêter » en conclut,
             // légitimement, que son premier clic n'a pas été pris.
             //
-            // `statusSummary`, juste au-dessus, dit ce qui se passe et combien
-            // d'octets sont écrits. C'est tout ce qu'il y a à savoir.
-            Text("La capture est terminée, le fichier s'écrit. Ne quittez pas bran.")
-        } else if model.hasOpenSession {
+            // **Les trois étapes, et plus seulement la première.** Le bloc ne
+            // couvrait que la finalisation et disait une phrase écrite en dur ;
+            // la fusion et l'extraction de l'audio, qui durent ensemble bien
+            // plus longtemps, ne se voyaient nulle part une fois la fenêtre
+            // fermée. Or c'est **depuis le menu** qu'on surveille la fin d'une
+            // réunion : la fenêtre, on l'a refermée en raccrochant.
+            //
+            // **Ce que ces deux lignes ajoutent, et rien de plus.**
+            // `statusSummary`, quelques lignes au-dessus, vaut `step.summary`
+            // pendant toute la chaîne : l'étape y est déjà nommée, avec son
+            // pourcentage. La répéter ici ferait bégayer un menu qui tient sur un
+            // écran. Restent les deux choses qu'elle ne dit pas : **de quelle
+            // réunion** il s'agit — une compression peut tourner pendant qu'on en
+            // démarre une autre — et le détail, c'est-à-dire les octets écrits,
+            // le temps restant et la seule consigne, ne pas quitter bran.
+            //
+            // Sans nom de réunion, la première ligne retombe sur le titre de
+            // l'étape : le menu doit dire ce qui tourne même quand la réunion
+            // n'a jamais été nommée.
+            //
+            // La condition ne dépend pas de `currentStep` : la machine peut être
+            // en `.finalizing` une fraction de seconde avant que la chaîne
+            // publie sa première étape, et si le bloc n'avait tenu qu'à l'étape,
+            // le menu aurait proposé « Arrêter » pendant ce trou-là — c'est-à-dire
+            // exactement le défaut que ce bloc existe pour fermer. La phrase de
+            // repli dit ce qu'on sait alors, et rien de plus.
+            if let step = model.currentStep {
+                Text(model.currentStepTitle.map { "Réunion — \($0)" } ?? step.title)
+                Text(step.detail)
+            } else {
+                Text("La capture est terminée, le fichier s'écrit. Ne quittez pas bran.")
+            }
+        }
+
+        // Les commandes. La finalisation est le seul état où il n'y en a
+        // aucune : la machine n'accepte plus ni pause ni arrêt, et les offrir
+        // ferait croire qu'un clic est resté sans effet.
+        if isPilotable {
             Button(model.isPaused ? "Reprendre l'enregistrement" : "Mettre en pause") {
                 model.togglePause()
             }
@@ -71,6 +117,8 @@ struct MenuBarContent: View {
                 model.stopRecording()
             }
             .keyboardShortcut("s")
+        } else if model.isFinalizing {
+            EmptyView()
         } else if let meeting = model.pendingMeeting {
             Button("Démarrer — \(meeting.title ?? "réunion non reconnue")") {
                 model.startPendingRecording()
@@ -126,6 +174,20 @@ struct MenuBarContent: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+
+    /// Y a-t-il encore quelque chose **à décider** ?
+    ///
+    /// La même question que dans `RecordingBar`, et posée dans le même sens, pour
+    /// que le menu et la fenêtre ne puissent pas se contredire. Elle est écrite
+    /// dans les deux vues plutôt que dans le modèle parce qu'elle n'y répond pas
+    /// à la même chose : le modèle sait ce que fait la machine, ces deux vues
+    /// décident ce qu'elles montrent quand deux choses sont vraies en même temps
+    /// — une session ouverte et une compression qui traîne depuis la précédente.
+    /// Dans ce cas, les commandes gagnent : une session qu'on ne peut plus
+    /// arrêter est un défaut plus grave qu'une étape de fond qu'on ne voit pas.
+    private var isPilotable: Bool {
+        model.hasOpenSession && model.isFinalizing == false
     }
 
     /// La dictée dans le menu : **rien** tant que tout va bien.

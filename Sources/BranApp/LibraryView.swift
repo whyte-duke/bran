@@ -68,12 +68,20 @@ struct LibraryView: View {
             // Pendant l'enregistrement, la fenêtre entière devient un poste de
             // pilotage : la barre couvre les deux colonnes, quelle que soit la
             // section affichée.
-            if model.hasOpenSession {
+            //
+            // **Et elle y reste après la visio**, jusqu'à ce que la fusion, la
+            // compression et l'extraction de l'audio soient finies. Montée sur
+            // `hasOpenSession`, elle disparaissait à l'instant précis où ces
+            // travaux commençaient : plusieurs dizaines de minutes de silence
+            // complet sur une réunion d'une demi-heure, pendant lesquelles la
+            // seule chose visible était une bibliothèque qui n'affichait pas
+            // encore la réunion.
+            if model.showsSessionBar {
                 RecordingBar(model: model)
                     .transition(.move(edge: .bottom))
             }
         }
-        .branAnimation(Motion.enter, value: model.hasOpenSession)
+        .branAnimation(Motion.enter, value: model.showsSessionBar)
         .task {
             // L'accueil s'ouvre de lui-même tant que les trois capacités ne
             // sont pas en place. Sans ça il ne s'ouvrait jamais : la fenêtre

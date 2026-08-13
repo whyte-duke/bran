@@ -1,11 +1,21 @@
+import BranCore
 import SwiftUI
 
-/// Barre de session, visible en bas de la fenêtre **uniquement** pendant qu'un
-/// enregistrement tourne.
+/// Barre de session, visible en bas de la fenêtre pendant qu'un enregistrement
+/// tourne **et pendant tout ce qui le suit**.
 ///
 /// Elle transforme la bibliothèque en poste de pilotage sans changer d'écran :
 /// tant qu'on enregistre, la seule chose qu'on veut faire est nommer la session
 /// et savoir quand l'arrêter.
+///
+/// **Ce qu'elle ne faisait pas, et qui était le défaut.** Elle disparaissait à
+/// l'instant où la machine repassait au repos, c'est-à-dire juste avant que la
+/// finalisation, la fusion et l'extraction audio commencent. Sur une réunion de
+/// trente-six minutes, ça fait plusieurs dizaines de minutes pendant lesquelles
+/// bran travaille et l'écran ne montre rien — donc plusieurs dizaines de minutes
+/// pendant lesquelles fermer l'application paraît sans conséquence. Elle reste
+/// désormais montée tant que `AppModel.showsSessionBar` est vrai, et elle affiche
+/// à chaque instant laquelle des trois étapes tourne.
 struct RecordingBar: View {
     @Bindable var model: AppModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -30,10 +40,10 @@ struct RecordingBar: View {
 
     var body: some View {
         Group {
-            if model.isFinalizing {
-                finalizing
-            } else {
+            if isPilotable {
                 controls
+            } else if let step = step {
+                stageView(step)
             }
         }
         .padding(.horizontal, Space.stack)
@@ -47,56 +57,128 @@ struct RecordingBar: View {
         .onChange(of: model.isPaused) { recalibrateTimer() }
     }
 
-    /// Ce que voit l'utilisateur entre le clic sur « Arrêter » et le fichier.
+    // MARK: - Lequel des deux visages
+
+    /// Y a-t-il encore quelque chose **à décider** ?
     ///
-    /// **C'est l'écran qui manquait.** La barre gardait son chrono, sa pastille
-    /// rouge et ses deux boutons pendant toute la finalisation : elle disait
-    /// « j'enregistre » à un moment où plus rien n'était capturé, et le clic
-    /// suivant sur « Arrêter » ne pouvait rien faire. Ici il n'y a plus de
-    /// bouton parce qu'il n'y a plus rien à décider — seulement à attendre, et
-    /// à savoir que l'attente est normale et combien de temps elle dure.
-    private var finalizing: some View {
+    /// C'est le seul arbitre entre les deux visages de la barre, et il est posé
+    /// dans ce sens-là — « pilotable », et non « en train de traiter » — parce
+    /// que les deux états peuvent être vrais en même temps. Une compression de
+    /// vingt minutes n'empêche pas de démarrer la réunion suivante : quand cela
+    /// arrive, ce sont les commandes qui gagnent, parce qu'une session ouverte
+    /// qu'on ne peut plus arrêter est un défaut bien plus grave qu'une étape de
+    /// fond qu'on ne voit pas. L'étape, elle, continue de se dire dans le menu et
+    /// sur la ligne de bibliothèque concernée.
+    ///
+    /// `.starting` compte comme pilotable — c'était déjà le cas — parce qu'une
+    /// session qui démarre doit pouvoir être arrêtée ; `.finalizing`, non : la
+    /// capture est finie, les deux boutons ne sont plus acceptés par la machine,
+    /// et les offrir quand même laisse croire que le premier clic sur « Arrêter »
+    /// n'a pas été pris.
+    private var isPilotable: Bool {
+        model.hasOpenSession && model.isFinalizing == false
+    }
+
+    /// L'étape à peindre quand il n'y a plus rien à piloter.
+    ///
+    /// `model.currentStep` est la source. Le repli fabriqué ici ne couvre qu'un
+    /// cas, et il est court : la machine est déjà passée en `.finalizing` et la
+    /// chaîne n'a pas encore publié sa première étape. Sans lui, la barre se
+    /// réduirait pendant ces quelques images à un liseré vide — un défaut plus
+    /// visible que le titre approximatif qu'on affiche à la place, et qui n'est
+    /// même pas approximatif : à cet instant, bran finalise bel et bien.
+    ///
+    /// Quand les deux sont nuls, ce corps ne rend rien du tout ; c'est un état
+    /// que `showsSessionBar` ne laisse pas arriver, puisqu'il vaut
+    /// `hasOpenSession || currentStep != nil`.
+    private var step: SessionProgress? {
+        if let published = model.currentStep { return published }
+        guard model.isFinalizing else { return nil }
+        return SessionProgress(
+            stage: .finalizing,
+            bytesWritten: model.currentFileSize,
+            recorded: model.elapsed
+        )
+    }
+
+    // MARK: - La chaîne de fin
+
+    /// Ce que voit l'utilisateur entre le clic sur « Arrêter » et le fichier
+    /// utilisable — pour les **trois** travaux, et plus seulement pour le
+    /// premier.
+    ///
+    /// Il n'y a aucun bouton parce qu'il n'y a plus rien à décider : seulement à
+    /// attendre, et à savoir que l'attente est normale, laquelle des trois étapes
+    /// la cause, et combien de temps elle dure.
+    ///
+    /// **Le nom de la réunion est affiché, et ce n'est pas du décor.** La fenêtre
+    /// peut être restée ouverte deux heures et trois réunions ; « Fusion et
+    /// compression de la vidéo… » tout seul ne dit pas laquelle, donc ne dit pas
+    /// si c'est celle qu'on attend pour l'envoyer au CRM.
+    private func stageView(_ step: SessionProgress) -> some View {
         HStack(spacing: Space.stack) {
-            ProgressView()
-                .controlSize(.small)
-                .accessibilityHidden(true)
+            // Une roue **seulement quand rien ne se mesure**. Une roue qui tourne
+            // et une jauge qui avance disent la même chose deux fois ; quand la
+            // jauge existe, c'est elle qui porte le mouvement, et elle le porte
+            // mieux puisqu'elle dit aussi où on en est.
+            if step.fraction == nil {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
+            }
 
             VStack(alignment: .leading, spacing: Space.line) {
-                Text("Finalisation de l'enregistrement…")
+                if let title = model.currentStepTitle {
+                    Text(title)
+                        .font(Type.meta)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+
+                Text(step.title)
                     .font(Type.groupHead)
 
-                Text(finalizingDetail)
+                Text(step.detail)
                     .font(Type.meta)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+
+                if let fraction = step.fraction {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .frame(width: Size.stageProgress)
+                        .padding(.top, Space.tight)
+                        // La compression rapporte par sauts irréguliers — deux
+                        // pour cent d'un coup, puis rien pendant six secondes.
+                        // Animer le trajet rend l'avancement lisible sans rien
+                        // inventer : la valeur d'arrivée reste celle qui a été
+                        // mesurée.
+                        .branAnimation(Motion.state, value: fraction)
+                        .accessibilityHidden(true)
+                }
             }
 
             Spacer(minLength: Space.inset)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Finalisation de l'enregistrement. \(finalizingDetail)")
+        .accessibilityLabel(spokenStage(step))
     }
 
-    /// Trois choses, dans cet ordre : ce qui est déjà sur le disque, combien de
-    /// temps ça va durer, et ce qu'il ne faut pas faire.
+    /// L'étape et son avancement, dits dans l'ordre où on les cherche : ce qui se
+    /// passe, sur quelle réunion, et où ça en est.
     ///
-    /// L'estimation est annoncée comme telle. La consigne — ne pas quitter bran
-    /// — est la seule action possible, donc elle a sa place ; `replayd` survit
-    /// à une fermeture, mais bran ne saurait plus quoi faire du fichier.
-    private var finalizingDetail: String {
-        var parts: [String] = []
-
-        if model.currentFileSize > 0 {
-            parts.append("\(model.currentFileSize.formatted(.byteCount(style: .file))) écrits")
-        }
-        if let estimate = model.finalizationEstimate {
-            let minutes = max(1, Int(estimate.components.seconds / 60))
-            parts.append("environ \(minutes) min")
-        }
-        parts.append("ne quittez pas bran")
-
-        return parts.joined(separator: " · ")
+    /// Les libellés viennent de `SessionProgress`, comme ceux de l'écran : deux
+    /// formulations d'un même état — l'une pour les yeux, l'autre pour VoiceOver
+    /// — divergent au premier changement de texte, et c'est toujours la seconde
+    /// qui reste en arrière parce que personne ne l'entend.
+    private func spokenStage(_ step: SessionProgress) -> String {
+        var spoken = step.title
+        if let title = model.currentStepTitle { spoken += " Réunion \(title)." }
+        return "\(spoken) \(step.detail)"
     }
+
+    // MARK: - Le pilotage
 
     private var controls: some View {
         HStack(spacing: Space.stack) {
@@ -112,9 +194,9 @@ struct RecordingBar: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            .frame(minWidth: 130, alignment: .leading)
+            .frame(minWidth: Size.timerColumn, alignment: .leading)
 
-            Divider().frame(height: 30)
+            Divider().frame(height: Size.barDivider)
 
             titleField
 
@@ -166,7 +248,7 @@ struct RecordingBar: View {
     private var indicator: some View {
         Circle()
             .fill(model.isPaused ? Palette.held : Palette.live)
-            .frame(width: 12, height: 12)
+            .frame(width: Size.liveDot, height: Size.liveDot)
             // Le clignotement s'arrête en pause : une pastille fixe dit
             // « rien ne se passe » sans un mot.
             .opacity(shouldPulse ? 0.35 : 1)
@@ -194,7 +276,7 @@ struct RecordingBar: View {
 
             TextField("Nommer cette réunion…", text: $model.currentTitle)
                 .textFieldStyle(.plain)
-                .font(.body)
+                .font(Type.input)
                 .focused($isTitleFocused)
                 .onSubmit { isTitleFocused = false }
                 .accessibilityLabel("Titre de l'enregistrement en cours")
@@ -202,7 +284,7 @@ struct RecordingBar: View {
         .padding(.horizontal, Space.inset)
         .padding(.vertical, Space.small)
         .background(Palette.well, in: .rect(cornerRadius: Radius.field))
-        .frame(maxWidth: 340)
+        .frame(maxWidth: Size.sessionTitleField)
     }
 
     private var sizeLine: String {

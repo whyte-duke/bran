@@ -252,6 +252,23 @@ public final class AppModel {
             storage.validate()
         }
 
+        // L'heure d'entrée en finalisation, et rien d'autre.
+        //
+        // Elle sert à faire DÉCROÎTRE l'estimation affichée : sans elle, la barre
+        // annonçait « environ 12 min » à la première seconde et « environ 12 min »
+        // encore onze minutes plus tard. Une estimation qui ne bouge pas se lit
+        // comme un blocage, c'est-à-dire exactement le contraire de ce qu'elle
+        // essaie de dire.
+        //
+        // `onTransition` est le journal des transitions de la machine : c'est le
+        // seul endroit qui voie l'entrée dans `.finalizing` quel que soit son
+        // origine — un clic sur « Arrêter », la fenêtre Meet qui se ferme, ou un
+        // arrêt différé que la machine avait mis de côté.
+        engine.onTransition = { [weak self] state in
+            guard let self else { return }
+            if case .finalizing = state { finalizingStartedAt = .now }
+        }
+
         // La conclusion d'une session passe par ici, et par ici seulement.
         // C'est la machine qui décide *quand* — voir `concludeSession`, et
         // `RecordingEngine.onSettled` pour ce que ça répare.
@@ -537,7 +554,14 @@ public final class AppModel {
     // MARK: - État affiché
 
     public var statusSummary: String {
-        switch engine.state {
+        // La chaîne de fin passe devant tout le reste, et c'est le point : c'est
+        // depuis le menu, fenêtre fermée, que l'utilisateur surveille la fin
+        // d'une réunion. « Compression en cours… » sans étape ni pourcentage
+        // était indiscernable d'un blocage — et pendant la finalisation ou
+        // l'extraction de l'audio, le menu ne disait rien du tout.
+        if let step = currentStep { return step.summary }
+
+        return switch engine.state {
         case .recording:
             "Enregistrement — \(elapsedDescription)"
         case .paused:
@@ -545,21 +569,11 @@ public final class AppModel {
         case .starting:
             "Démarrage…"
         case .finalizing:
-            // Le poids écrit est dans le résumé, et pas seulement dans la
-            // fenêtre : c'est depuis le menu que l'utilisateur surveille une
-            // finalisation, fenêtre fermée. « Finalisation du fichier… » tout
-            // seul est indiscernable d'un blocage.
-            currentFileSize > 0
-                ? "Finalisation — \(currentFileSize.formatted(.byteCount(style: .file))) écrits"
-                : "Finalisation du fichier…"
+            "Finalisation du fichier…"
         case .failed(let reason):
             "Échec — \(reason)"
         case .idle:
-            if processingProgress.isEmpty == false {
-                "Compression en cours…"
-            } else {
-                pendingMeeting != nil ? "Réunion détectée — non enregistrée" : "En veille"
-            }
+            pendingMeeting != nil ? "Réunion détectée — non enregistrée" : "En veille"
         }
     }
 
@@ -591,19 +605,14 @@ public final class AppModel {
         if case .finalizing = engine.state { true } else { false }
     }
 
-    /// Ordre de grandeur du temps de finalisation restant, ou `nil` si on ne
-    /// peut rien en dire.
-    ///
-    /// Fondé sur une mesure et donnée comme telle : le 11 août 2026, 2 191 s
-    /// enregistrées ont demandé 729 s de finalisation, soit un tiers. C'est un
-    /// ordre de grandeur, pas une promesse — d'où l'« environ » dans le texte
-    /// qui l'affiche, et l'absence de barre de progression, qui prétendrait à
-    /// une précision qu'on n'a pas.
-    public var finalizationEstimate: Duration? {
-        let recorded = elapsed.components.seconds
-        guard recorded > 30 else { return nil }
-        return .seconds(recorded / 3)
-    }
+    // L'estimation du temps de finalisation vivait ici. Elle est partie dans
+    // `SessionProgress.remaining`, avec la mesure qui la fonde — le 11 août
+    // 2026, 2 191 s enregistrées ont demandé 729 s de finalisation, soit un
+    // tiers — et surtout avec les deux autres étapes, qui n'en avaient aucune.
+    // La garder ici en aurait fait la seule estimation calculée à part, dans le
+    // modèle, pendant que les deux autres se calculaient dans BranCore ; et
+    // celle-ci était en plus la seule à ne jamais décroître, faute de savoir
+    // depuis quand la finalisation durait.
 
     /// Vrai tant qu'une session est ouverte — **y compris pendant `.starting` et
     /// `.finalizing`**. C'est ce qui commande l'affichage de la barre de
@@ -627,11 +636,131 @@ public final class AppModel {
 
     // MARK: - Post-traitement
 
-    /// Progression de la fusion + compression, par enregistrement. Transitoire :
+    /// Où en est la chaîne de fin de session, par enregistrement. Transitoire :
     /// vit en mémoire, jamais sur le disque.
-    public private(set) var processingProgress: [UUID: Double] = [:]
+    ///
+    /// Remplace un `[UUID: Double]` qui ne portait qu'une fraction. Une fraction
+    /// ne dit pas de quoi elle est la fraction : l'interface écrivait « Fusion et
+    /// compression… » en dur, y compris pendant l'extraction de l'audio, et
+    /// n'avait rien du tout à dire entre les deux.
+    public private(set) var pipeline: [UUID: SessionProgress] = [:]
+
+    /// L'enregistrement dont la chaîne de fin tourne en ce moment, s'il y en a un.
+    ///
+    /// Explicite plutôt que déduit d'un `pipeline.values.first` : l'ordre d'un
+    /// dictionnaire n'est pas défini, et démarrer une réunion pendant que la
+    /// précédente compresse est un cas réel — la barre choisirait alors une
+    /// entrée au hasard.
+    /// Les chaînes de fin en cours, dans l'ordre où elles ont commencé.
+    ///
+    /// **Un seul identifiant ne suffisait pas.** Une réunion peut compresser
+    /// pendant une demi-heure ; démarrer et terminer la suivante dans cet
+    /// intervalle est un cas ordinaire, pas une acrobatie. Avec une seule
+    /// variable, la seconde prenait la place de la première, puis la libérait en
+    /// finissant : la barre et le menu redevenaient muets alors qu'une
+    /// compression tournait toujours — c'est-à-dire exactement le silence que ce
+    /// lot existe pour supprimer, réintroduit par la porte de derrière.
+    ///
+    /// La plus ancienne est celle qu'on montre : c'est celle qui a le plus de
+    /// chances d'aboutir bientôt, et c'est celle qu'on attend depuis le plus
+    /// longtemps.
+    private var stepOrder: [UUID] = []
+
+    private var stepNames: [UUID: String] = [:]
+
+    private var currentStepID: UUID? { stepOrder.first }
+
+    private var currentStepName: String? { currentStepID.flatMap { stepNames[$0] } }
+
+    /// Depuis quand la finalisation dure. Sert à retrancher le temps déjà passé
+    /// de l'estimation, pour que celle-ci décroisse au lieu de rester figée.
+    private var finalizingStartedAt: Date?
+
+    /// L'étape à montrer, ou `nil` quand il n'y a rien en cours.
+    ///
+    /// La finalisation est fabriquée ici plutôt que rangée dans `pipeline` :
+    /// elle appartient à `RecordingEngine`, pas au post-traitement, et la
+    /// dupliquer dans le dictionnaire créerait deux sources de vérité pour un
+    /// état que la machine connaît déjà. Le reste de l'application n'a pas à
+    /// savoir que la chaîne a deux propriétaires.
+    public var currentStep: SessionProgress? {
+        if isFinalizing {
+            return SessionProgress(
+                stage: .finalizing,
+                bytesWritten: currentFileSize,
+                recorded: elapsed,
+                elapsed: .seconds(Int(Date.now.timeIntervalSince(finalizingStartedAt ?? .now)))
+            )
+        }
+        return currentStepID.flatMap { pipeline[$0] }
+    }
+
+    /// De quelle réunion il s'agit. Quand la fenêtre est restée ouverte deux
+    /// heures, ce n'est pas du décor.
+    public var currentStepTitle: String? {
+        if isFinalizing {
+            let typed = currentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            return engine.state.meeting?.title ?? (typed.isEmpty ? nil : typed)
+        }
+        return currentStepName
+    }
+
+    /// La barre de pilotage doit-elle rester à l'écran ?
+    ///
+    /// **C'était le défaut**, et il tenait en un mot : la barre était montée sur
+    /// `hasOpenSession`, qui devient faux à l'instant où la machine repasse au
+    /// repos — c'est-à-dire juste AVANT que la fusion, la compression et
+    /// l'extraction de l'audio commencent. Sur une réunion de trente-six minutes,
+    /// ça faisait plusieurs dizaines de minutes de travail réel pendant
+    /// lesquelles l'écran ne montrait plus rien, et pendant lesquelles fermer
+    /// bran — le geste que le silence invite à faire — perdait le travail en
+    /// cours.
+    public var showsSessionBar: Bool { hasOpenSession || currentStep != nil }
 
     public private(set) var lastSaving: String?
+
+    /// Une information neutre, qui n'est pas une panne : le résultat d'un
+    /// rangement, la place gagnée par une compression.
+    ///
+    /// Séparée de `lastFailure` exprès. Faire passer un succès par le canal
+    /// d'échec — bandeau d'avertissement, triangle orange — apprend à ignorer le
+    /// bandeau, et c'est le bandeau qu'on a besoin de voir le jour où quelque
+    /// chose rate vraiment.
+    public var lastNotice: String?
+
+    // MARK: - Rangement des anciens enregistrements
+
+    /// Combien d'enregistrements sont encore rangés à plat, à l'ancienne.
+    var legacyRecordingCount: Int { store.legacyCount }
+
+    private(set) var isTidying = false
+
+    /// Range les anciens enregistrements, un dossier chacun.
+    ///
+    /// **Sur demande explicite, jamais au lancement.** Déplacer plusieurs
+    /// gigaoctets de réunions à l'insu de quelqu'un, au moment précis où il
+    /// ouvre l'application, est le genre d'initiative qu'on ne prend pas — même
+    /// quand le résultat est meilleur. Et si le déplacement tourne mal à
+    /// mi-chemin, il vaut mieux que ce soit après un clic que pendant un
+    /// démarrage.
+    ///
+    /// **Interdit aussi pendant la chaîne de fin**, et pas seulement pendant la
+    /// capture. Une compression lit des morceaux bruts et écrit un fichier final
+    /// dans un dossier ; les déplacer sous elle, c'est retirer le sol. Le garde
+    /// d'origine ne regardait que `hasOpenSession`, qui est déjà faux quand la
+    /// compression tourne — la fenêtre de tir durait donc toute la durée du
+    /// post-traitement, c'est-à-dire le moment précis où l'utilisateur, qui
+    /// vient de raccrocher, ouvre les réglages pour ranger ses réunions.
+    func tidyRecordingFolders() {
+        guard showsSessionBar == false, isTidying == false else { return }
+        isTidying = true
+
+        Task {
+            let outcome = await store.tidyLegacyRecordings()
+            isTidying = false
+            if let outcome { lastNotice = outcome }
+        }
+    }
 
     // MARK: - Actions
 
@@ -746,38 +875,96 @@ public final class AppModel {
         // nom de segment les rendrait invisibles. Mais après un échec ils ne
         // sont PAS effacés : `replayd` n'avait peut-être pas fini d'écrire, et
         // la fusion peut être plus courte que la source.
+        //
+        // Le titre est relu dans la bibliothèque plutôt que pris sur `meeting` :
+        // la réunion a pu être nommée à la main pendant qu'elle tournait, et
+        // c'est ce nom-là qui doit se retrouver sur le dossier.
         await postProcess(
             meeting.id,
+            title: store.recordings.first { $0.id == meeting.id }?.metadata.title ?? meeting.title,
             segments: segments,
             preservingSegments: verdict.writesEndedAt == false
         )
     }
 
-    /// Fusion des segments puis compression, en une seule passe d'encodage.
+    /// Fusion des segments, compression, puis préparation de l'audio du CRM.
     ///
     /// Lancé après la finalisation, jamais pendant : encoder en parallèle d'une
     /// capture volerait au flux le matériel vidéo dont il a besoin.
-    private func postProcess(_ id: UUID, segments: [URL], preservingSegments: Bool = false) async {
+    ///
+    /// **Le nom du dossier est aligné ici, et pas ailleurs.** C'est le premier
+    /// instant où le titre définitif est connu : la réunion a pu être nommée à la
+    /// main pendant qu'elle tournait, ou rattachée à un RDV du CRM qui porte le
+    /// nom de l'entreprise. Renommer avant d'écrire le fichier final évite d'avoir
+    /// à renommer le fichier ensuite, donc évite une seconde opération qui peut
+    /// échouer à mi-chemin.
+    private func postProcess(
+        _ id: UUID,
+        title: String?,
+        segments: [URL],
+        preservingSegments: Bool = false
+    ) async {
         guard segments.isEmpty == false else { return }
 
-        let destination = store.root.appending(path: "\(id.uuidString).mp4")
-        processingProgress[id] = 0
+        stepOrder.append(id)
+        stepNames[id] = title
+        defer {
+            pipeline[id] = nil
+            stepOrder.removeAll { $0 == id }
+            stepNames[id] = nil
+        }
+
+        let folder = await store.alignFolderName(for: id)
+        let pieces = Self.relocate(segments, into: folder)
+
+        // La destination vient de `MeetingBundle` et n'est pas recomposée ici :
+        // c'est la même règle qui décide où la vidéo s'écrit et où le balayage
+        // ira la chercher, et deux endroits pour une même règle finissent
+        // toujours par diverger d'une extension ou d'un séparateur.
+        //
+        // Le repli à plat couvre l'enregistrement dont le dossier n'a pas pu
+        // être créé : il garde l'ancienne disposition, que la bibliothèque lit
+        // toujours, et le rangement des réglages pourra s'en occuper plus tard.
+        let destination = folder.map(MeetingBundle.videoDestination(in:))
+            ?? store.root.appending(path: "\(id.uuidString).mp4")
+
+        let startedAt = Date.now
+        pipeline[id] = SessionProgress(stage: .merging, fraction: 0)
 
         do {
             let outcome = try await processor.process(
-                segments: segments,
+                segments: pieces,
                 into: destination,
                 preservingSegments: preservingSegments
             ) { fraction in
-                Task { @MainActor [weak self] in self?.processingProgress[id] = fraction }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    // **Un rapport en retard ne ressuscite pas une étape
+                    // terminée.** `requestMediaDataWhenReady` peut rappeler après
+                    // la dernière image, et cette tâche est postée sur l'acteur
+                    // principal : elle peut donc s'exécuter APRÈS que le
+                    // post-traitement a rendu la main et vidé `pipeline`.
+                    // Réécrire l'entrée à ce moment-là laissait une compression
+                    // fantôme, figée à quelques pour cent, sur la ligne de
+                    // bibliothèque d'une réunion pourtant terminée — et jusqu'à
+                    // la fermeture de l'application, puisque plus personne ne
+                    // devait la nettoyer.
+                    guard self.stepOrder.contains(id) else { return }
+                    self.pipeline[id] = SessionProgress(
+                        stage: .merging,
+                        fraction: fraction,
+                        elapsed: .seconds(Int(Date.now.timeIntervalSince(startedAt)))
+                    )
+                }
             }
 
-            processingProgress[id] = nil
             await store.completeProcessing(
                 id: id,
                 originalBytes: outcome.originalBytes,
                 segmentCount: segments.count
             )
+
+            await prepareAudio(for: id, video: destination)
 
             // Le ménage raté se dit. Sans ça, la fusion annonçait un gain de
             // place que le disque n'avait pas fait : les morceaux étaient
@@ -797,13 +984,71 @@ public final class AppModel {
             await store.reload()
             await offerUpload(for: id)
         } catch {
-            processingProgress[id] = nil
             // Les segments sont intacts : le post-traitement ne les supprime
             // qu'après avoir écrit un fichier final non vide.
             report("Compression impossible : \(error.localizedDescription) — les segments bruts sont conservés.")
         }
 
         await store.reload()
+    }
+
+    /// Extrait l'audio destiné au CRM et **le laisse à côté de la vidéo**.
+    ///
+    /// Avant, cette extraction n'avait lieu qu'au moment de l'envoi, dans le
+    /// dossier temporaire, et le fichier était effacé en sortant. Trois
+    /// conséquences, toutes mauvaises : impossible d'écouter ce qui est
+    /// réellement parti au CRM ; impossible de le renvoyer à la main le jour où
+    /// le CRM le refuse ; et l'attente de l'extraction tombait sur l'utilisateur
+    /// au pire moment, celui où il venait de cliquer « envoyer ».
+    ///
+    /// Fait ici, c'est du temps machine pris pendant que personne n'attend — la
+    /// vidéo vient d'être encodée, on est déjà dans le post-traitement — et le
+    /// dossier du rendez-vous contient dès lors tout ce qu'il annonce : la vidéo,
+    /// l'audio, la fiche.
+    ///
+    /// **Un échec ici n'est pas un échec de l'enregistrement.** La réunion est
+    /// sur le disque, complète ; seule la commodité de l'envoi est perdue, et
+    /// `UploadService` sait toujours extraire à la demande. Il se dit, il ne
+    /// bloque rien.
+    private func prepareAudio(for id: UUID, video: URL) async {
+        guard let recording = store.recordings.first(where: { $0.id == id }),
+              let destination = recording.audioDestination
+        else { return }
+
+        pipeline[id] = SessionProgress(stage: .exportingAudio)
+
+        do {
+            _ = try await AudioExporter.extractSpeechAudio(from: video, to: destination)
+        } catch {
+            report(
+                "Audio du CRM non préparé pour « \(recording.displayTitle) » : "
+                + "\(error.localizedDescription) La vidéo, elle, est intacte."
+            )
+        }
+    }
+
+    /// Retrouve les morceaux après un renommage de dossier.
+    ///
+    /// `alignFolderName` renomme le dossier du rendez-vous ; les URL des segments,
+    /// elles, ont été relevées avant, et désignent l'ancien chemin. Sans ce
+    /// rattrapage, `PostProcessor` ne trouverait plus aucun fichier et lèverait
+    /// « Aucun segment exploitable » sur une réunion parfaitement enregistrée.
+    ///
+    /// **Le test d'existence dans les deux sens n'est pas une précaution
+    /// décorative.** Quand la création du dossier a échoué, les segments sont
+    /// restés à plat dans la racine : les réécrire vers un dossier les ferait
+    /// pointer vers des fichiers qui n'existent pas, et transformerait un
+    /// enregistrement récupérable en enregistrement perdu. On ne déplace donc une
+    /// URL que si l'ancienne a disparu **et** que la nouvelle existe.
+    private static func relocate(_ segments: [URL], into folder: URL?) -> [URL] {
+        guard let folder else { return segments }
+        let manager = FileManager.default
+
+        return segments.map { url in
+            guard manager.fileExists(atPath: url.path(percentEncoded: false)) == false else { return url }
+            let candidate = folder.appending(path: url.lastPathComponent)
+            return manager.fileExists(atPath: candidate.path(percentEncoded: false)) ? candidate : url
+        }
     }
 
     /// Refus explicite de l'utilisateur.
@@ -827,9 +1072,17 @@ public final class AppModel {
     /// Le test porte sur la session entière, pas sur le seul `.recording` : en
     /// pause, la reprise ouvrirait son segment dans le nouveau dossier et la
     /// fusion irait chercher des morceaux répartis sur deux racines.
+    ///
+    /// **Et sur la chaîne de fin aussi**, pour la même raison poussée d'un cran :
+    /// la fusion lit les morceaux dans l'ancienne racine et y écrit son fichier
+    /// final, pendant que la bibliothèque, elle, aurait déjà déménagé. La réunion
+    /// se serait terminée d'écrire dans un dossier que plus personne ne balaie —
+    /// invisible, et attribuée à une panne. `showsSessionBar` est exactement le
+    /// prédicat voulu : il vaut « bran a encore quelque chose en cours sur cette
+    /// racine ».
     func chooseStorageFolder() {
-        guard hasOpenSession == false else {
-            report("Impossible de changer de dossier pendant un enregistrement.")
+        guard showsSessionBar == false else {
+            report("Impossible de changer de dossier pendant un enregistrement ou son traitement.")
             return
         }
         guard storage.chooseFolder() else { return }
@@ -837,7 +1090,7 @@ public final class AppModel {
     }
 
     func resetStorageFolder() {
-        guard hasOpenSession == false else { return }
+        guard showsSessionBar == false else { return }
         guard storage.resetToDefault() else { return }
         applyStorageRoot()
     }
@@ -937,7 +1190,28 @@ public final class AppModel {
         )
     }
 
+    /// Une demande de démarrage est en vol.
+    ///
+    /// **Le verrou manquait, et il coûtait un dossier fantôme.** `begin` crée le
+    /// dossier du rendez-vous et y écrit la fiche AVANT de demander le démarrage
+    /// à la machine. Celle-ci ignore un second `.start` — c'est un de ses
+    /// invariants — mais elle l'ignore *après* : deux clics rapprochés sur
+    /// « Enregistrer », ou un clic doublé par la notification, fabriquaient donc
+    /// deux dossiers et deux fiches, dont une pour une réunion qui n'a jamais
+    /// démarré. Pire, le second `useFolder` prenait la place du premier : les
+    /// morceaux de la réunion qui tournait réellement partaient dans le dossier
+    /// de celle qui n'existait pas.
+    ///
+    /// Le verrou couvre toute la durée de `begin`, `await` compris — c'est
+    /// exactement la fenêtre où la machine n'est pas encore passée en
+    /// `.starting` et où `hasOpenSession` répond donc encore « non ».
+    private var isOpeningSession = false
+
     private func begin(_ meeting: MeetingRef) async {
+        guard hasOpenSession == false, isOpeningSession == false else { return }
+        isOpeningSession = true
+        defer { isOpeningSession = false }
+
         permissions.refresh()
         guard permissions.canRecord else {
             report("Autorisation manquante — enregistrement non démarré.")
@@ -948,10 +1222,17 @@ public final class AppModel {
         pendingMeeting = nil
         notifications.withdrawProposals()
 
-        // Le `.json` est écrit AVANT le démarrage. Un `.json` sans `endedAt`
-        // signale ensuite une session interrompue : c'est la sentinelle du §10,
-        // sans fichier `.lock` séparé à gérer.
-        store.beginSession(meeting)
+        // Le dossier du rendez-vous et sa fiche sont créés AVANT le démarrage.
+        // Une fiche sans `endedAt` signale ensuite une session interrompue :
+        // c'est la sentinelle du §10, sans fichier `.lock` séparé à gérer.
+        //
+        // La capture apprend le dossier dans la foulée. Un `nil` — création
+        // refusée — n'empêche pas d'enregistrer : les segments repartent à plat
+        // dans la racine, et la bibliothèque sait lire les deux dispositions.
+        // Perdre une réunion parce qu'un dossier n'a pas pu être créé serait
+        // sans commune mesure avec le désagrément d'un fichier mal rangé.
+        let folder = store.beginSession(meeting)
+        await capture.useFolder(folder)
 
         if let booking = linkedBooking {
             await store.mutate(meeting.id) { metadata in
@@ -1118,6 +1399,7 @@ public final class AppModel {
         currentFileSize = 0
         currentTitle = ""
         accumulatedPause = 0
+        finalizingStartedAt = nil
     }
 
     /// Cumul des pauses déjà terminées, plus celle en cours.

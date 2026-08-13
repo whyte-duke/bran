@@ -30,8 +30,18 @@ struct RecordingDetailView: View {
         .navigationTitle(recording.displayTitle)
         .toolbar {
             ToolbarItem {
-                Button("Afficher dans le Finder", systemImage: "folder") {
-                    NSWorkspace.shared.activateFileViewerSelecting(recording.revealTargets)
+                // « Ouvrir » plutôt que « Afficher » quand il y a un dossier de
+                // rendez-vous : ce qu'on veut voir, c'est son contenu — la vidéo,
+                // l'audio du CRM et la fiche côte à côte —, pas une icône
+                // sélectionnée dans une liste de cent autres.
+                if recording.isFlat == false {
+                    Button("Ouvrir le dossier", systemImage: "folder") {
+                        NSWorkspace.shared.open(recording.folderURL)
+                    }
+                } else {
+                    Button("Afficher dans le Finder", systemImage: "folder") {
+                        NSWorkspace.shared.activateFileViewerSelecting(recording.revealTargets)
+                    }
                 }
             }
         }
@@ -75,6 +85,17 @@ struct RecordingDetailView: View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: Space.inset)], alignment: .leading, spacing: Space.inset) {
             FactTile(label: "Durée", value: recording.durationDescription)
             FactTile(label: "Poids", value: recording.sizeDescription)
+
+            // **Ce que le CRM recevra, et qu'on peut désormais écouter.**
+            // L'audio était fabriqué dans le dossier temporaire au moment de
+            // l'envoi puis effacé aussitôt : impossible de vérifier ce qui était
+            // réellement parti, impossible de le renvoyer à la main le jour où le
+            // CRM le refusait. Il vit maintenant dans le dossier du rendez-vous,
+            // et son poids se lit ici — c'est le chiffre qu'on cherche quand un
+            // envoi est refusé pour cause de fichier trop lourd.
+            if let audio = recording.audioSizeDescription {
+                FactTile(label: "Audio du CRM", value: audio)
+            }
 
             if let rate = recording.rateDescription {
                 FactTile(label: "Débit", value: rate)

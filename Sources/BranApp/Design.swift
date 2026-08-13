@@ -227,6 +227,64 @@ enum Size {
     /// pose en s'arrêtant sur une ligne : « est-ce bien celui-là ? ». Lire en
     /// entier est l'affaire de l'onglet Presse-papiers, qui a la place.
     static let clipboardExpandedLines = 5
+
+    // MARK: La barre de session
+
+    /// **La pastille rouge d'un enregistrement en cours.**
+    ///
+    /// Douze points, soit à peu près le point d'un « i » en `Type.timer` : la
+    /// pastille se lit comme la ponctuation du chrono qu'elle précède, et non
+    /// comme un bouton. Plus grande elle demande à être cliquée, plus petite
+    /// elle disparaît dans son propre clignotement, qui la descend à 35 %
+    /// d'opacité une seconde sur deux.
+    ///
+    /// Elle vivait en clair dans `RecordingBar`, comme les trois valeurs qui
+    /// suivent : la barre de session était la dernière vue de l'application à
+    /// tenir sa mise en page dans ses propres chiffres.
+    static let liveDot: CGFloat = 12
+
+    /// **Le filet vertical de la barre de session**, entre le chrono et le champ
+    /// de titre.
+    ///
+    /// Un séparateur ne se dimensionne pas sur lui-même : il couvre la hauteur du
+    /// bloc qu'il sépare — `Type.timer` au-dessus de `Type.meta` — sans la
+    /// dépasser. Plus haut, il touche les bords de la barre et la coupe en deux
+    /// au lieu de séparer deux groupes ; plus court, il se lit comme un tiret
+    /// posé au milieu de rien. 30 points, c'est ce bloc de deux lignes moins ses
+    /// respirations.
+    static let barDivider: CGFloat = 30
+
+    /// **La colonne du chrono**, largeur minimale.
+    ///
+    /// Un chrono qui passe de « 9 min 59 s » à « 10 min 00 s » gagne un
+    /// caractère, et sans plancher c'est tout ce qui est à sa droite — le filet,
+    /// le champ de titre, les deux boutons — qui se décale d'un cran, une fois
+    /// par minute, pendant une heure. `monospacedDigit()` fixe la largeur d'un
+    /// chiffre, pas leur nombre : lui seul ne suffit pas. 130 points portent la
+    /// forme longue d'une réunion de deux heures en `Type.timer`.
+    static let timerColumn: CGFloat = 130
+
+    /// **Le champ où l'on nomme la réunion en cours**, largeur maximale.
+    ///
+    /// C'est le seul élément élastique de la barre : sans plafond il avale toute
+    /// la largeur d'une fenêtre plein écran, et le titre qu'on y tape se perd au
+    /// milieu d'un champ de mille points. 340 points portent une cinquantaine de
+    /// caractères en `Type.input`, c'est-à-dire l'ordre de grandeur du plafond de
+    /// 60 que `MeetingFolder` impose au titre dans le nom du dossier : au-delà,
+    /// ce qu'on tape ne serait de toute façon pas repris en entier sur le disque.
+    static let sessionTitleField: CGFloat = 340
+
+    /// **La jauge d'une étape de fin de session**, dans la barre de pilotage.
+    ///
+    /// Fixe, et surtout pas étirée sur la largeur de la fenêtre. La barre est
+    /// posée sous une fenêtre qui peut faire mille points de large, et une jauge
+    /// de mille points fait paraître immobile un travail qui avance d'un pour
+    /// cent toutes les dix secondes : le pixel qu'elle gagne ne se voit pas. À
+    /// 260 points, un pour cent vaut 2,6 points — un mouvement qu'on perçoit
+    /// depuis l'autre bout du bureau, ce qui est exactement la question que se
+    /// pose quelqu'un qui attend la fin d'une compression. La jauge se range sous
+    /// les deux lignes de texte qu'elle complète, et ne les dépasse pas.
+    static let stageProgress: CGFloat = 260
 }
 
 // MARK: - Typographie

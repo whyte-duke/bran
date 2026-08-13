@@ -134,13 +134,32 @@ final class UploadService {
             return
         }
 
-        let audioURL = FileManager.default.temporaryDirectory
-            .appending(path: "\(recording.id.uuidString).m4a")
-        defer { try? FileManager.default.removeItem(at: audioURL) }
+        // **Le piège de cette méthode.** Avant, l'audio partait toujours dans le
+        // dossier temporaire et un `defer` inconditionnel l'effaçait en
+        // sortant. Maintenant qu'il a le droit de rester à côté de la vidéo,
+        // un `defer` inconditionnel effacerait le fichier que l'utilisateur
+        // vient justement de demander à garder — et il l'effacerait aussi sur
+        // le chemin de réutilisation, c'est-à-dire un fichier que cette méthode
+        // n'a même pas produit.
+        //
+        // D'où cette variable : elle ne vaut quelque chose que dans le cas où
+        // bran a écrit dans son propre dossier temporaire, et le `defer` la lit
+        // à la sortie, donc après que `prepareAudio` a tranché.
+        var temporaryFile: URL?
+        defer {
+            if let temporaryFile { try? FileManager.default.removeItem(at: temporaryFile) }
+        }
 
         do {
+            // Le même état pour les deux chemins : que l'audio soit extrait ou
+            // relu, ce que l'utilisateur voit est « bran prépare le fichier ».
+            // Sur le chemin de réutilisation il ne dure que le temps d'un
+            // `AVURLAsset`, et inventer un état de plus pour ça n'aurait servi
+            // qu'à faire clignoter l'interface.
             states[recording.id] = .extractingAudio
-            let audio = try await AudioExporter.extractSpeechAudio(from: recording.url, to: audioURL)
+            let prepared = try await prepareAudio(for: recording)
+            temporaryFile = prepared.temporary
+            let audio = prepared.audio
 
             let created = try await client.createTranscription(
                 CRMCreateRequest(
@@ -192,6 +211,98 @@ final class UploadService {
             states[recording.id] = .failed(message)
             await store.mutate(recording.id) { $0.crmError = message }
         }
+    }
+
+    /// Le fichier audio à envoyer, et — s'il y en a un — celui qu'il faudra
+    /// effacer en sortant.
+    ///
+    /// Trois chemins, dans cet ordre.
+    ///
+    /// 1. **L'audio est déjà là et il est bon** : on le réutilise tel quel.
+    ///    Ré-encoder trente-six minutes d'audio qu'on possède déjà, c'est
+    ///    plusieurs minutes prises à l'utilisateur pour produire un fichier
+    ///    identique à celui qui est sous ses yeux. Sa taille et sa durée sont
+    ///    relues sur le disque (`inspectPreparedAudio`) : les métadonnées de
+    ///    l'enregistrement décrivent la vidéo, pas ce `.m4a`, et le CRM compare
+    ///    ce qu'on lui annonce à ce qu'il reçoit.
+    /// 2. **L'enregistrement a un dossier** : on extrait vers
+    ///    `audioDestination` et on **garde** le fichier. C'est ce que
+    ///    l'utilisateur a demandé : l'audio du rendez-vous à côté de sa vidéo,
+    ///    disponible sans repasser par bran. Le prochain envoi tombera alors
+    ///    dans le cas 1.
+    /// 3. **Ancien enregistrement à plat** (`audioDestination == nil`) : il n'y
+    ///    a pas de dossier où déposer quoi que ce soit, et semer des `.m4a`
+    ///    dans la racine de la bibliothèque à côté des vidéos serait un gain
+    ///    douteux payé par du désordre permanent. On repasse par le dossier
+    ///    temporaire et on efface en sortant, exactement comme avant.
+    private func prepareAudio(
+        for recording: Recording
+    ) async throws -> (audio: AudioExporter.Result, temporary: URL?) {
+        if let existing = recording.audioURL,
+           isAudioStillCurrent(existing, for: recording),
+           let reused = await AudioExporter.inspectPreparedAudio(at: existing) {
+            return (reused, nil)
+        }
+
+        // **Rien à nettoyer ici, et surtout rien à effacer.**
+        //
+        // Cette fonction effaçait la destination quand l'extraction échouait,
+        // pour qu'un fichier à moitié écrit ne devienne pas l'`audioURL` du
+        // prochain envoi — plus récent que la vidéo, d'une durée parfaitement
+        // lisible, donc réutilisé sans que rien ne paraisse anormal, et le CRM
+        // aurait transcrit la moitié de la réunion.
+        //
+        // Le problème est réglé une couche plus bas, et mieux :
+        // `extractSpeechAudio` encode désormais dans un brouillon posé à côté et
+        // ne le met en place qu'une fois mesuré. La destination n'est donc
+        // jamais à moitié écrite — et l'effacer ici ferait exactement le dégât
+        // qu'on cherchait à éviter, puisqu'elle contient l'audio VALABLE de
+        // l'envoi précédent, celui qu'on vient de décider de ne pas réutiliser.
+        func extract(to destination: URL) async throws -> AudioExporter.Result {
+            try await AudioExporter.extractSpeechAudio(from: recording.url, to: destination)
+        }
+
+        if let destination = recording.audioDestination {
+            let audio = try await extract(to: destination)
+            return (audio, nil)
+        }
+
+        let scratch = FileManager.default.temporaryDirectory
+            .appending(path: "\(recording.id.uuidString).m4a")
+        let audio = try await extract(to: scratch)
+        return (audio, scratch)
+    }
+
+    /// L'audio conservé décrit-il encore la vidéo qui est sur le disque ?
+    ///
+    /// **Réutiliser sans vérifier enverrait au CRM un audio périmé**, et c'est
+    /// un scénario réel, pas théorique : la vidéo finale est réécrite après
+    /// coup — recollage des morceaux puis passe de compression — et une session
+    /// interrompue peut être reprise et refusionnée bien après qu'un premier
+    /// envoi a préparé son `.m4a`. Le compte-rendu porterait alors sur une
+    /// version de la réunion qui n'existe plus, sans que rien ne le signale :
+    /// la taille et la durée seraient cohérentes, simplement fausses.
+    ///
+    /// La comparaison porte sur les dates de modification, avec une seconde de
+    /// tolérance pour la granularité du système de fichiers. Comparer les
+    /// durées était l'autre piste : plus intuitif, mais un recollage change
+    /// rarement la durée totale de plus d'une image — il aurait laissé passer
+    /// précisément le cas qu'on cherche à attraper.
+    ///
+    /// Vidéo illisible (fichier déplacé, disque externe débranché) : on garde
+    /// l'audio. C'est alors la seule trace de la réunion, et refuser de
+    /// l'envoyer au nom d'une comparaison impossible n'aiderait personne.
+    private func isAudioStillCurrent(_ audioURL: URL, for recording: Recording) -> Bool {
+        func modificationDate(of url: URL) -> Date? {
+            let attributes = try? FileManager.default
+                .attributesOfItem(atPath: url.path(percentEncoded: false))
+            return attributes?[.modificationDate] as? Date
+        }
+
+        guard let audioDate = modificationDate(of: audioURL) else { return false }
+        guard let videoDate = modificationDate(of: recording.url) else { return true }
+
+        return audioDate >= videoDate.addingTimeInterval(-1)
     }
 
     /// `Closing_2026-08-04_orpheo.m4a` — lisible dans le CRM sans avoir à

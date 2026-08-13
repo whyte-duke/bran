@@ -84,6 +84,25 @@ public actor CaptureSession: CaptureBackend {
         settings.storageRoot = url
     }
 
+    /// Le dossier du rendez-vous qui va démarrer, quand la bibliothèque a réussi
+    /// à le créer.
+    ///
+    /// Posé par `AppModel` juste avant `start(_:)`, et volontairement séparé de
+    /// `updateStorageRoot` : la racine est un réglage qui vaut pour toutes les
+    /// sessions, celui-ci ne vaut que pour la suivante.
+    ///
+    /// **`nil` est un cas prévu, pas une erreur de programmation.** Si la
+    /// création du dossier échoue — disque plein, volume démonté, droits retirés
+    /// —, les segments repartent à plat dans la racine, sous leur ancien nom
+    /// d'UUID. C'est moche et c'est exactement ce qu'il faut : perdre une réunion
+    /// parce qu'un `mkdir` a échoué serait sans commune mesure avec le désagrément
+    /// d'un fichier mal rangé, et la bibliothèque sait lire les deux dispositions.
+    public func useFolder(_ url: URL?) {
+        sessionFolder = url
+    }
+
+    private var sessionFolder: URL?
+
     public func start(_ meeting: MeetingRef) async throws -> URL {
         session = (meeting, 0)
         return try await openSegment()
@@ -279,10 +298,29 @@ public actor CaptureSession: CaptureBackend {
 
     // MARK: - Détails
 
-    /// `<uuid>-seg000.mp4`. Le fichier final prendra `<uuid>.mp4` après fusion,
-    /// ce qui rend les intermédiaires reconnaissables au premier coup d'œil —
-    /// et supprimables sans risque si quoi que ce soit tourne mal.
+    /// Où va le morceau qui s'ouvre.
+    ///
+    /// Dans le dossier du rendez-vous quand il y en a un, sous
+    /// `2026-08-11 09h57-seg000.mp4`. Le suffixe `-seg` reste : il rend les
+    /// intermédiaires reconnaissables au premier coup d'œil, et supprimables sans
+    /// risque si quoi que ce soit tourne mal.
+    ///
+    /// **La base du nom est l'horodatage seul, sans le titre**, alors que le
+    /// dossier et le fichier final, eux, le portent. Ce n'est pas une
+    /// incohérence : un segment s'ouvre pendant la réunion, souvent avant que
+    /// quiconque l'ait nommée, et il sera relu après un éventuel renommage du
+    /// dossier. Lui donner un nom qui dépend du titre reviendrait à faire
+    /// dépendre la fusion d'une chaîne que l'utilisateur peut changer entre-temps.
+    ///
+    /// Sans dossier — voir `useFolder(_:)` —, on retombe sur l'ancienne
+    /// disposition à plat, que la bibliothèque sait toujours lire.
     private func makeSegmentURL(for meeting: MeetingRef, index: Int) throws -> URL {
+        if let folder = sessionFolder {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let base = MeetingFolder.stamp(meeting.startedAt)
+            return folder.appending(path: MeetingFolder.segmentName(base: base, index: index))
+        }
+
         try FileManager.default.createDirectory(at: settings.storageRoot, withIntermediateDirectories: true)
         let suffix = String(format: "seg%03d", index)
         return settings.storageRoot.appending(path: "\(meeting.id.uuidString)-\(suffix).mp4")

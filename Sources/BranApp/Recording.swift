@@ -22,7 +22,65 @@ struct Recording: Identifiable, Equatable, Sendable {
     /// c'est alors la seule chose qui existe de la réunion.
     var segmentURLs: [URL] = []
 
+    /// Le dossier tel que le balayage l'a trouvé.
+    ///
+    /// `nil` pour les valeurs construites à la main — les aperçus SwiftUI — et
+    /// c'est la raison d'être de cette propriété séparée : `folderURL` est
+    /// déclaré non optionnel dans l'API, mais aucune valeur par défaut sensée
+    /// n'existe à la compilation (la racine de stockage est un réglage, pas une
+    /// constante). Un défaut factice du genre `/` aurait fait pointer les
+    /// aperçus, et le premier bug de câblage, vers la racine du disque.
+    var scannedFolder: URL?
+
+    /// Ancienne disposition : le fichier est à plat dans la racine, sous son nom
+    /// d'UUID, sans dossier à lui.
+    ///
+    /// Par défaut `true` : ce qui est construit sans le préciser n'a pas de
+    /// dossier de rendez-vous, et les chemins qui en dépendent — l'audio du CRM,
+    /// la suppression du dossier entier — doivent alors s'abstenir plutôt que
+    /// d'inventer une destination.
+    var isFlat: Bool = true
+
+    /// Le `.m4a` préparé pour le CRM, s'il est là.
+    ///
+    /// Avant la disposition en dossiers il n'existait nulle part : il était
+    /// fabriqué dans le dossier temporaire, envoyé, puis effacé. Donc impossible
+    /// à écouter, à vérifier, ou à renvoyer à la main le jour où le CRM le
+    /// refuse — alors même que c'est le seul fichier que le CRM ait jamais vu.
+    var audioURL: URL?
+
+    /// Poids de cet audio. Relevé au balayage, comme celui de la vidéo, parce
+    /// que l'interroger à l'affichage ferait un accès disque par ligne visible.
+    var audioBytes: Int64?
+
     var id: UUID { metadata.id }
+
+    /// Le dossier du rendez-vous, ou la racine si l'enregistrement est à plat.
+    ///
+    /// Le repli sur le dossier parent de `url` n'est pas un pis-aller : pour un
+    /// enregistrement à plat, le parent de `<root>/<uuid>.mp4` **est** la
+    /// racine, et pour un enregistrement en dossier le parent de
+    /// `<dossier>/<nom>.mp4` **est** le dossier. Les deux réponses sont justes ;
+    /// la propriété stockée sert à les rendre justes aussi quand le fichier
+    /// final n'existe pas encore.
+    var folderURL: URL { scannedFolder ?? url.deletingLastPathComponent() }
+
+    /// Où écrire l'audio du CRM.
+    ///
+    /// `nil` pour un enregistrement à plat, volontairement : on ne vient pas
+    /// poser un fichier de plus dans une racine déjà illisible, à côté d'un
+    /// `.mp4` et d'un `.json` nommés d'après le même UUID. Le rangement crée
+    /// d'abord le dossier ; l'audio suivra.
+    var audioDestination: URL? {
+        isFlat ? nil : MeetingBundle.audioDestination(in: folderURL)
+    }
+
+    /// Le poids de l'audio du CRM, pour la vue de détail. `nil` tant qu'aucun
+    /// audio n'a été préparé — et une ligne qu'on n'affiche pas vaut mieux
+    /// qu'une ligne « — » qui laisse croire à un fichier vide.
+    var audioSizeDescription: String? {
+        audioBytes?.formatted(.byteCount(style: .file))
+    }
 
     /// Session ouverte sans jamais être close proprement.
     ///
@@ -58,7 +116,21 @@ struct Recording: Identifiable, Equatable, Sendable {
     ///
     /// Dans l'ordre : le fichier final, les morceaux bruts, le dossier. Le
     /// dossier est le dernier recours et il ouvre toujours quelque chose.
+    ///
+    /// **Depuis la disposition en dossiers, c'est le dossier qui passe en
+    /// premier**, et c'est un renversement assumé. Sélectionner le seul `.mp4`
+    /// ouvrait une fenêtre sur son dossier, un fichier surligné, et laissait
+    /// l'audio du CRM et la fiche à côté sans qu'on les remarque ; alors que
+    /// « montrer dans le Finder » sur une réunion veut dire « montre-moi tout ce
+    /// qui la compose ». Sélectionner le dossier lui-même le fait apparaître
+    /// surligné dans la racine, prêt à être ouvert, renommé, ou glissé ailleurs
+    /// d'un seul geste — les trois choses qu'on fait d'une réunion terminée.
+    ///
+    /// Le repli d'origine est gardé tel quel pour l'ancienne disposition : là,
+    /// il n'y a pas de dossier propre à montrer, et sélectionner la racine
+    /// n'aurait désigné aucun fichier en particulier.
     var revealTargets: [URL] {
+        if isFlat == false { return [folderURL] }
         if existsOnDisk { return [url] }
         if segmentURLs.isEmpty == false { return segmentURLs }
         return [url.deletingLastPathComponent()]

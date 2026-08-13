@@ -199,7 +199,7 @@ private struct RecordingCard: View {
             HStack(alignment: .top, spacing: Space.inset) {
                 RecordingRow(
                     recording: recording,
-                    progress: model.processingProgress[recording.id],
+                    step: model.pipeline[recording.id],
                     upload: model.uploads.state(for: recording.id)
                 )
 
@@ -228,7 +228,11 @@ private struct RecordingCard: View {
                 Image(systemName: "chevron.right")
                     .font(Type.metaFaint.weight(.semibold))
                     .foregroundStyle(.tertiary)
-                    .padding(.top, 3)
+                    // Un cran optique, pour poser le chevron sur la première
+                    // ligne du titre plutôt que sur le haut de sa boîte : le
+                    // plus petit échelon de l'échelle, parce que c'est un
+                    // ajustement de l'œil et non un espacement.
+                    .padding(.top, Space.hair)
             }
             .branCard(isHovering: isHovering)
         }
