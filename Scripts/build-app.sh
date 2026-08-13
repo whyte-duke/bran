@@ -95,6 +95,29 @@ rm -rf -- "$DEST"
 mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
 cp "$BINARY" "$DEST/Contents/MacOS/$APP_NAME"
 
+# **Sans cette ligne, bran ne démarre pas du tout.**
+#
+# Le binaire réclame `@rpath/Sparkle.framework/…`, et SwiftPM n'ajoute PAS
+# `@executable_path/../Frameworks` à ses chemins de recherche : il produit des
+# exécutables en ligne de commande, pas des paquets d'application, et n'a aucune
+# raison de supposer qu'il existe un dossier `Frameworks` un cran au-dessus.
+# Copier le framework dans le paquet ne suffit donc pas — dyld ne va pas l'y
+# chercher, et macOS affiche « bran ne peut pas s'ouvrir en raison d'un
+# problème », qui ne dit rien de la cause.
+#
+# Constaté en installant la version précédente pour éprouver la mise à jour :
+# l'application ne s'ouvrait plus, et le diagnostic n'était lisible qu'en lançant
+# le binaire depuis un terminal.
+#
+# **`install_name_tool` plutôt qu'un `unsafeFlags` dans `Package.swift`** :
+# celui-ci interdirait au dépôt d'être utilisé comme dépendance par SwiftPM, et
+# surtout ce chemin ne décrit pas la compilation — il décrit la forme du paquet,
+# qui est le sujet de ce script et de lui seul.
+#
+# Avant la signature, obligatoirement : modifier un binaire déjà scellé invalide
+# son sceau.
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$DEST/Contents/MacOS/$APP_NAME" 2>/dev/null
+
 # ── Sparkle ──────────────────────────────────────────────────────────────────
 #
 # Le framework est COPIÉ dans le paquet, et pas seulement lié : `Updater.app`,
