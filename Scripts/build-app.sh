@@ -314,6 +314,46 @@ touch "$DEST"
 echo "→ vérification"
 codesign --verify --deep --strict --verbose=2 "$DEST" 2>&1 | sed 's/^/  /'
 
+# ── Le paquet peut-il seulement démarrer ? ────────────────────────────────────
+#
+# **Ce contrôle existe parce que son absence a coûté cher.** Le 13 août 2026, une
+# version a été publiée dont le binaire réclamait `@rpath/Sparkle.framework/…`
+# sans porter le chemin de recherche correspondant. Elle était compilée, scellée,
+# signée, vérifiée — et incapable de s'ouvrir. `codesign --verify` répondait
+# « valide » : il atteste que le contenu n'a pas bougé depuis la signature, pas
+# qu'il fonctionne.
+#
+# Le prix est particulier depuis que les mises à jour sont automatiques. La
+# version cassée s'est installée toute seule sur la machine, par-dessus une
+# version saine, et une application qui ne démarre plus **ne peut plus se mettre
+# à jour** : le correctif publié dans la minute n'atteint personne. Il faut
+# repasser par une installation à la main, sur chaque poste. Une release ratée
+# ne se rattrape donc pas à distance.
+#
+# Le contrôle est statique et coûte quelques millisecondes : chaque bibliothèque
+# réclamée en `@rpath` doit exister dans le paquet. C'est exactement ce qui
+# manquait, et ça ne demande pas de lancer l'application — ce qu'on ne peut pas
+# faire pendant une réunion.
+MISSING=0
+for dep in $(otool -L "$DEST/Contents/MacOS/$APP_NAME" | awk '/@rpath\//{print $1}'); do
+  if [[ ! -e "$DEST/Contents/Frameworks/${dep#@rpath/}" ]]; then
+    echo "  ✗ bibliothèque réclamée mais absente du paquet : $dep"
+    MISSING=1
+  fi
+done
+
+if ! otool -l "$DEST/Contents/MacOS/$APP_NAME" | grep -q "@executable_path/../Frameworks"; then
+  echo "  ✗ le binaire ne cherche pas dans Contents/Frameworks."
+  MISSING=1
+fi
+
+if [[ $MISSING -eq 1 ]]; then
+  echo
+  echo "✗ ce paquet ne démarrerait pas. Rien n'a été publié."
+  exit 1
+fi
+echo "  liens dynamiques : tous résolus dans le paquet"
+
 echo
 echo "✓ installé : $DEST"
 echo "  Lancer :   open \"$DEST\""
