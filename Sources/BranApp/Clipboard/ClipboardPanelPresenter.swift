@@ -397,10 +397,10 @@ final class ClipboardPanelPresenter {
         // Commande **seule** : ⌘⌥3 et ⌘⇧3 sont des captures d'écran du système,
         // et les avaler serait un dégât bien plus grand que le service rendu.
         guard significant == .command else { return false }
-        guard let characters = event.charactersIgnoringModifiers,
-              let digit = characters.first,
-              let number = digit.wholeNumberValue,
-              (1...9).contains(number),
+        // La **position** de la touche et non le caractère qu'elle produit :
+        // voir `HotkeyBinding.digit(forKeyCode:)`, où la disposition française
+        // explique pourquoi.
+        guard let number = HotkeyBinding.digit(forKeyCode: event.keyCode),
               let model,
               let entry = model.entry(forShortcut: number)
         else { return false }

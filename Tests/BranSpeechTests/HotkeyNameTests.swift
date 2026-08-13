@@ -95,4 +95,28 @@ struct HotkeyNameTests {
             #expect(name?.count == 1)
         }
     }
+
+    // MARK: - Les chiffres du panneau
+
+    /// **⌘1…⌘9 ne marchait qu'en QWERTY.** La rangée du haut d'un clavier
+    /// français rend `& é " ' ( § è ! ç` sans Majuscule : lire le caractère de
+    /// la frappe donnait « é » là où le badge de la ligne annonce « ⌘2 ». C'est
+    /// la même erreur que la table de noms interdit pour les lettres, commise
+    /// dans l'autre sens.
+    @Test("Les chiffres se lisent à la position, pas au caractère")
+    func chiffresParPosition() {
+        #expect(HotkeyBinding.digit(forKeyCode: 18) == 1)
+        #expect(HotkeyBinding.digit(forKeyCode: 19) == 2)
+        #expect(HotkeyBinding.digit(forKeyCode: 25) == 9)
+    }
+
+    @Test("Zéro et le reste du clavier ne désignent aucune ligne")
+    func rienDAutreQueUnANeuf() {
+        // La liste va de la première à la neuvième entrée : pas de dixième.
+        #expect(HotkeyBinding.digit(forKeyCode: 29) == nil)
+        // Une touche de fonction porte un nom, pas un chiffre.
+        #expect(HotkeyBinding.digit(forKeyCode: 122) == nil)
+        // Et une position absente de la table ne répond rien.
+        #expect(HotkeyBinding.digit(forKeyCode: 8) == nil)
+    }
 }

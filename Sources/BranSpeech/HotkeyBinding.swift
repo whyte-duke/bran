@@ -95,6 +95,29 @@ public struct HotkeyBinding: Codable, Equatable, Sendable {
         22: "6", 26: "7", 28: "8", 25: "9", 29: "0",
     ]
 
+    /// Le chiffre 1…9 que porte cette **position** de clavier, ou `nil`.
+    ///
+    /// **Le code de touche, et surtout pas le caractère.** ⌘1…⌘9 ouvrait la
+    /// bonne entrée en QWERTY et rien du tout en AZERTY : sur un clavier
+    /// français, la rangée du haut sans Majuscule rend `& é " ' ( § è ! ç`, donc
+    /// `charactersIgnoringModifiers` répond « é » là où le badge de la ligne
+    /// annonce « ⌘2 ». Lire le caractère revenait à décider que tout le monde
+    /// tape en QWERTY — l'erreur exacte que le commentaire de `names` interdit
+    /// juste au-dessus pour les lettres.
+    ///
+    /// Un code de touche est une position physique : la touche marquée « 2 » est
+    /// la même sur les deux dispositions, et c'est bien elle que l'utilisateur
+    /// vise en voyant « ⌘2 ».
+    ///
+    /// Zéro n'en fait pas partie : la liste va de la première à la neuvième
+    /// entrée, et il n'y a pas de dixième à désigner.
+    public static func digit(forKeyCode keyCode: UInt16) -> Int? {
+        guard let name = names[keyCode], let digit = Int(name), (1...9).contains(digit) else {
+            return nil
+        }
+        return digit
+    }
+
     /// Ce que les réglages affichent : « ⌘⇧C », « ⌘ droite », « Échap ».
     ///
     /// Interroge la disposition clavier réellement installée pour tout ce que la
