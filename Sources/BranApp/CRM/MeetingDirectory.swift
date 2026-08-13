@@ -59,13 +59,38 @@ final class MeetingDirectory {
 
         refreshTask = Task { [weak self] in
             while Task.isCancelled == false {
-                await self?.refresh()
+                // `userDriven: false` — personne n'a rien demandé, c'est la
+                // veille. Voir `refresh(userDriven:)` : c'est cette ligne qui
+                // décide que le lancement de bran n'ouvre pas le Trousseau.
+                await self?.refresh(userDriven: false)
                 try? await Task.sleep(for: Self.refreshInterval)
             }
         }
     }
 
-    func refresh() async {
+    /// - Parameter userDriven: vrai quand quelqu'un vient de demander à voir ses
+    ///   rendez-vous — la fenêtre s'ouvre, on tire pour rafraîchir, un envoi va
+    ///   partir. **C'est la seule circonstance où cette veille a le droit
+    ///   d'ouvrir le Trousseau.**
+    ///
+    ///   La boucle de fond, elle, passe `false` : sans ça, la toute première
+    ///   itération — lancée au démarrage de bran — réclamait le jeton, donc
+    ///   l'alerte « bran veut accéder à la clé … de votre trousseau » arrivait à
+    ///   chaque ouverture de session, avant tout geste de l'utilisateur, pour un
+    ///   rafraîchissement dont il n'avait rien demandé. macOS la pose parce que
+    ///   la liste de contrôle d'accès de l'élément désigne la signature de
+    ///   l'application qui l'a écrit, et que reconstruire bran la périme.
+    ///
+    ///   Ce que ça concède : au lancement, la liste des rendez-vous reste vide
+    ///   jusqu'au premier geste. Une réunion qui démarrerait dans cet intervalle
+    ///   est enregistrée quand même — c'est le rapprochement au rendez-vous qui
+    ///   attend, pas la capture — et la première ouverture de la fenêtre le
+    ///   rattrape.
+    func refresh(userDriven: Bool = true) async {
+        // Le jeton déjà en mémoire ne coûte rien : la restriction ne porte que
+        // sur la **première** lecture, celle qui ouvre l'alerte.
+        guard userDriven || configuration.isTokenLoaded else { return }
+
         guard configuration.isConfigured, let client = configuration.makeClient() else {
             bookings = []
             problem = nil

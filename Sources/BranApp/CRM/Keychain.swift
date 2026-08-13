@@ -123,6 +123,43 @@ enum Keychain {
         return .cleared
     }
 
+    /// Y a-t-il un élément pour ce compte ? **Sans demander sa donnée.**
+    ///
+    /// La liste de contrôle d'accès d'un élément du Trousseau protège sa
+    /// **donnée**, pas son existence : une requête qui ne demande que les
+    /// attributs y répond sans autorisation. Mesuré à la ligne de commande sur
+    /// l'élément réel de bran — `security find-generic-password -s
+    /// com.opahventures.bran` rend les attributs sans un mot, là où le même
+    /// appel avec `-g`, qui réclame la donnée, déclenche l'alerte.
+    ///
+    /// C'est ce qui permet à `CRMConfiguration.isConfigured` de répondre au
+    /// lancement, et à l'application de ne réclamer le Trousseau que le jour où
+    /// elle a vraiment besoin du jeton.
+    ///
+    /// **Ce n'est pas une garantie, c'est une mesure.** Apple documente que
+    /// copier la *donnée* d'un mot de passe peut demander une authentification ;
+    /// elle ne promet nulle part qu'aucune lecture d'attributs ne le fera
+    /// jamais. Pour les éléments écrits par `set(_:for:)` — sans
+    /// `SecAccessControl`, donc sans exigence biométrique — le comportement
+    /// constaté est celui décrit ci-dessus. Un élément créé autrement pourrait
+    /// se comporter autrement.
+    static func exists(_ account: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            // **Les attributs, jamais la donnée.** Poser `kSecReturnData` ici
+            // reviendrait à écrire `get` une seconde fois, avec l'alerte qui va
+            // avec — et personne ne verrait la différence avant le prochain
+            // redémarrage du Mac.
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+
+        var item: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
+    }
+
     static func get(_ account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

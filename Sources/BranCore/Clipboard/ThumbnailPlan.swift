@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Tout ce qui se décide sur une vignette sans toucher à une image : où elle
@@ -231,6 +232,69 @@ public struct ThumbnailPlan: Sendable, Equatable {
         return entry.blobs?.first
     }
 
+    /// Le fichier dont fabriquer l'aperçu, pour une entrée `.file`.
+    ///
+    /// **Le paragraphe ci-dessus refusait cette route, et il avait tort.** Il
+    /// disait : « un fichier du Finder se dessine avec un symbole, jamais avec
+    /// une image ». C'était vrai du contenu — un fichier copié n'est pas lu,
+    /// donc il n'a pas de blob — et faux de l'usage. Copier une photo depuis le
+    /// Finder est un geste courant, et l'entrée qui en résulte est un `.file` :
+    /// l'historique montrait donc une icône de document générique là où
+    /// l'utilisateur cherchait *son image*, sans aucun moyen de distinguer deux
+    /// captures d'écran l'une de l'autre. Une liste d'images qui ne montre pas
+    /// les images ne remplit pas son office.
+    ///
+    /// La différence avec un blob est une différence de **source**, pas de
+    /// possibilité : l'aperçu se fabrique depuis le fichier lui-même, à son
+    /// chemin. Ce que ça implique est assumé — le fichier peut avoir bougé ou
+    /// disparu depuis la copie, et l'aperçu retombe alors sur rien, exactement
+    /// comme une entrée dont les blobs ont été purgés.
+    ///
+    /// Le premier chemin représente l'entrée, pour la même raison que le premier
+    /// blob : la ligne est une ligne, pas une planche-contact.
+    public static func previewedFile(for entry: ClipboardEntry) -> String? {
+        guard entry.kind == .file else { return nil }
+        // `filePaths` et non `fileURLs` : ce qui est stocké est une URL, et la
+        // prendre pour un chemin fabriquait un fichier inexistant. La règle de
+        // conversion vit sur l'entrée, en un seul endroit.
+        guard let path = entry.filePaths.first, path.hasPrefix("/") else { return nil }
+        return path
+    }
+
+    /// Le nom de la vignette d'un fichier, dérivé de son **chemin**.
+    ///
+    /// Le chemin plutôt que le contenu, et ce n'est pas un pis-aller : un
+    /// fichier copié n'est jamais lu, donc son empreinte n'existe pas — l'exiger
+    /// obligerait à ouvrir chaque fichier de l'historique pour savoir comment
+    /// nommer son aperçu. Le chemin est stable tant que le fichier ne bouge pas,
+    /// et le jour où il bouge l'entrée est morte de toute façon.
+    ///
+    /// Le nom reste de la même forme que celui d'un blob — une empreinte, un
+    /// tiret, une taille — parce que toute la machinerie d'éviction décide en
+    /// lisant des noms de fichiers, et qu'une seconde forme lui échapperait.
+    /// - Parameter stamp: l'instant de la copie. **Il fait partie de la clé, et
+    ///   ce n'est pas décoratif** : un fichier peut être remplacé au même
+    ///   chemin — une capture d'écran écrasée, un export refait — et la vignette
+    ///   d'hier serait alors resservie pour un contenu qui n'a plus rien à voir.
+    ///   Un blob n'a pas ce problème, son nom *est* son contenu ; un chemin, si.
+    ///   L'horodatage de la copie règle le cas sans un seul accès disque :
+    ///   recopier un fichier modifié crée une entrée neuve, donc une clé neuve,
+    ///   là où lire la date de modification coûterait un `stat` par ligne
+    ///   dessinée. Ce qu'on y perd — deux entrées du même fichier ne partagent
+    ///   plus leur vignette — se compte en kilo-octets.
+    public static func fileName(
+        forPath path: String, stamp: Date, size: ThumbnailSize
+    ) -> String {
+        fileName(
+            hash: pathHash("\(path)|\(stamp.timeIntervalSinceReferenceDate)"),
+            maxPixelSize: size.maxPixelSize
+        )
+    }
+
+    static func pathHash(_ path: String) -> String {
+        SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
     /// Cette entrée peut-elle montrer une vignette ? Sans accès disque, donc
     /// appelable depuis le corps d'une ligne.
     ///
@@ -239,7 +303,7 @@ public struct ThumbnailPlan: Sendable, Equatable {
     /// bruit, et la ligne retombe sur son symbole — une image absente n'est jamais
     /// une panne.
     public static func hasThumbnail(_ entry: ClipboardEntry) -> Bool {
-        source(for: entry) != nil
+        source(for: entry) != nil || previewedFile(for: entry) != nil
     }
 
     // MARK: - L'éviction

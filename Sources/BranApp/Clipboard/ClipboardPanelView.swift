@@ -96,6 +96,11 @@ final class ClipboardPanelModel {
     /// dizaines de mégaoctets décodée, et la liste en montre vingt à la fois.
     private let thumbnail: (ClipboardEntry) -> Image?
 
+    /// Le poids d'un fichier, par la même route et pour les mêmes raisons que
+    /// `thumbnail` : une fermeture, un accès disque, et une ligne qui n'attend
+    /// pas.
+    private let fileBytes: (ClipboardEntry) -> Int?
+
     let onPaste: (ClipboardEntry) -> Void
     let onPastePlain: (ClipboardEntry) -> Void
     let onCopyOnly: (ClipboardEntry) -> Void
@@ -153,6 +158,25 @@ final class ClipboardPanelModel {
     /// tient pas.
     func requestFocus() { focusRequests += 1 }
 
+    /// Repart de la première ligne.
+    ///
+    /// **La sélection est un geste, pas un réglage : elle ne survit pas à la
+    /// fermeture.** Le panneau étant construit une fois et réutilisé, elle
+    /// survivait pourtant — `close()` vidait le filtre et laissait la ligne
+    /// courante là où le clavier l'avait posée. Rouvrir au raccourci
+    /// redescendait donc sur la cinquième entrée d'il y a une heure, et la
+    /// première flèche vers le bas menait à la sixième au lieu de la deuxième.
+    ///
+    /// Remise à `nil` et non à l'identifiant de la première entrée : c'est
+    /// `ClipboardFilter.reconciled` qui décide qu'une liste non vide a toujours
+    /// une ligne courante, et la désigner ici en ferait une seconde règle, à
+    /// tenir d'accord avec la première.
+    ///
+    /// À l'ouverture plutôt qu'à la fermeture, parce que c'est l'ouverture qui a
+    /// une exigence : quoi qu'il se soit passé avant, le panneau s'ouvre sur ce
+    /// qui vient d'être copié.
+    func resetSelection() { keyboardSelection = nil }
+
     /// Change à chaque vignette fraîchement fabriquée.
     ///
     /// **Un compteur et non les images.** Le modèle ne porte aucune image — une
@@ -173,10 +197,24 @@ final class ClipboardPanelModel {
         return thumbnail(entry)
     }
 
+    /// Le poids d'un fichier copié, ou `nil` tant qu'il n'a pas été relevé.
+    ///
+    /// Même contrat que `thumbnail(for:)`, et le même compteur d'invalidation :
+    /// la question demande un accès disque, la ligne n'attend pas, et la réponse
+    /// arrive par un redessin. Un fichier n'étant jamais lu à la copie, sa
+    /// taille ne peut pas être stockée dans l'entrée — c'est celle qu'il fait
+    /// **maintenant** qu'on affiche, ce qui est aussi la seule qui aide à
+    /// décider.
+    func fileBytes(for entry: ClipboardEntry) -> Int? {
+        _ = thumbnailGeneration
+        return fileBytes(entry)
+    }
+
     init(
         store: ClipboardStore,
         shortcutName: String,
         thumbnail: @escaping (ClipboardEntry) -> Image? = { _ in nil },
+        fileBytes: @escaping (ClipboardEntry) -> Int? = { _ in nil },
         onPaste: @escaping (ClipboardEntry) -> Void,
         onPastePlain: @escaping (ClipboardEntry) -> Void,
         onCopyOnly: @escaping (ClipboardEntry) -> Void,
@@ -186,6 +224,7 @@ final class ClipboardPanelModel {
         self.store = store
         self.shortcutName = shortcutName
         self.thumbnail = thumbnail
+        self.fileBytes = fileBytes
         self.onPaste = onPaste
         self.onPastePlain = onPastePlain
         self.onCopyOnly = onCopyOnly
@@ -714,6 +753,7 @@ struct ClipboardPanelView: View {
                             shortcut: ClipboardFilter.shortcutNumber(forRowAt: index),
                             isSelected: entry.id == shown.selection,
                             thumbnail: model.thumbnail(for: entry),
+                            fileBytes: model.fileBytes(for: entry),
                             unavailableReason: entry.canPaste ? nil : model.unavailableReason(for: entry),
                             onSelect: { model.select(entry.id) },
                             onActivate: { model.activate($0, on: entry) },
@@ -773,6 +813,9 @@ private struct ClipboardRow: View {
     let isSelected: Bool
     let thumbnail: Image?
 
+    /// Le poids du fichier, relevé hors du fil d'affichage — voir `fileSize`.
+    let fileBytes: Int?
+
     /// Pourquoi ↵ ne marchera pas sur cette ligne, ou `nil` si tout va bien.
     /// Calculé par le modèle pour que la phrase affichée dans l'infobulle et
     /// celle annoncée au refus soient la même.
@@ -790,21 +833,40 @@ private struct ClipboardRow: View {
         HStack(spacing: Space.small) {
             leading
 
-            VStack(alignment: .leading, spacing: Space.line) {
-                title
-                meta
-            }
+            title
 
             Spacer(minLength: Space.small)
+
+            // **La méta à droite du titre, plus au-dessous.** Empilées, les deux
+            // imposaient 44 points par entrée pour une seule ligne utile : le
+            // titre est ce qu'on cherche, la provenance est ce qui aide à le
+            // reconnaître une fois qu'on l'a sous les yeux. Côte à côte, elles
+            // tiennent en 34 points, et la fenêtre montre onze entrées au lieu
+            // de neuf sans grandir d'un pixel.
+            // **La méta garde sa taille, c'est le titre qui se rogne.** Sans
+            // cette priorité, SwiftUI répartit la place au prorata et le titre —
+            // qui peut faire deux cents caractères — écrase la provenance
+            // jusqu'à la faire disparaître. C'est l'inverse qu'on veut : le
+            // titre est déjà tronqué par nature, la provenance ne l'est pas.
+            // …mais elle est bornée. Sans plafond, une application au nom long
+            // et un « il y a 3 semaines » repoussent le titre jusqu'à le réduire
+            // à une ellipse — et le titre est l'information principale, la
+            // provenance seulement ce qui aide à la reconnaître. Au-delà du
+            // plafond, c'est la méta qui se rogne.
+            meta
+                .lineLimit(1)
+                .frame(maxWidth: Size.clipboardMeta, alignment: .trailing)
+                .fixedSize(horizontal: false, vertical: true)
 
             trailing
         }
         .padding(.horizontal, Space.inset)
-        // La hauteur fixe est la décision structurante du panneau, et son
-        // chiffre se défend dans `Design.swift`. Elle vaut aussi pour les lignes
-        // vides de texte : une liste dont les lignes ne font pas toutes la même
-        // hauteur ne se parcourt pas en diagonale.
-        .frame(height: Size.clipboardRow)
+        // Deux hauteurs, une par sorte de contenu, et le chiffre se défend dans
+        // `Design.swift` : un texte se lit sur une ligne serrée, une image se
+        // regarde et mérite la place de sa vignette. Ce qui tient le parcours en
+        // diagonale, c'est l'alignement à gauche du titre — identique dans les
+        // deux cas — et non l'égalité des hauteurs.
+        .frame(height: showsThumbnail ? Size.clipboardMediaRow : Size.clipboardRow)
         .background(
             Palette.row(hover: isHovering, selected: isSelected),
             in: .rect(cornerRadius: Radius.field)
@@ -830,25 +892,40 @@ private struct ClipboardRow: View {
 
     // MARK: La vignette
 
+    /// Cette ligne réserve-t-elle la colonne de gauche ?
+    ///
+    /// **Le texte n'a plus de symbole, et c'est la seule chose que l'absence de
+    /// colonne signifie.** Un « Aa » devant chaque ligne d'une liste où le texte
+    /// est le cas de très loin le plus fréquent ne distingue rien : il répète
+    /// pour la centième fois ce que la ligne montre déjà en toutes lettres, et
+    /// il coûte la seule ressource rare du panneau — la largeur avant que le
+    /// titre ne se rogne. Une image et un fichier, eux, ont quelque chose à
+    /// montrer que le titre ne dit pas.
+    private var showsThumbnail: Bool {
+        entry.kind == .image || entry.kind == .file
+    }
+
     @ViewBuilder
     private var leading: some View {
-        if let thumbnail {
-            thumbnail
-                .resizable()
-                // Rempli puis rogné, jamais déformé : un carré au rapport de
-                // l'image désalignerait les colonnes de texte d'une ligne à
-                // l'autre, ce qui est précisément ce qui rend une liste
-                // illisible en diagonale.
-                .scaledToFill()
-                .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
-                .clipShape(.rect(cornerRadius: Radius.control))
-                .accessibilityHidden(true)
-        } else {
-            Image(systemName: ClipboardPanelVocabulary.symbolName(entry))
-                .font(Type.cardBody)
-                .foregroundStyle(.secondary)
-                .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
-                .accessibilityHidden(true)
+        if showsThumbnail {
+            if let thumbnail {
+                thumbnail
+                    .resizable()
+                    // Rempli puis rogné, jamais déformé : un carré au rapport de
+                    // l'image désalignerait les colonnes de texte d'une ligne à
+                    // l'autre, ce qui est précisément ce qui rend une liste
+                    // illisible en diagonale.
+                    .scaledToFill()
+                    .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
+                    .clipShape(.rect(cornerRadius: Radius.control))
+                    .accessibilityHidden(true)
+            } else {
+                Image(systemName: ClipboardPanelVocabulary.symbolName(entry))
+                    .font(Type.cardBody)
+                    .foregroundStyle(.secondary)
+                    .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
+                    .accessibilityHidden(true)
+            }
         }
     }
 
@@ -870,6 +947,9 @@ private struct ClipboardRow: View {
 
     private var displayedTitle: String {
         guard row.text.isEmpty else { return row.isClipped ? row.text + "…" : row.text }
+        // Un fichier porte son nom, qui est la seule chose qui distingue une
+        // copie de la suivante. Voir `ClipboardEntry.fileTitle`.
+        if let name = entry.fileTitle { return name }
         // Rien à écrire : une image, ou un fichier sans nom lisible. On nomme le
         // type plutôt que de laisser une ligne muette — `ClipboardEntry.preview`
         // reste vide exprès dans ce cas, pour qu'aucune chaîne d'interface ne
@@ -877,35 +957,62 @@ private struct ClipboardRow: View {
         return ClipboardPanelVocabulary.kindName(entry)
     }
 
+    /// **Deux informations au plus, et pas trois.**
+    ///
+    /// La méta portait la provenance, l'instant relatif et le poids. Sur une
+    /// ligne serrée, à droite d'un titre, ces trois-là revenaient à reprendre au
+    /// titre la moitié de sa largeur — pour un « il y a 5 minutes » qui, dans
+    /// une liste déjà rangée du plus récent au plus ancien, n'apprend presque
+    /// rien : la position dans la liste dit déjà l'ordre, et la date exacte est
+    /// l'affaire de l'onglet Presse-papiers, qui a la place de l'écrire.
+    ///
+    /// Reste ce qui aide à reconnaître une ligne sans la lire : **d'où elle
+    /// vient**, et **ce qu'elle pèse quand c'est un fichier** — le seul cas où
+    /// le poids décide quelque chose, parce qu'on ne colle pas un fichier de
+    /// 4 Go comme on colle une capture d'écran. Pour du texte, le poids était du
+    /// remplissage : la ligne montre déjà ce qu'elle contient.
     private var meta: some View {
         HStack(spacing: Space.tight) {
-            // Le nom **stocké** fait foi : il a été lu au moment de la copie,
-            // quand l'application existait encore. Silence quand on ne sait
-            // rien, plutôt qu'« Inconnu », qui occupe la même place sans rien
-            // dire — c'est ce que `ClipboardSource.isUnknown` demande.
-            if let name = entry.source?.name {
-                Text(name)
-                Text("·")
+            if let origin {
+                Text(origin)
             }
 
-            Text(entry.lastCopiedAt, format: .relative(presentation: .named))
-
-            // Le poids, systématiquement pour un contenu lourd, et seulement
-            // quand la ligne ne montre pas tout pour du texte : « 512 des 4 312
-            // caractères » n'apprend rien quand les 17 caractères sont là.
-            if entry.isRefused || entry.totalBlobBytes > 0 || row.isClipped {
-                Text("·")
-                Text(entry.sizeDescription)
-            }
-
-            if entry.isMultipleItems {
-                Text("·")
-                Text("\(entry.itemCount) éléments")
+            if let size = fileSize {
+                if origin != nil { Text("·") }
+                Text(size)
             }
         }
         .font(Type.meta)
         .foregroundStyle(.secondary)
         .lineLimit(1)
+        .truncationMode(.tail)
+    }
+
+    /// D'où vient l'entrée : **le titre de la fenêtre, à défaut le nom de
+    /// l'application.**
+    ///
+    /// « Google Chrome » est vrai de la moitié de l'historique — mesuré, Chrome
+    /// et Terminal produisent 77 % des entrées — donc il ne distingue aucune
+    /// ligne d'une autre tout en occupant la place d'une information qui, elle,
+    /// distinguerait. Le titre de la fenêtre nomme l'onglet, le document, le
+    /// dossier : c'est ce dont on se souvient.
+    ///
+    /// Le nom reste le repli, et il en faut un : sans l'autorisation
+    /// Enregistrement de l'écran aucun titre n'est lisible, et les entrées
+    /// écrites avant que ce champ existe n'en portent pas.
+    private var origin: String? {
+        entry.source?.windowTitle ?? entry.source?.name
+    }
+
+    /// Le poids d'un fichier copié, quand on le connaît.
+    ///
+    /// `nil` pour tout le reste — voir `meta`. Et `nil` aussi tant que la taille
+    /// n'a pas été relevée : elle demande un accès disque, qui n'a rien à faire
+    /// dans le corps d'une ligne. Elle arrive avec la vignette, par le même
+    /// chemin et pour la même raison.
+    private var fileSize: String? {
+        guard entry.kind == .file else { return nil }
+        return fileBytes.map { ClipboardEntry.formatted(bytes: $0) }
     }
 
     // MARK: Les marques de droite

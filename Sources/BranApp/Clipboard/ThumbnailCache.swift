@@ -2,6 +2,7 @@ import BranCore
 import CoreGraphics
 import Foundation
 import ImageIO
+import QuickLookThumbnailing
 import UniformTypeIdentifiers
 import os
 
@@ -162,9 +163,49 @@ final class ThumbnailCache {
     /// vignette du tout — un texte, un fichier, une entrée purgée ou refusée
     /// n'interrogent même pas la mémoire et dessinent leur symbole de repli.
     func cached(for entry: ClipboardEntry, size: ThumbnailSize = .row) -> CGImage? {
-        guard let blob = ThumbnailPlan.source(for: entry) else { return nil }
-        let name = ThumbnailPlan.fileName(for: blob, size: size)
-        return memory.object(forKey: name as NSString)?.image
+        guard let recipe = recipe(for: entry, size: size) else { return nil }
+        return memory.object(forKey: recipe.name as NSString)?.image
+    }
+
+    /// D'où vient l'aperçu d'une entrée, et sous quel nom il est rangé.
+    ///
+    /// **Deux sources, un seul cache.** Une image collée vit dans un blob adressé
+    /// par son contenu ; un fichier copié depuis le Finder n'est jamais lu, donc
+    /// il n'a pas de blob et son aperçu se fabrique depuis son chemin. Les deux
+    /// produisent le même genre d'objet — quelques kilo-octets de PNG — et il n'y
+    /// avait aucune raison de leur donner deux caches, deux évictions et deux
+    /// façons de se tromper. Ce qui les sépare tient dans cette structure ; tout
+    /// ce qui suit l'ignore.
+    private struct Recipe {
+        let name: String
+        let source: URL
+        let destination: URL
+        /// Vrai pour un fichier du Finder. QuickLook rend l'image d'un JPEG, la
+        /// première page d'un PDF, une vignette de vidéo — et, pour un `.mp3` ou
+        /// une archive, l'icône de son type. C'est exactement la dégradation
+        /// qu'on veut : jamais rien, toujours quelque chose de reconnaissable.
+        let viaQuickLook: Bool
+    }
+
+    private func recipe(for entry: ClipboardEntry, size: ThumbnailSize) -> Recipe? {
+        if let blob = ThumbnailPlan.source(for: entry) {
+            guard let source = store.blobURL(for: blob, of: entry) else { return nil }
+            return Recipe(
+                name: ThumbnailPlan.fileName(for: blob, size: size),
+                source: source,
+                destination: ThumbnailPlan.url(for: blob, size: size, in: store.folder),
+                viaQuickLook: false
+            )
+        }
+
+        guard let path = ThumbnailPlan.previewedFile(for: entry) else { return nil }
+        let name = ThumbnailPlan.fileName(forPath: path, stamp: entry.copiedAt, size: size)
+        return Recipe(
+            name: name,
+            source: URL(fileURLWithPath: path),
+            destination: ThumbnailPlan.folder(in: store.folder).appending(path: name),
+            viaQuickLook: true
+        )
     }
 
     /// La vignette, quel qu'en soit le prix : mémoire, puis disque, puis
@@ -185,8 +226,8 @@ final class ThumbnailCache {
     /// constructions d'`URL`.
     @discardableResult
     func thumbnail(for entry: ClipboardEntry, size: ThumbnailSize = .row) async -> CGImage? {
-        guard let blob = ThumbnailPlan.source(for: entry) else { return nil }
-        let name = ThumbnailPlan.fileName(for: blob, size: size)
+        guard let recipe = recipe(for: entry, size: size) else { return nil }
+        let name = recipe.name
 
         if let hit = memory.object(forKey: name as NSString) { return hit.image }
 
@@ -194,15 +235,21 @@ final class ThumbnailCache {
         // décoder la même image une seconde fois.
         if let running = inFlight[name] { return await running.value.image?.image }
 
-        guard let source = store.blobURL(for: blob, of: entry) else { return nil }
-        let destination = ThumbnailPlan.url(for: blob, size: size, in: store.folder)
+        let source = recipe.source
+        let destination = recipe.destination
+        let viaQuickLook = recipe.viaQuickLook
         let maxPixelSize = size.maxPixelSize
 
         // `Task` hérite du `MainActor`, mais `make` est `nonisolated` : c'est
         // elle qui rend la main au fil principal, et tout le poids est derrière
         // elle.
         let task = Task<ThumbnailReading, Never> {
-            await Self.make(source: source, destination: destination, maxPixelSize: maxPixelSize)
+            await Self.make(
+                source: source,
+                destination: destination,
+                maxPixelSize: maxPixelSize,
+                viaQuickLook: viaQuickLook
+            )
         }
         inFlight[name] = task
 
@@ -254,7 +301,7 @@ final class ThumbnailCache {
 
     /// Le disque d'abord, ImageIO seulement s'il le faut.
     private nonisolated static func make(
-        source: URL, destination: URL, maxPixelSize: Int
+        source: URL, destination: URL, maxPixelSize: Int, viaQuickLook: Bool = false
     ) async -> ThumbnailReading {
         if let existing = read(destination) {
             // La date de dernier usage est ce sur quoi l'éviction classe. Elle
@@ -266,11 +313,72 @@ final class ThumbnailCache {
             return ThumbnailReading(image: existing, fabricated: false)
         }
 
-        guard let rendered = render(source: source, maxPixelSize: maxPixelSize) else {
-            return .nothing
+        // **ImageIO d'abord, même pour un fichier, et QuickLook seulement après.**
+        // L'ordre inverse a été essayé et mesuré : pour un PNG parfaitement
+        // lisible, QuickLook rendait l'icône générique de document — à /tmp
+        // comme sur le Bureau, en réclamant `.thumbnail` seul, et à 256 px comme
+        // à 80. Or ImageIO lit ce fichier sans difficulté : c'est déjà lui qui
+        // fabrique les vignettes des images collées, avec le même
+        // sous-échantillonnage et le même budget.
+        //
+        // QuickLook garde ce qu'il est seul à savoir faire : la première page
+        // d'un PDF, une image de vidéo, et l'icône du type pour un `.mp3` ou une
+        // archive — c'est-à-dire tout ce dont ImageIO ne veut pas.
+        var rendered = render(source: source, maxPixelSize: maxPixelSize)
+        if rendered == nil, viaQuickLook {
+            rendered = await quickLook(source: source, maxPixelSize: maxPixelSize)
         }
+        guard let rendered else { return .nothing }
         return ThumbnailReading(image: ThumbnailImage(rendered), fabricated: write(rendered, to: destination))
     }
+
+    /// L'aperçu d'un fichier du disque, par QuickLook.
+    ///
+    /// **ImageIO ne convenait pas, et c'est la raison de ce second chemin.** Il
+    /// lit des images et rien d'autre : un PDF, une vidéo ou un `.mp3` lui
+    /// rendent `nil`, donc une ligne muette. QuickLook interroge le même moteur
+    /// que le Finder et l'aperçu de l'espace, et il dégrade tout seul —
+    /// vignette réelle si le type sait s'afficher, icône du type sinon. Une
+    /// entrée « fichier » a donc toujours quelque chose à montrer.
+    ///
+    /// **En deux temps, et le premier essai n'accepte pas l'icône.** `.all`
+    /// paraissait le choix évident — « rends ce que tu peux » — et c'est ce qui
+    /// a été essayé d'abord : mesuré, QuickLook rendait alors l'icône générique
+    /// de document pour un PNG parfaitement lisible, à /tmp comme sur le Bureau.
+    /// L'icône est une représentation valable de l'ensemble demandé, et c'est
+    /// celle qui arrive en premier. En excluant l'icône du premier essai, on
+    /// force la fabrication du vrai aperçu ; le second essai la réclame
+    /// explicitement pour les types qui n'en ont pas — un `.mp3`, une archive.
+    ///
+    /// **Et la taille demandée a un plancher.** Sous ~100 px, QuickLook
+    /// considère qu'une icône fait l'affaire et ne rend rien d'autre. Une
+    /// vignette de ligne fait 80 px : elle tombait pile du mauvais côté. On
+    /// demande donc au moins `previewFloor`, et l'image est affichée plus petite
+    /// — un aperçu trop grand se réduit, un aperçu absent ne se répare pas.
+    ///
+    /// L'échelle est fixée à 1 : le cache range des pixels, pas des points, et
+    /// c'est déjà l'unité de `maxPixelSize` pour l'autre chemin. Laisser
+    /// QuickLook appliquer l'échelle de l'écran ferait deux tailles de fichier
+    /// pour le même nom selon la machine qui l'a fabriqué.
+    private nonisolated static func quickLook(source: URL, maxPixelSize: Int) async -> CGImage? {
+        let side = CGFloat(max(maxPixelSize, previewFloor))
+
+        for types in [QLThumbnailGenerator.Request.RepresentationTypes.thumbnail, .icon] {
+            let request = QLThumbnailGenerator.Request(
+                fileAt: source, size: CGSize(width: side, height: side),
+                scale: 1, representationTypes: types
+            )
+            if let generated = try? await QLThumbnailGenerator.shared
+                .generateBestRepresentation(for: request) {
+                return generated.cgImage
+            }
+        }
+        return nil
+    }
+
+    /// La taille minimale à demander à QuickLook pour obtenir autre chose qu'une
+    /// icône. Mesurée : à 80 px il rend l'icône, à 256 il rend l'aperçu.
+    private nonisolated static let previewFloor = 256
 
     /// Fabrique la vignette **sans jamais matérialiser l'image entière**.
     ///

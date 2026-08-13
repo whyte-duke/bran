@@ -117,6 +117,7 @@ final class ClipboardPanelPresenter {
         // Un échec est un événement, pas un état : il ne survit pas à
         // l'ouverture suivante.
         model?.lastFailure = nil
+        model?.resetSelection()
         model?.announceOpening()
         panel.makeKeyAndOrderFront(nil)
 
@@ -166,6 +167,7 @@ final class ClipboardPanelPresenter {
             store: store,
             shortcutName: settings.trigger.displayName,
             thumbnail: { [weak self] entry in self?.thumbnail(for: entry) },
+            fileBytes: { [weak self] entry in self?.fileBytes(for: entry) },
             onPaste: { [weak self] in self?.paste($0, variant: .faithful) },
             onPastePlain: { [weak self] in self?.paste($0, variant: .plainText) },
             onCopyOnly: { [weak self] in self?.copyOnly($0) },
@@ -234,6 +236,55 @@ final class ClipboardPanelPresenter {
             model?.thumbnailGeneration &+= 1
         }
         return nil
+    }
+
+    /// Ce que pèsent les fichiers copiés, par entrée. `nil` veut dire « pas
+    /// encore demandé » ; une entrée mesurée absente vaut zéro octet retenu.
+    private var measuredFiles: [ClipboardEntry.ID: Int?] = [:]
+
+    /// Le poids d'un fichier copié, relevé une fois puis retenu.
+    ///
+    /// **Un `stat`, pas une lecture.** La taille est la seule chose qu'on veuille
+    /// d'un fichier qu'on n'ouvre jamais, et c'est aussi ce qui décide quelque
+    /// chose : on ne colle pas un fichier de quatre gigaoctets comme une capture
+    /// d'écran. Elle n'est pas stockée dans l'entrée parce qu'un fichier vit sa
+    /// vie après la copie — celle qu'on affiche est celle de maintenant.
+    ///
+    /// Le relevé est fait hors du corps de la ligne, sur le patron exact des
+    /// vignettes : la première demande rend `nil` et lance le travail, et c'est
+    /// l'incrément de `thumbnailGeneration` qui fait revenir la ligne le
+    /// chercher. Une somme de plusieurs fichiers pour une sélection multiple :
+    /// c'est le poids de ce qui a été copié, pas celui du premier.
+    private func fileBytes(for entry: ClipboardEntry) -> Int? {
+        if let known = measuredFiles[entry.id] { return known }
+        guard entry.kind == .file else { return nil }
+
+        measuredFiles[entry.id] = Int?.none
+        let paths = entry.filePaths
+        Task { [weak self] in
+            let total = await Self.weigh(paths)
+            guard let self else { return }
+            measuredFiles[entry.id] = total
+            model?.thumbnailGeneration &+= 1
+        }
+        return nil
+    }
+
+    /// La somme des tailles, hors du fil principal. Rend `nil` si aucun des
+    /// chemins n'a pu être lu : le fichier a été déplacé ou supprimé, et écrire
+    /// « 0 octet » serait faux.
+    private nonisolated static func weigh(_ paths: [String]) async -> Int? {
+        var total = 0
+        var found = false
+        for path in paths {
+            let values = try? URL(fileURLWithPath: path)
+                .resourceValues(forKeys: [.fileSizeKey])
+            if let size = values?.fileSize {
+                total += size
+                found = true
+            }
+        }
+        return found ? total : nil
     }
 
     /// Où le panneau se pose : centré horizontalement, dans le tiers supérieur

@@ -115,9 +115,26 @@ public struct ClipboardSource: Sendable, Codable, Equatable, Hashable {
     /// moment de la copie, quand l'application existait encore.
     public let name: String?
 
-    public init(bundleIdentifier: String?, name: String?) {
+    /// Le titre de la fenêtre au premier plan au moment de la copie, quand il a
+    /// pu être lu.
+    ///
+    /// **Il dit bien plus que le nom de l'application, et il tient dans la même
+    /// place.** « Google Chrome » est vrai de la moitié de l'historique —
+    /// mesuré, Chrome et Terminal produisent 77 % des entrées — et n'aide donc à
+    /// reconnaître aucune ligne en particulier. « Devis LACME — CRM » désigne
+    /// l'endroit exact d'où le texte vient, ce qui est la vraie question qu'on
+    /// se pose trois semaines plus tard.
+    ///
+    /// `Optional` par contrat, comme tout ce qui s'ajoute à un type déjà écrit
+    /// sur le disque — et `nil` reste fréquent : sans l'autorisation
+    /// Enregistrement de l'écran, aucun titre de fenêtre n'est lisible. C'est
+    /// alors `name` qui parle, ce qu'il faisait seul jusqu'ici.
+    public let windowTitle: String?
+
+    public init(bundleIdentifier: String?, name: String?, windowTitle: String? = nil) {
         self.bundleIdentifier = bundleIdentifier
         self.name = name
+        self.windowTitle = windowTitle
     }
 
     /// Vrai quand on ne sait rien de la source. L'interface doit alors se taire

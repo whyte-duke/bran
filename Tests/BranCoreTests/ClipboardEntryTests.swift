@@ -535,4 +535,118 @@ struct ClipboardEntryTests {
         )
         #expect(entry.source?.isUnknown == true)
     }
+
+    // MARK: - Le nom d'un fichier copié
+
+    /// **Une entrée `.file` n'avait aucun titre.** `preview` reste vide exprès —
+    /// le contenu n'est pas lu — donc la ligne retombait sur le nom du *type*, et
+    /// l'historique affichait « Fichier » autant de fois qu'on avait copié des
+    /// fichiers, sans qu'aucune ligne ne se distingue d'une autre.
+
+    /// **Le magasin range des URL, pas des chemins.** Mesuré sur l'historique
+    /// réel : `file:///Users/x/photo.png`. Les traiter comme des chemins
+    /// fabriquait un fichier inexistant nommé « file: », donc aucun aperçu — la
+    /// vraie raison pour laquelle une image copiée depuis le Finder ne montrait
+    /// jamais qu'une icône de document.
+    @Test("Une URL de fichier est ramenée à son chemin, décodé")
+    func urlRameneeAuChemin() {
+        let entry = ClipboardEntry(
+            id: UUID(), copiedAt: .now, kind: .file, preview: "",
+            fileURLs: ["file:///Users/x/photo%20de%20vacances.png"]
+        )
+
+        #expect(entry.filePaths == ["/Users/x/photo de vacances.png"])
+        #expect(entry.fileTitle == "photo de vacances.png")
+        #expect(entry.fileTypeName == "PNG")
+    }
+
+    @Test("Les formes tordues ne font perdre ni chemin ni ligne")
+    func formesTordues() {
+        let cas: [(String, String)] = [
+            // Un `#` encodé, comme le presse-papiers l'écrit — espace compris.
+            ("file:///a/note%23%202.png", "/a/note# 2.png"),
+            // Un `?` encodé de la même façon.
+            ("file:///a/quoi%3F.png", "/a/quoi?.png"),
+            // Une chaîne vide reste une chaîne vide : rien à inventer.
+            ("", ""),
+            // Ce qui n'est pas une URL de fichier n'est pas touché.
+            ("https://exemple.fr/a.png", "https://exemple.fr/a.png"),
+            // Un chemin POSIX qui contient « file:// » ailleurs qu'au début.
+            ("/a/dossier file:///b.png", "/a/dossier file:///b.png"),
+        ]
+
+        for (raw, attendu) in cas {
+            let entry = ClipboardEntry(
+                id: UUID(), copiedAt: .now, kind: .file, preview: "", fileURLs: [raw]
+            )
+            #expect(entry.filePaths == [attendu], "pour \(raw)")
+        }
+    }
+
+    @Test("Ce qui n'est pas une URL de fichier est rendu tel quel")
+    func chaineNonURLInchangee() {
+        let entry = ClipboardEntry(
+            id: UUID(), copiedAt: .now, kind: .file, preview: "",
+            fileURLs: ["/Users/x/déjà un chemin.txt"]
+        )
+
+        #expect(entry.filePaths == ["/Users/x/déjà un chemin.txt"])
+        #expect(entry.fileTitle == "déjà un chemin.txt")
+    }
+
+    @Test("Un fichier copié porte son nom, pas celui de son type")
+    func fichierPorteSonNom() {
+        let entry = ClipboardEntry(
+            id: UUID(), copiedAt: .now, kind: .file, preview: "",
+            fileURLs: ["/Users/x/Documents/rapport annuel.pdf"]
+        )
+
+        #expect(entry.fileTitle == "rapport annuel.pdf")
+        #expect(entry.fileTypeName == "PDF")
+    }
+
+    @Test("Une sélection multiple annonce le premier nom et le reste")
+    func selectionMultipleNommee() {
+        let entry = ClipboardEntry(
+            id: UUID(), copiedAt: .now, kind: .file, preview: "",
+            fileURLs: ["/a/un.png", "/a/deux.png", "/a/trois.png"]
+        )
+
+        #expect(entry.fileTitle == "un.png + 2")
+        #expect(entry.itemCount == 3)
+    }
+
+    @Test("Ce qui n'est pas un fichier n'a ni nom ni type de fichier")
+    func texteNaPasDeNomDeFichier() {
+        let entry = ClipboardEntry(
+            id: UUID(), copiedAt: .now, kind: .text, preview: "bonjour"
+        )
+
+        #expect(entry.fileTitle == nil)
+        #expect(entry.fileTypeName == nil)
+    }
+
+    @Test("Ce qui suit un point n'est pas forcément une extension")
+    func extensionImplausible() {
+        // Mesuré sur l'historique réel : des chemins finissant par
+        // « id=6571367.66920817 » annonçaient le type « 66920817 ».
+        let entry = ClipboardEntry(
+            id: UUID(), copiedAt: .now, kind: .file, preview: "",
+            fileURLs: ["/x/track/id=6571367.66920817"]
+        )
+
+        #expect(entry.fileTypeName == nil)
+        #expect(entry.fileTitle == "id=6571367.66920817")
+    }
+
+    @Test("Un fichier sans extension n'invente pas de type")
+    func fichierSansExtension() {
+        let entry = ClipboardEntry(
+            id: UUID(), copiedAt: .now, kind: .file, preview: "",
+            fileURLs: ["/usr/local/bin/bran"]
+        )
+
+        #expect(entry.fileTitle == "bran")
+        #expect(entry.fileTypeName == nil)
+    }
 }

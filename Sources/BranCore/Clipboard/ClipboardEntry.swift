@@ -420,6 +420,90 @@ public struct ClipboardEntry: Codable, Identifiable, Equatable, Sendable {
     /// Le total en octets des contenus référencés, purgés ou non.
     public var totalBlobBytes: Int { (blobs ?? []).reduce(0) { $0 + $1.bytes } }
 
+    /// Les chemins des fichiers copiés, **en POSIX**, décodés.
+    ///
+    /// **`fileURLs` contient des URL, pas des chemins, et le nom du champ le
+    /// disait.** Ce qui est écrit sur le disque ressemble à
+    /// `file:///Users/x/photo%20de%20vacances.png` : c'est ce que le
+    /// presse-papiers porte, et le stocker tel quel est le bon choix — voir la
+    /// déclaration du champ, qui explique pourquoi ce sont des `String`.
+    ///
+    /// Ce qui n'allait pas, c'est ce qu'on en faisait ensuite. Trois endroits
+    /// les traitaient comme des chemins : `URL(fileURLWithPath:)` fabriquait
+    /// alors un chemin *relatif* nommé « file: », donc un fichier inexistant, et
+    /// aucun aperçu ne pouvait être produit — mesuré, c'est la raison pour
+    /// laquelle une image copiée depuis le Finder ne montrait jamais qu'une
+    /// icône de document. Le nom affiché s'en ressentait aussi : le dernier
+    /// composant d'une URL à paramètres donnait `id=6571367.66920817`.
+    ///
+    /// La conversion est faite **une fois, ici**, plutôt qu'à chacun des trois
+    /// sites d'appel — c'est exactement le genre de règle que trois copies font
+    /// diverger. Ce qui n'est pas une URL de fichier est laissé tel quel : le
+    /// presse-papiers peut porter n'importe quoi, et inventer un chemin serait
+    /// pire que de rendre la chaîne d'origine.
+    public var filePaths: [String] {
+        (fileURLs ?? []).map { raw in
+            guard raw.hasPrefix("file://"), let url = URL(string: raw), url.isFileURL else {
+                return raw
+            }
+            let path = url.path(percentEncoded: false)
+            // **La chaîne d'origine plutôt qu'un chemin vide.** `URL(string:)`
+            // coupe à un `#` non encodé et rend alors un chemin tronqué ou nul.
+            // Le presse-papiers de macOS encode correctement, mais cette entrée
+            // peut avoir été écrite par une version antérieure ou par n'importe
+            // quelle application : rendre la chaîne telle qu'elle est écrite
+            // laisse au moins l'appelant afficher quelque chose de juste.
+            return path.isEmpty ? raw : path
+        }
+    }
+
+    /// Le nom des fichiers copiés, tel qu'une ligne doit l'écrire, ou `nil` quand
+    /// l'entrée n'est pas un fichier.
+    ///
+    /// **Une entrée `.file` n'avait aucun titre, et c'est un défaut qu'on ne voit
+    /// qu'à l'usage.** `preview` reste vide exprès pour un fichier — le contenu
+    /// n'est pas lu, et y écrire quoi que ce soit mettrait une chaîne
+    /// d'interface dans une donnée. La ligne retombait donc sur le nom du
+    /// **type**, et l'historique affichait « Fichier », « Fichier », « Fichier »,
+    /// une ligne par copie, sans qu'aucune ne se distingue d'une autre. Or le
+    /// nom est là, dans `fileURLs`, depuis le premier jour.
+    ///
+    /// Dérivé et non stocké, pour la raison qui interdisait déjà de le mettre
+    /// dans `preview` : c'est une **présentation** du chemin, et la présentation
+    /// change sans que la donnée bouge.
+    ///
+    /// Au-delà d'un fichier, le premier nom et le compte — « photo.jpg + 4 » —
+    /// plutôt que la liste : une ligne fait une ligne de haut, et le premier nom
+    /// est celui qui permet de reconnaître la sélection.
+    public var fileTitle: String? {
+        guard kind == .file else { return nil }
+        let paths = filePaths
+        guard let first = paths.first else { return nil }
+        let name = (first as NSString).lastPathComponent
+        guard name.isEmpty == false else { return nil }
+        return paths.count > 1 ? "\(name) + \(paths.count - 1)" : name
+    }
+
+    /// Le type des fichiers copiés, en majuscules — « JPG », « MP3 » — ou `nil`
+    /// quand il n'y en a pas.
+    ///
+    /// Ce que la ligne met à la place du poids, qu'un fichier copié n'a pas :
+    /// rien n'est lu, donc rien n'est pesé, et aller le chercher coûterait un
+    /// accès disque par ligne dessinée. L'extension, elle, est dans le chemin.
+    /// **Tout ce qui suit un point n'est pas une extension**, et l'historique
+    /// réel l'a montré au premier essai : des entrées dont le chemin finissait
+    /// par `id=6571367.66920817` annonçaient fièrement le type « 66920817 ». Une
+    /// extension de fichier est courte et alphabétique — `jpg`, `png`, `mp3`,
+    /// `heic`. Ce qui ne l'est pas ne se laisse pas nommer, et il vaut mieux ne
+    /// rien dire que d'inventer un type.
+    public var fileTypeName: String? {
+        guard kind == .file, let first = filePaths.first else { return nil }
+        let ext = (first as NSString).pathExtension
+        guard (1...5).contains(ext.count) else { return nil }
+        guard ext.allSatisfy(\.isLetter) else { return nil }
+        return ext.uppercased()
+    }
+
     /// Les blobs ont-ils été supprimés par la rétention ? L'entrée, elle, reste.
     public var blobsArePurged: Bool { blobsPurgedAt != nil }
 
@@ -491,7 +575,7 @@ public struct ClipboardEntry: Codable, Identifiable, Equatable, Sendable {
 
     /// `Int64` et non `Int` : `ByteCountFormatStyle` n'accepte que celui-là, et
     /// `ClipboardBlobRef.bytes` est un `Int`.
-    private static func formatted(bytes: Int) -> String {
+    public static func formatted(bytes: Int) -> String {
         Int64(bytes).formatted(.byteCount(style: .file))
     }
 

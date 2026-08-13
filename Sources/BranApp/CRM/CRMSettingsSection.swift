@@ -12,6 +12,12 @@ struct CRMSettingsSection: View {
         Section("Castral CRM") {
             TextField("Adresse du CRM", text: $configuration.baseURL, prompt: Text("https://crm.castral.fr"))
                 .textContentType(.URL)
+                // **C'est ici que le Trousseau s'ouvre, et nulle part ailleurs
+                // au lancement.** Le champ ci-dessous affiche le jeton : il faut
+                // donc le lire, et une alerte système qui arrive pendant qu'on
+                // regarde l'écran « Castral CRM » se comprend toute seule. Voir
+                // `CRMConfiguration.loadToken()` pour ce que ça évite.
+                .onAppear { configuration.loadToken() }
 
             SecureField("Jeton d'enregistrement", text: $configuration.token, prompt: Text("rec_…"))
                 .textContentType(.password)

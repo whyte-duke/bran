@@ -101,7 +101,37 @@ enum Size {
     /// texte, au-delà duquel c'est la prévisualisation qui se rogne, pas la
     /// ligne qui grandit. C'est le prix assumé de la régularité du défilement,
     /// et 44 est sur la grille de 4 points de `Space` (11 × 4).
-    static let clipboardRow: CGFloat = 44
+    /// **34, et c'est un renversement assumé du raisonnement ci-dessus.**
+    ///
+    /// Les 44 points venaient d'un empilement : un titre au-dessus d'une méta,
+    /// séparés, plus les marges. La régularité était juste, la disposition ne
+    /// l'était pas — deux lignes de texte pour une entrée dont **une seule**
+    /// porte ce qu'on cherche. À l'usage, le panneau montrait neuf entrées là où
+    /// l'écran en aurait porté douze, et retrouver un texte copié il y a quatre
+    /// copies demandait de faire défiler.
+    ///
+    /// La méta est passée à droite du titre, sur la même ligne : elle est courte
+    /// — une application, un instant relatif — et le titre se rogne déjà. 34
+    /// points portent une ligne de `Type.cardBody` avec `Space.tight` de part et
+    /// d'autre, restent sur la grille de 4 (8 × 4), et font tenir onze entrées
+    /// dans la même fenêtre au lieu de neuf.
+    static let clipboardRow: CGFloat = 34
+
+    /// **La ligne d'une image ou d'un fichier**, plus haute que celle d'un texte.
+    ///
+    /// **Une liste à deux hauteurs, alors que le commentaire de `clipboardRow`
+    /// défendait l'inverse.** L'argument — « une liste dont les lignes ne font
+    /// pas toutes la même hauteur ne se parcourt pas en diagonale » — vaut pour
+    /// des lignes qui portent la même chose. Ce n'est pas le cas ici : une ligne
+    /// de texte se lit, une ligne d'image se **regarde**, et une vignette de 28
+    /// points ne permettait pas de distinguer deux captures d'écran de la même
+    /// application. Serrer le texte et desserrer l'image ne sont pas deux
+    /// réglages contradictoires, ce sont deux réponses à deux besoins que la
+    /// hauteur unique confondait.
+    ///
+    /// Le parcours en diagonale reste tenu par ce qui le tenait vraiment :
+    /// l'alignement à gauche du titre, identique d'une sorte à l'autre.
+    static let clipboardMediaRow: CGFloat = 52
 
     /// **La largeur du panneau d'historique.**
     ///
@@ -129,7 +159,20 @@ enum Size {
     ///
     /// Au-delà, la liste défile : c'est le rôle de la recherche, pas celui de la
     /// hauteur, de retrouver une entrée d'il y a trois semaines.
-    static let clipboardPanelHeight: CGFloat = 9 * clipboardRow + 84
+    ///
+    /// **Le chiffre est resté, sa dérivation a changé.** Il valait
+    /// `9 × clipboardRow + 84` quand une ligne faisait 44 points ; elle en fait
+    /// 34, et recalculer aurait **rétréci** la fenêtre au moment précis où on
+    /// cherchait à en voir plus. La hauteur est donc figée à ce qu'elle était, et
+    /// ce sont les entrées qui gagnent : onze au lieu de neuf.
+    ///
+    /// Ce que ça concède : ⌘1…⌘9 n'atteint plus que les neuf premières, et deux
+    /// lignes visibles n'ont pas de raccourci chiffré. C'était l'objection qui
+    /// avait fixé le neuf, et elle pèse moins que ce qu'elle coûtait — les
+    /// flèches et le clic atteignent tout, une liste qui défile montre de toute
+    /// façon des lignes sans numéro, et les deux entrées gagnées sont vues sans
+    /// aucun geste.
+    static let clipboardPanelHeight: CGFloat = 480
 
     /// **Le carré de vignette d'une ligne de l'historique** : l'aperçu d'une
     /// image, l'icône d'un fichier.
@@ -152,7 +195,27 @@ enum Size {
     /// c'est précisément ce qui rend une liste illisible en diagonale. Le
     /// cadrage est l'affaire de la vue. Son rayon est `Radius.control` : une
     /// vignette est de la taille d'un bouton d'icône, pas d'une carte.
-    static let clipboardThumbnail: CGFloat = 28
+    /// **40, contre 28.** Le raisonnement du dessus tenait la vignette sous la
+    /// hauteur d'une ligne de texte ; elle vit maintenant dans une ligne de
+    /// média, qui fait 52 points et lui en laisse 40 avec `Space.tight` de part
+    /// et d'autre.
+    ///
+    /// Ce que les 12 points achètent : à 28 points — 56 pixels — deux captures
+    /// d'écran de la même application se distinguaient à peine ; à 40, soit 80
+    /// pixels, on reconnaît la fenêtre qu'on a copiée. C'est la seule chose
+    /// qu'on demande à une vignette d'historique, et elle ne la rendait
+    /// qu'à moitié.
+    static let clipboardThumbnail: CGFloat = 40
+
+    /// **Ce que la méta d'une ligne a le droit de prendre**, à droite du titre.
+    ///
+    /// 200 points sur les 460 de la fenêtre, soit un peu moins de la moitié :
+    /// assez pour « Google Chrome · il y a 32 minutes · 606 octets », qui est le
+    /// cas complet, et jamais assez pour que le titre — l'information qu'on
+    /// cherche — soit réduit à une ellipse par une application au nom long.
+    /// Au-delà, c'est la méta qui se rogne : elle se relit dans le détail, le
+    /// titre non.
+    static let clipboardMeta: CGFloat = 200
 }
 
 // MARK: - Typographie

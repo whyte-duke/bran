@@ -278,4 +278,56 @@ struct ThumbnailPlanTests {
     func listeVide() {
         #expect(ThumbnailPlan.budget(bytes: 0).filesToEvict(from: []).isEmpty)
     }
+
+    // MARK: - Les fichiers du Finder
+
+    /// **Le défaut que ces trois tests ferment.** `source(for:)` ne rendait un
+    /// aperçu que pour `kind == .image`, c'est-à-dire pour une image *collée*.
+    /// Une image *copiée depuis le Finder* est un `.file` — le presse-papiers
+    /// porte une URL, pas des pixels — et n'avait donc aucune vignette : une
+    /// liste de captures d'écran s'affichait en icônes de document identiques.
+
+    @Test("Un fichier du Finder a un aperçu, tiré de son chemin")
+    func fichierAUnApercu() throws {
+        let entry = ClipboardEntry(
+            id: UUID(), copiedAt: .now, kind: .file, preview: "",
+            fileURLs: ["/Users/x/Desktop/photo.jpg"]
+        )
+
+        #expect(ThumbnailPlan.hasThumbnail(entry))
+        #expect(ThumbnailPlan.previewedFile(for: entry) == "/Users/x/Desktop/photo.jpg")
+        // Pas de blob : c'est bien l'autre route qui répond.
+        #expect(ThumbnailPlan.source(for: entry) == nil)
+    }
+
+    @Test("Deux fichiers différents ne partagent pas la même vignette")
+    func deuxFichiersDeuxVignettes() {
+        let stamp = Date(timeIntervalSinceReferenceDate: 1_000)
+        let a = ThumbnailPlan.fileName(forPath: "/a/photo.jpg", stamp: stamp, size: .row)
+        let b = ThumbnailPlan.fileName(forPath: "/b/photo.jpg", stamp: stamp, size: .row)
+
+        #expect(a != b)
+        // La même entrée redemande la même vignette.
+        #expect(a == ThumbnailPlan.fileName(forPath: "/a/photo.jpg", stamp: stamp, size: .row))
+        // Et la taille demandée reste dans le nom, comme pour un blob.
+        #expect(a != ThumbnailPlan.fileName(forPath: "/a/photo.jpg", stamp: stamp, size: .detail))
+        // **Un fichier remplacé au même chemin ne resservira pas l'ancienne
+        // vignette** : une copie plus tardive est une entrée neuve, donc une
+        // clé neuve.
+        #expect(a != ThumbnailPlan.fileName(
+            forPath: "/a/photo.jpg",
+            stamp: Date(timeIntervalSinceReferenceDate: 2_000),
+            size: .row
+        ))
+    }
+
+    @Test("Une entrée sans chemin ne réclame aucun aperçu")
+    func fichierSansChemin() {
+        let entry = ClipboardEntry(
+            id: UUID(), copiedAt: .now, kind: .file, preview: "", fileURLs: []
+        )
+
+        #expect(ThumbnailPlan.hasThumbnail(entry) == false)
+        #expect(ThumbnailPlan.previewedFile(for: entry) == nil)
+    }
 }

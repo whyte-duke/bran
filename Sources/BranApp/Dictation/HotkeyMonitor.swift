@@ -153,6 +153,26 @@ final class HotkeyMonitor {
     private struct WatchedKeys: Sendable {
         var claimed: Set<UInt16> = []
         var copyHint: Set<UInt16> = []
+
+        /// Les accords que bran **retire** du flux : l'application de devant ne
+        /// les verra jamais.
+        ///
+        /// **C'est la différence entre observer et revendiquer, et elle se paie
+        /// en accords complets, pas en codes de touche.** `claimed` ne porte que
+        /// des codes, ce qui suffit à décider s'il faut regarder l'événement de
+        /// plus près. Consommer demande davantage : la touche C est à la fois
+        /// celle du presse-papiers (⌘⇧C) et celle de la copie (⌘C). Avaler tous
+        /// les événements de code 8 supprimerait ⌘C de tout le système — la
+        /// fonction que bran existe précisément pour observer.
+        ///
+        /// N'y entrent donc que les liaisons à touche réelle, avec leurs
+        /// modificateurs. **Ni les déclencheurs à modificateur seul** — avaler
+        /// Commande droite casserait tous les raccourcis à deux mains des autres
+        /// applications, ce qui était la raison d'être du mode « écoute seule »
+        /// — **ni la touche d'annulation** : Échap appartient à celui qui est
+        /// devant, et une dictée qui n'a pas lieu ne lui donne aucun droit
+        /// dessus.
+        var exclusive: [HotkeyBinding] = []
     }
 
     /// Reconstruit le filtre à partir des liaisons, de l'annulation **et de
@@ -169,6 +189,19 @@ final class HotkeyMonitor {
         var codes = WatchedKeys(claimed: bindings.keyCodes)
         codes.claimed.insert(cancelKey.keyCode)
         if watchesCopies { codes.copyHint = CopyGesture.keyCodes }
+        // Les accords consommés se dérivent des mêmes liaisons, filtrées par la
+        // seule règle qui compte : une touche réelle. Voir `WatchedKeys.exclusive`.
+        codes.exclusive = bindings.assigned
+            .map(\.1)
+            .filter { $0.isModifierOnly == false }
+            // **Et il faut un modificateur.** Une liaison sur une touche nue —
+            // Échap, F5, une lettre — désigne une touche que les autres
+            // applications reçoivent comme saisie ordinaire ; la retirer du flux
+            // la ferait disparaître partout, et une touche Échap morte dans tout
+            // le système est exactement le genre de panne qu'on ne rattache
+            // jamais à l'application qui l'a causée. Ces liaisons-là restent
+            // observées sans être consommées, comme avant.
+            .filter { $0.modifiers != 0 }
         watchedKeys.withLock { $0 = codes }
     }
 
@@ -417,18 +450,44 @@ final class HotkeyMonitor {
             | (1 << CGEventType.keyUp.rawValue)
             | (1 << CGEventType.flagsChanged.rawValue)
 
-        // `listenOnly` : on observe sans consommer. Consommer Command droite
-        // casserait les raccourcis à deux mains de toutes les autres apps.
+        // **`defaultTap` et non `listenOnly`, et c'est un renversement.**
+        //
+        // Le commentaire d'origine disait : « on observe sans consommer,
+        // consommer Command droite casserait les raccourcis à deux mains de
+        // toutes les autres apps ». Le raisonnement était juste et la
+        // conclusion trop large. Il vaut pour un déclencheur à **modificateur
+        // seul** — Commande droite est une moitié de raccourci chez tout le
+        // monde, la retirer du flux serait un dégât. Il ne vaut pas pour un
+        // accord complet : ⌘⇧C n'appartient à personne en particulier, et le
+        // laisser passer, c'est le donner à *tout le monde en même temps*.
+        //
+        // Ce que ça coûtait, constaté à l'usage : ⌘⇧C ouvrait l'historique du
+        // presse-papiers **et** le sélecteur de couleurs de l'application de
+        // devant, **et** l'inspecteur de Chrome. Un raccourci global qui
+        // déclenche aussi la fonction de quelqu'un d'autre n'est pas un
+        // raccourci global, c'est une collision. Les gestionnaires de
+        // presse-papiers qui font ça correctement — Maccy passe par
+        // `RegisterEventHotKey` — retirent l'événement du flux ; c'est la
+        // définition même de « réserver » un raccourci.
+        //
+        // Le tap consomme donc, mais **uniquement** ce que `WatchedKeys.exclusive`
+        // décrit, c'est-à-dire les accords à touche réelle liés à une fonction.
+        // Tout le reste — modificateurs seuls, indice de copie, Échap, et les
+        // quatre-vingts frappes par minute qui ne nous concernent pas — ressort
+        // inchangé.
         guard let port = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: CGEventMask(mask),
             callback: { _, type, event, context in
                 guard let context else { return Unmanaged.passUnretained(event) }
                 let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(context).takeUnretainedValue()
-                monitor.receive(type: type, event: event)
-                return Unmanaged.passUnretained(event)
+                let verdict = monitor.receive(type: type, event: event)
+                // `nil` retire l'événement du flux. C'est la seule différence
+                // visible entre les deux modes de tap, et elle ne se produit que
+                // sur un accord que l'utilisateur a lui-même lié.
+                return verdict == .consume ? nil : Unmanaged.passUnretained(event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
@@ -507,12 +566,21 @@ final class HotkeyMonitor {
     /// exécute la suite comme n'importe quel autre travail de l'application.
     /// L'ordre est conservé : les jobs d'un acteur sont traités dans l'ordre où
     /// ils sont soumis, donc un appui ne peut pas doubler son relâchement.
-    nonisolated private func receive(type: CGEventType, event: CGEvent) {
+    /// Ce que le callback fait de l'événement après l'avoir regardé.
+    ///
+    /// Le nom dit le geste et non l'intention : `pass` ne veut pas dire « ça ne
+    /// m'intéresse pas » — une frappe peut très bien déclencher une fonction
+    /// *et* continuer sa route, c'est le cas de tous les déclencheurs à
+    /// modificateur seul.
+    enum Verdict { case pass, consume }
+
+    @discardableResult
+    nonisolated private func receive(type: CGEventType, event: CGEvent) -> Verdict {
         // Le réarmement d'abord : c'est la seule branche dont dépend la survie
         // des raccourcis.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             Task { @MainActor in self.reenable() }
-            return
+            return .pass
         }
 
         // — Les événements de bran, écartés avant tout le reste ——————————
@@ -532,7 +600,7 @@ final class HotkeyMonitor {
         // touche que la ligne d'après fait de toute façon.
         guard SyntheticEventTag.isOurs(
             event.getIntegerValueField(.eventSourceUserData)
-        ) == false else { return }
+        ) == false else { return .pass }
 
         // Lu ici, pas dans la tâche : `event` appartient au système et n'est
         // valide que le temps du callback.
@@ -548,7 +616,7 @@ final class HotkeyMonitor {
         let (isClaimed, watchesCopyOnThisKey) = watchedKeys.withLock {
             ($0.claimed.contains(keyCode), $0.copyHint.contains(keyCode))
         }
-        guard isClaimed || watchesCopyOnThisKey else { return }
+        guard isClaimed || watchesCopyOnThisKey else { return .pass }
 
         // — La répétition automatique du système ————————————————————————
         //
@@ -568,7 +636,16 @@ final class HotkeyMonitor {
         // les quatre-vingts frappes par minute qui ne nous concernent pas
         // reviendrait à défaire ce que ce filtre-là économise.
         if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
-            return
+            // **Consommée quand même si l'accord est lié.** Laisser filer les
+            // répétitions d'un raccourci qu'on a réservé les livrerait à
+            // l'application de devant : maintenir ⌘⇧C rouvrirait son sélecteur
+            // de couleurs, une fois par répétition, sans jamais rouvrir le nôtre.
+            //
+            // Sans passer par `verdictFor` : une répétition n'est pas un nouvel
+            // appui, et l'inscrire dans `consumedKeys` y laisserait un doublon
+            // que le relâchement unique ne retirerait qu'une fois.
+            return matchesExclusive(keyCode: keyCode, flags: event.flags.rawValue)
+                ? .consume : .pass
         }
 
         // Lu ici pour la même raison que le code de touche : `event` meurt avec
@@ -594,7 +671,19 @@ final class HotkeyMonitor {
         //
         // La répétition automatique est déjà écartée plus haut : tenir ⌘C ne
         // produit qu'un indice.
-        if watchesCopyOnThisKey,
+        // Le verdict est rendu **avant** l'indice de copie, et cet ordre est un
+        // correctif : voir la branche suivante.
+        let verdict = verdictFor(type: type, keyCode: keyCode, flags: flags.rawValue)
+
+        // **Un accord consommé ne peut pas être une copie.** Le test de copie
+        // est « contient Commande » et non « égale Commande » — à raison, ⌘⌥C et
+        // ⌘⇧C copient vraiment dans le Finder. Mais depuis que bran *retire* du
+        // flux les accords qu'il réserve, son propre raccourci ⌘⇧C n'atteint
+        // plus personne : aucune application n'écrira, et l'indice annoncerait à
+        // la machine du presse-papiers une copie qui ne peut pas arriver. Elle
+        // attendrait un changement pour rien, à chaque ouverture du panneau.
+        if verdict == .pass,
+           watchesCopyOnThisKey,
            type == .keyDown,
            CopyGesture.matches(keyCode: keyCode, flags: flags.rawValue),
            let baseline = knownChangeCount.withLock({ $0 }) {
@@ -604,10 +693,66 @@ final class HotkeyMonitor {
         // **La lettre nue s'arrête ici.** C et X ne sont surveillées que pour
         // l'indice ; sans fonction liée à ce code, il n'y a rien à classer, et
         // écrire de la prose ne doit pas créer une tâche par frappe.
-        guard isClaimed else { return }
+        guard isClaimed else { return .pass }
 
         Task { @MainActor in
             self.classify(type: type, keyCode: keyCode, flags: flags)
+        }
+
+        return verdict
+    }
+
+    /// Les touches dont l'appui a été retiré du flux, en attente de leur
+    /// relâchement.
+    ///
+    /// **L'appariement n'est pas un raffinement, il ferme deux trous.** Le
+    /// verdict était recalculé à chaque événement à partir des modificateurs du
+    /// moment, ce qui donne deux cas faux, tous deux ordinaires :
+    ///
+    /// - **relâcher ⌘ avant la lettre.** L'appui de ⌘⇧C est consommé ; au
+    ///   relâchement du C, les modificateurs sont déjà partis, l'accord ne
+    ///   correspond plus, et un `keyUp` orphelin part chez l'application de
+    ///   devant — qui a tout lieu de se croire dans un état qu'elle n'a jamais
+    ///   atteint ;
+    /// - **le tap qui s'arme touche tenue.** L'appui est passé chez l'autre, le
+    ///   relâchement serait avalé — le symétrique du même défaut.
+    ///
+    /// Un `Mutex` pour la même raison que `watchedKeys` : le callback du tap
+    /// n'est isolé sur rien, et il ne peut attendre personne.
+    private let consumedKeys = Mutex<Set<UInt16>>([])
+
+    /// Faut-il retirer cet événement du flux ?
+    nonisolated private func verdictFor(
+        type: CGEventType, keyCode: UInt16, flags: UInt64
+    ) -> Verdict {
+        switch type {
+        case .keyDown:
+            guard matchesExclusive(keyCode: keyCode, flags: flags) else { return .pass }
+            consumedKeys.withLock { $0.insert(keyCode) }
+            return .consume
+
+        case .keyUp:
+            // Le relâchement suit son appui, quels que soient les modificateurs
+            // encore tenus à cet instant.
+            let wasConsumed = consumedKeys.withLock { $0.remove(keyCode) != nil }
+            return wasConsumed ? .consume : .pass
+
+        default:
+            // `flagsChanged` n'est jamais consommé : c'est le domaine des
+            // déclencheurs à modificateur seul, et les retirer casserait les
+            // raccourcis à deux mains de tout le système.
+            return .pass
+        }
+    }
+
+    /// Cet accord est-il réservé par une fonction de bran ?
+    ///
+    /// Un verrou pris et rendu, aucun code étranger appelé — la même contrainte
+    /// que pour `watchedKeys`, et pour la même raison : un tap qui bloque est un
+    /// tap que macOS coupe.
+    nonisolated private func matchesExclusive(keyCode: UInt16, flags: UInt64) -> Bool {
+        watchedKeys.withLock { keys in
+            keys.exclusive.contains { Self.matches($0, keyCode: keyCode, flags: flags) }
         }
     }
 
@@ -682,19 +827,31 @@ final class HotkeyMonitor {
     }
 
     private func matches(_ binding: HotkeyBinding, keyCode: UInt16, flags: CGEventFlags) -> Bool {
+        Self.matches(binding, keyCode: keyCode, flags: flags.rawValue)
+    }
+
+    /// La règle de correspondance, **écrite une fois**.
+    ///
+    /// `nonisolated` parce que le callback du tap l'appelle aussi, pour décider
+    /// s'il doit consommer la frappe — et cette décision doit être exactement la
+    /// même que celle qui déclenchera la fonction, sinon on avale une touche
+    /// qu'on n'utilise pas, ou on laisse passer celle qu'on utilise.
+    nonisolated static func matches(
+        _ binding: HotkeyBinding, keyCode: UInt16, flags: UInt64
+    ) -> Bool {
         guard binding.keyCode == keyCode else { return false }
         guard binding.modifiers != 0 else {
             // Sans modificateur exigé, on refuse quand même les combinaisons :
             // ⌘Échap ne doit pas annuler une dictée.
-            return flags.rawValue & Self.significantModifiers == 0
+            return flags & Self.significantModifiers == 0
         }
-        return flags.rawValue & Self.significantModifiers == binding.modifiers
+        return flags & Self.significantModifiers == binding.modifiers
     }
 
     /// Les bits qui comptent : Commande, Option, Contrôle, Majuscule. On ignore
     /// le verrouillage majuscule et le pavé numérique, qui polluent le masque
     /// sans jamais faire partie d'un raccourci.
-    private static let significantModifiers: UInt64 =
+    nonisolated private static let significantModifiers: UInt64 =
         CGEventFlags.maskCommand.rawValue
         | CGEventFlags.maskAlternate.rawValue
         | CGEventFlags.maskControl.rawValue

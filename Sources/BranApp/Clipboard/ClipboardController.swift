@@ -1,6 +1,7 @@
 import AppKit
 import BranCore
 import BranSpeech
+import BranWindows
 import Foundation
 import Observation
 import os
@@ -590,7 +591,20 @@ final class ClipboardController {
     private static func frontmostSource() -> ClipboardSource? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         return ClipboardSource(
-            bundleIdentifier: app.bundleIdentifier, name: app.localizedName
+            bundleIdentifier: app.bundleIdentifier,
+            name: app.localizedName,
+            // **Le titre est relevé ici, au moment de la copie, et jamais
+            // après.** Une fenêtre change de titre à chaque onglet ; le lire
+            // plus tard désignerait autre chose. C'est la même règle que pour le
+            // nom de l'application, et pour la même raison.
+            //
+            // Une énumération du serveur de fenêtres, mesurée à ~1 ms, sur un
+            // geste qui a lieu quelques fois par minute. Vide sans
+            // l'autorisation Enregistrement de l'écran — `kCGWindowName` n'est
+            // alors renseigné pour personne — auquel cas on ne stocke rien
+            // plutôt qu'une chaîne vide.
+            windowTitle: WindowList.frontmost()?.title.isEmpty == false
+                ? WindowList.frontmost()?.title : nil
         )
     }
 }
