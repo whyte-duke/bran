@@ -63,6 +63,8 @@ struct PermissionsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
+            launchAtLogin
+
             Spacer(minLength: 0)
 
             footer
@@ -75,6 +77,41 @@ struct PermissionsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refresh()
         }
+    }
+
+    /// Le démarrage automatique, **déjà activé**, et affiché pour qu'on le sache.
+    ///
+    /// bran l'enregistre au tout premier lancement — voir
+    /// `LoginItemService.adoptDefaultOnFirstLaunch()`. Toutes ses fonctions sont
+    /// actives par défaut, et celle-ci les conditionne : bran observe pour
+    /// proposer d'enregistrer une réunion, et un observateur qu'il faut penser à
+    /// lancer n'observe rien le jour où on l'oublie.
+    ///
+    /// **L'interrupteur est ici, et pas seulement dans les réglages.** Activer
+    /// quelque chose au nom de quelqu'un sans le lui montrer est une inscription
+    /// silencieuse, quelles que soient les bonnes raisons qu'on ait. Le montrer
+    /// sur l'écran d'accueil, allumé, avec de quoi l'éteindre sur place, en fait
+    /// une décision qu'on peut défaire en un clic sans aller la chercher.
+    ///
+    /// Pas de `CapabilityCard` : les trois cartes du dessus demandent une
+    /// autorisation au système, celle-ci n'en demande aucune. Leur donner la même
+    /// forme laisserait croire qu'il reste une quatrième case à cocher quelque
+    /// part.
+    private var launchAtLogin: some View {
+        Toggle(isOn: Binding(
+            get: { model.loginItem.isEnabled },
+            set: { model.setLaunchAtLogin($0) }
+        )) {
+            VStack(alignment: .leading, spacing: Space.tight) {
+                Text("Lancer bran à l'ouverture de session")
+                    .font(Type.cardTitle)
+                Text("bran veille en arrière-plan et propose d'enregistrer quand il reconnaît une réunion. Il ne démarre jamais un enregistrement tout seul.")
+                    .font(Type.cardBody)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .toggleStyle(.switch)
     }
 
     /// La sortie.

@@ -314,6 +314,12 @@ public final class AppModel {
         // le jour où il rouvre les réglages.
         DockPresence.apply()
 
+        // Au premier lancement seulement. Voir `adoptDefaultOnFirstLaunch` :
+        // toutes les fonctions de bran sont actives par défaut, et celle-ci
+        // conditionne les autres — un observateur qu'il faut penser à lancer
+        // n'observe rien le jour où on l'oublie.
+        loginItem.adoptDefaultOnFirstLaunch()
+
         directory.start()
         startDictation()
         startSnapshot()
@@ -333,6 +339,10 @@ public final class AppModel {
     private func startDictation() {
         notchPresenter = NotchPresenter(dictation: dictation, snapshot: snapshot)
         dictation.applySettings()
+        // Avant de relever la disponibilité, pas après : sans ça, le premier
+        // écran annoncerait « modèle absent » sur une machine qui l'a, et
+        // proposerait de retélécharger 461 Mo déjà présents.
+        SpeechModelHost.adoptLegacyModelIfNeeded()
         dictation.host.refreshAvailability()
 
         if dictationSettings.isEnabled {

@@ -94,12 +94,33 @@ final class SpeechModelHost {
 
     // MARK: - Présence sur le disque
 
-    /// Dossier où FluidAudio dépose les modèles. Exposé pour que les réglages
-    /// puissent l'ouvrir dans le Finder, et pour mesurer la place occupée.
+    /// Dossier du modèle, tel que FluidAudio le définit **lui-même**.
+    ///
+    /// **Ce chemin était écrit à la main, et il désignait le mauvais dossier.**
+    /// Il valait `Application Support/FluidAudio/Models`, c'est-à-dire le parent
+    /// du dossier du modèle et non le modèle. Trois usages en dépendent, et deux
+    /// se trompaient en silence :
+    ///
+    /// - `isDownloaded` marchait, par un hasard heureux : `AsrModels.modelsExist`
+    ///   remonte d'un cran avant d'ajouter le nom du dépôt, si bien que la
+    ///   question tombait au bon endroit ;
+    /// - `downloadedSize` mesurait le contenu de `Models/`, qui ne contient pas
+    ///   le modèle. Sur cette machine il y annonçait 483 Mo — le poids de
+    ///   fichiers hérités d'une ancienne version de FluidAudio — au lieu des
+    ///   461 Mo du modèle réellement chargé. Sur un Mac neuf, ce dossier n'existe
+    ///   même pas : la ligne aurait affiché « 0 octet » sous un modèle installé ;
+    /// - `deleteDownloadedModel` effaçait ce même `Models/`. Sur un Mac neuf,
+    ///   « Supprimer le modèle » n'aurait donc **rien** supprimé : aucun octet
+    ///   libéré, `isDownloaded` toujours vrai, l'interface toujours sur
+    ///   « installé », et pas un message pour l'expliquer. Un bouton qui ne fait
+    ///   rien et ne le dit pas est le pire des deux mondes.
+    ///
+    /// La valeur vient désormais de la bibliothèque et non d'une chaîne recopiée.
+    /// C'est elle qui décide où elle écrit ; le jour où elle change d'avis — ce
+    /// qu'elle a manifestement déjà fait, vu les fichiers hérités — bran suit
+    /// sans qu'on ait à s'en apercevoir.
     static var modelDirectory: URL {
-        URL.applicationSupportDirectory
-            .appending(path: "FluidAudio", directoryHint: .isDirectory)
-            .appending(path: "Models", directoryHint: .isDirectory)
+        AsrModels.defaultCacheDirectory(for: .v3)
     }
 
     /// Trois situations distinctes, et il faut les distinguer dans l'interface :
@@ -115,6 +136,56 @@ final class SpeechModelHost {
 
     static var isDownloaded: Bool {
         AsrModels.modelsExist(at: modelDirectory)
+    }
+
+    /// L'emplacement où une version antérieure de FluidAudio déposait le modèle.
+    ///
+    /// `Application Support/FluidAudio/<dépôt>`, sans le `Models/` intermédiaire.
+    /// C'est là qu'il atterrissait tant que `modelDirectory` était écrit à la
+    /// main, et c'est là qu'il se trouve encore sur toute machine ayant fait
+    /// tourner une version précédente de bran.
+    private static var legacyModelDirectory: URL {
+        URL.applicationSupportDirectory
+            .appending(path: "FluidAudio", directoryHint: .isDirectory)
+            .appending(path: modelDirectory.lastPathComponent, directoryHint: .isDirectory)
+    }
+
+    /// Récupère un modèle déposé à l'ancien emplacement, plutôt que de le
+    /// retélécharger.
+    ///
+    /// **Corriger `modelDirectory` déplaçait la question sans la poser** : bran
+    /// se serait mis à chercher au bon endroit un fichier qui est à l'ancien, en
+    /// aurait conclu « absent », et aurait redemandé 461 Mo à quelqu'un qui les a
+    /// déjà sur son disque — pour écrire une copie identique deux dossiers plus
+    /// bas et laisser la première pourrir là où elle est. Un correctif dont le
+    /// prix est un gigaoctet n'est pas un correctif.
+    ///
+    /// Un `moveItem`, donc : instantané, sur le même volume, et sans jamais deux
+    /// copies. Il ne s'exécute que si la destination n'a pas déjà le modèle —
+    /// dans ce cas l'ancien dossier est un doublon, et bran n'y touche pas : ce
+    /// sont des fichiers dans le dossier d'un autre, et les effacer sans le dire
+    /// n'est pas à lui d'en décider.
+    static func adoptLegacyModelIfNeeded() {
+        let manager = FileManager.default
+        let legacy = legacyModelDirectory
+        guard legacy != modelDirectory,
+              isDownloaded == false,
+              manager.fileExists(atPath: legacy.path(percentEncoded: false))
+        else { return }
+
+        do {
+            try manager.createDirectory(
+                at: modelDirectory.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try manager.moveItem(at: legacy, to: modelDirectory)
+            FeatureLog.record("modèle de dictée — repris de l'ancien emplacement, aucun téléchargement")
+        } catch {
+            // Rien n'est perdu : le modèle est resté où il était, et le pire qui
+            // puisse arriver est un téléchargement que l'utilisateur aurait
+            // voulu s'épargner. Ça se dit, ça ne bloque rien.
+            FeatureLog.record("modèle de dictée — reprise impossible : \(error.localizedDescription)")
+        }
     }
 
     /// Place occupée par le modèle, pour que « supprimer le modèle » ait un
