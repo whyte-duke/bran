@@ -12,3 +12,4 @@ xcuserdata/
 
 # Les worktrees des agents. Du scratch d'outillage, pas du dépôt.
 .claude/worktrees/
+dist/

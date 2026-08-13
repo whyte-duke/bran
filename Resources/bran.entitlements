@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Droits demandés par bran sous l'« environnement d'exécution renforcé »
+  (hardened runtime), qu'Apple exige pour notariser.
+
+  **Il n'y en a que deux, et c'est volontaire.** Chaque droit ajouté ici affaiblit
+  les protections que le renforcement vient d'installer, et Apple les examine à la
+  notarisation. On ne met donc que ce dont l'absence casserait une fonction
+  démontrable.
+
+  Ce qui n'est PAS ici, et pourquoi :
+
+  - **Aucun bac à sable** (`com.apple.security.app-sandbox`). bran écrit dans un
+    dossier que l'utilisateur choisit dans ses réglages, y compris sur un volume
+    externe, et le relit d'un lancement à l'autre. En bac à sable il faudrait
+    convertir ce chemin en signet sécurisé, le renouveler, et gérer son
+    expiration — pour un outil qui n'est pas distribué par l'App Store, où le bac
+    à sable n'est pas exigé, c'est du travail et une classe de pannes ajoutés
+    sans contrepartie.
+
+  - **Aucun droit d'enregistrement d'écran** : il n'en existe pas.
+    ScreenCaptureKit est entièrement gouverné par TCC, c'est-à-dire par la
+    fenêtre d'autorisation que l'utilisateur voit. Idem pour l'Accessibilité,
+    dont dépendent le raccourci global et le collage.
+
+  - **Ni `disable-library-validation` ni `allow-jit`.** Ils reviennent souvent
+    dans les recettes de notarisation d'applications qui font de l'apprentissage
+    automatique, par précaution. bran charge Parakeet par CoreML, qui consomme des
+    modèles compilés — des données, pas du code exécutable —, et ne charge aucune
+    bibliothèque tierce non signée. Les ajouter « au cas où » reviendrait à
+    désactiver la validation des bibliothèques sur une application qui a accès à
+    l'écran et au micro.
+
+  - **Pas d'`automation.apple-events`.** Il figurait ici, au motif que bran
+    « pilote l'application de destination pour y coller le texte dicté ». C'est
+    faux, et vérifié : le dépôt ne contient pas un seul Apple Event —
+    `Paster.swift` écrit dans le presse-papiers puis poste un ⌘V par
+    `CGEvent(keyboardEventSource:virtualKey:keyDown:)`, ce qui relève de
+    l'Accessibilité et de rien d'autre. Ce droit demande la permission d'ENVOYER
+    des Apple Events à d'autres applications : le réclamer aurait annoncé au
+    destinataire, et à l'examen d'Apple, une capacité de pilotage inter-application
+    que bran n'exerce pas. C'est exactement ce qu'on ne veut pas d'une application
+    qu'on demande à ses collègues d'installer.
+-->
+<plist version="1.0">
+<dict>
+    <!-- La dictée et l'enregistrement des réunions capturent le micro. Sans ce
+         droit, le renforcement refuse l'accès AVANT même que TCC pose sa
+         question : l'utilisateur ne verrait aucune fenêtre d'autorisation, et
+         conclurait que son micro est cassé. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>
