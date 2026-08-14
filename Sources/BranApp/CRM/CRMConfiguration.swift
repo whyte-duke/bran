@@ -110,7 +110,7 @@ final class CRMConfiguration {
     /// demanderait d'interroger le Trousseau à chaque passe de dessin, pour un
     /// geste que personne ne fait en cours de session ; le premier envoi qui
     /// échoue le dira, ce qui est le canal prévu.
-    private var tokenIsStored: Bool
+    private(set) var tokenIsStored: Bool
 
     /// Lit le jeton, une fois par session, et seulement quand il va servir.
     ///
@@ -136,6 +136,21 @@ final class CRMConfiguration {
         guard isLoaded == false else { return }
         isLoaded = true
         let stored = Keychain.get(Key.token)
+
+        // **La lecture qui échoue alors que l'élément existe se dit.**
+        //
+        // `Keychain.get` ne journalise que les codes d'erreur ; le cas qui a
+        // vraiment fait perdre du temps n'en produit aucun visible ici : le
+        // Trousseau contient l'élément — `exists` répond oui — et la lecture
+        // rend quand même `nil`, parce que la liste de contrôle d'accès désigne
+        // une signature qui n'est plus celle de l'application. bran concluait
+        // alors « pas de CRM », vidait la liste des rendez-vous, et se taisait.
+        if stored == nil, tokenIsStored {
+            FeatureLog.record(
+                "✗ CRM — le jeton est dans le Trousseau mais illisible : la liste de contrôle "
+                + "d'accès ne reconnaît plus la signature de bran. Ressaisir le jeton la refait."
+            )
+        }
         // La valeur est posée sans passer par `token`, dont le setter réécrirait
         // dans le Trousseau ce qu'on vient d'en lire.
         storedToken = stored ?? ""

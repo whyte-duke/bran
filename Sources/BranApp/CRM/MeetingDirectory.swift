@@ -93,7 +93,22 @@ final class MeetingDirectory {
 
         guard configuration.isConfigured, let client = configuration.makeClient() else {
             bookings = []
-            problem = nil
+            // **`problem = nil` était le défaut, et il a coûté une heure.**
+            //
+            // Une liste vide parce qu'il n'y a pas de rendez-vous et une liste
+            // vide parce qu'on n'a pas pu la charger s'affichaient exactement
+            // pareil : rien. Le 14 août 2026, un rendez-vous existait bel et
+            // bien dans le CRM — vérifié à la main, HTTP 200, il était là — et
+            // bran ne montrait pas même un avertissement. Il n'y avait aucun
+            // endroit où regarder.
+            //
+            // La phrase distingue les deux causes possibles, parce qu'elles
+            // n'appellent pas le même geste : renseigner la liaison, ou réparer
+            // un jeton que le Trousseau ne rend plus.
+            problem = configuration.tokenIsStored
+                ? "Jeton du CRM illisible : il est bien dans le Trousseau, mais bran n'y a pas accès. "
+                    + "Rouvrez les Réglages et ressaisissez-le."
+                : "Liaison CRM non configurée — voir les Réglages."
             return
         }
 
