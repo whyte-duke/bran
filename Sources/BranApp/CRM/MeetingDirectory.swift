@@ -36,8 +36,25 @@ final class MeetingDirectory {
     var upcoming: [CRMBooking] {
         let floor = Date.now.addingTimeInterval(-15 * 60)
         return bookings
-            .filter { $0.start_at >= floor && $0.status != "no_show" }
+            .filter { $0.start_at >= floor && Self.isActive($0.status) }
             .sorted { $0.start_at < $1.start_at }
+    }
+
+    /// Un rendez-vous encore d'actualité.
+    ///
+    /// **Le filtre portait sur `"no_show"`, une valeur qui n'existe pas.**
+    /// Vérifié le 14 août 2026 dans la base : les statuts réellement présents
+    /// sont `scheduled` (41), `cancelled` (6), `rescheduled` (1) et `completed`
+    /// (1). bran écartait donc une valeur qu'il ne rencontrera jamais, et
+    /// laissait passer les annulations : un rendez-vous annulé s'affichait comme
+    /// « à venir », et on s'organisait autour.
+    ///
+    /// La liste est écrite en négatif — ce qu'on écarte — parce que c'est le
+    /// sens sûr : un statut inconnu, ajouté demain côté CRM, doit apparaître
+    /// plutôt que disparaître. Un rendez-vous qu'on montre à tort se corrige d'un
+    /// coup d'œil ; un rendez-vous manquant ne se remarque qu'après coup.
+    private static func isActive(_ status: String) -> Bool {
+        ["cancelled", "rescheduled", "completed", "no_show"].contains(status) == false
     }
 
     var next: CRMBooking? { upcoming.first }
@@ -120,7 +137,18 @@ final class MeetingDirectory {
             // qui dure encore doit rester rapprochable.
             bookings = try await client.targets(
                 from: Date.now.addingTimeInterval(-4 * 3600),
-                to: Date.now.addingTimeInterval(7 * 24 * 3600)
+                // **Trente jours, et sept était trop peu.** Le 14 août 2026, la
+                // base contenait dix-huit rendez-vous à venir, tous rattachés et
+                // tous avec un lien de visio — et zéro dans les sept jours, le
+                // prochain tombant onze jours plus tard. L'API répondait donc
+                // « 0 rendez-vous », très correctement, et l'utilisateur en
+                // concluait que la liaison était cassée. Une liste vide qui a
+                // raison coûte plus cher qu'une liste longue.
+                //
+                // Le contrat autorise 90 jours ; on n'en prend pas 90 parce que
+                // la réponse est plafonnée à 100 lignes et qu'on préfère un mois
+                // complet à un trimestre tronqué.
+                to: Date.now.addingTimeInterval(30 * 24 * 3600)
             )
             lastRefresh = .now
             problem = nil
