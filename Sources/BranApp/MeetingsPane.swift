@@ -62,15 +62,6 @@ struct MeetingsPane: View {
                 // d'erreur CRM était inatteignable pour la même raison.
                 if model.uploads.configuration.isConfigured {
                     UpcomingMeetingsPanel(directory: model.directory)
-                        // **C'est ici que les rendez-vous se chargent, et pas au
-                        // lancement.** Venir sur cet onglet est le geste qui dit
-                        // « montre-moi mes rendez-vous » ; la fenêtre qui se
-                        // restaure toute seule au démarrage, non. La distinction
-                        // n'est pas cosmétique : le CRM réclame le jeton, donc
-                        // le Trousseau, donc une alerte système — et la poser
-                        // avant que l'utilisateur ait demandé quoi que ce soit
-                        // était le défaut. Voir `MeetingDirectory.refresh(userDriven:)`.
-                        .task { await model.directory.refresh() }
                 }
 
                 if isLoadingLibrary {
@@ -123,6 +114,26 @@ struct MeetingsPane: View {
             .padding(.horizontal, Space.gutter)
             .padding(.vertical, Space.stack)
         }
+        // **Le chargement est accroché ICI, sur le conteneur, et surtout pas sur
+        // le panneau qu'il remplit.**
+        //
+        // Il vivait sur `UpcomingMeetingsPanel`, et ça formait un cercle
+        // parfait : ce panneau ne rend rien tant qu'il n'a ni rendez-vous ni
+        // erreur ; une vue au corps vide n'« apparaît » pas pour SwiftUI ; son
+        // `.task` ne se déclenchait donc jamais ; et rien n'était jamais chargé.
+        //
+        // Le 14 août 2026 : un rendez-vous existait dans le CRM, le jeton était
+        // bon, la configuration valide — et bran n'a pas passé un seul appel.
+        // Sans un message nulle part, puisque le code qui pose les messages
+        // d'erreur est précisément celui qui ne tournait pas. Le diagnostic a
+        // demandé d'instrumenter trois fichiers pour découvrir que la question
+        // n'était jamais posée.
+        //
+        // Sur le conteneur, la tâche part dès que l'onglet s'affiche, quoi qu'il
+        // y ait à montrer. Venir ici reste le geste qui dit « montre-moi mes
+        // rendez-vous » — c'est ce geste qu'on écoute, pas le résultat qu'il
+        // produit.
+        .task { await model.directory.refresh() }
     }
 
     /// Le dossier est en cours de lecture et n'a encore rien rendu.

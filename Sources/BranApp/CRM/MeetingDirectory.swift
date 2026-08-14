@@ -124,8 +124,15 @@ final class MeetingDirectory {
             )
             lastRefresh = .now
             problem = nil
+            // Le dernier maillon qui manquait au diagnostic : ce que le CRM
+            // rend, et ce qu'il en reste après le filtre « à venir ». Les deux
+            // nombres ensemble, parce que leur écart est la réponse — un
+            // rendez-vous reçu mais écarté ne se distinguait pas d'un
+            // rendez-vous jamais reçu.
+            FeatureLog.record("CRM — \(bookings.count) rendez-vous reçus, \(upcoming.count) à venir")
         } catch {
             problem = error.localizedDescription
+            FeatureLog.record("✗ CRM — interrogation refusée : \(error.localizedDescription)")
         }
     }
 }

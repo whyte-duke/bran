@@ -319,6 +319,8 @@ public final class AppModel {
         // le jour où il rouvre les réglages.
         DockPresence.apply()
 
+        uploads.configuration.logConfiguration()
+
         // Au premier lancement seulement. Voir `adoptDefaultOnFirstLaunch` :
         // toutes les fonctions de bran sont actives par défaut, et celle-ci
         // conditionne les autres — un observateur qu'il faut penser à lancer

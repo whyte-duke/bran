@@ -173,6 +173,7 @@ final class CRMConfiguration {
         // La seule question posée au Trousseau au lancement, et elle ne réclame
         // aucune autorisation : « y a-t-il un élément ? », jamais « donne-le ».
         tokenIsStored = Keychain.exists(Key.token)
+
     }
 
     /// Le CRM est-il utilisable ?
@@ -185,6 +186,25 @@ final class CRMConfiguration {
     ///
     /// Une fois le jeton lu, c'est lui qui fait foi — le marqueur ne dit que
     /// « il y en a un », pas « il ressemble à un jeton du CRM ».
+    /// Les trois valeurs dont le produit décide de tout, écrites au journal.
+    ///
+    /// **Appelée par `AppModel` et non depuis `init`**, et c'est la deuxième
+    /// fois que ce piège se referme : `FeatureLog` n'apprend le dossier où
+    /// écrire qu'après la construction des services, si bien qu'une trace posée
+    /// dans `init` part dans le vide sans que rien ne le signale.
+    ///
+    /// Ce qu'elle permet d'observer : `isConfigured` commande l'affichage du
+    /// panneau des prochains rendez-vous ; faux, le panneau n'est pas monté,
+    /// donc son `.task` ne tourne pas, donc `refresh()` n'est jamais appelé — et
+    /// le message d'erreur que `refresh()` pose ne peut pas s'afficher non plus.
+    /// Le cercle se referme sur un écran vide, sans une ligne à lire nulle part.
+    func logConfiguration() {
+        FeatureLog.record(
+            "CRM — jeton dans le Trousseau : \(tokenIsStored), adresse : « \(baseURL) », "
+            + "hôte reconnu : \(URL(string: baseURL)?.host != nil), configuré : \(isConfigured)"
+        )
+    }
+
     var isConfigured: Bool {
         let looksUsable = isLoaded ? storedToken.hasPrefix("rec_") : tokenIsStored
         return looksUsable && URL(string: baseURL)?.host != nil
