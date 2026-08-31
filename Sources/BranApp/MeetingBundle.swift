@@ -123,18 +123,32 @@ struct MeetingBundle: Sendable {
                 } else {
                     videos.append(url)
                 }
-            case MeetingFolder.audioExtension:
+            case let extensionName where MeetingFolder.audioExtensions.contains(extensionName):
                 audios.append(url)
             default:
                 continue
             }
         }
 
+        // **L'audio courant l'emporte sur l'audio hérité.** Un dossier déjà
+        // envoyé avant le 31/08/2026 contient un `.m4a` que le CRM refuse
+        // désormais ; le jour où bran le remplace par un `.mp3`, les deux
+        // cohabitent — l'ancien n'est pas effacé, c'est un fichier de
+        // l'utilisateur. Sans ce tri, `preferred` prendrait le premier par ordre
+        // alphabétique, donc le `.m4a`, et la bibliothèque désignerait comme
+        // « l'audio de la réunion » celui que le CRM vient de rejeter.
+        // Partition plutôt que `sorted` : le prédicat « l'un est courant » n'est
+        // pas un ordre strict — deux `.mp3` s'y compareraient inférieurs l'un à
+        // l'autre — et `sorted` a le droit de faire n'importe quoi d'un
+        // comparateur incohérent, y compris s'arrêter en débogage.
+        let isCurrent = { (url: URL) in url.pathExtension.lowercased() == MeetingFolder.audioExtension }
+        let currentFirst = audios.filter(isCurrent) + audios.filter { isCurrent($0) == false }
+
         return MeetingBundle(
             folder: folder,
             sidecar: sidecar,
             video: preferred(videos, base: folder.lastPathComponent),
-            audio: preferred(audios, base: folder.lastPathComponent),
+            audio: preferred(currentFirst, base: folder.lastPathComponent),
             segments: segments,
             isFlat: false
         )

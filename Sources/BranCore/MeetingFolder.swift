@@ -23,7 +23,7 @@ import Foundation
 /// Recordings/
 ///     2026-08-11 09h57 — SA SERMATEC/
 ///         2026-08-11 09h57 — SA SERMATEC.mp4     la vidéo compressée
-///         2026-08-11 09h57 — SA SERMATEC.m4a     l'audio prêt pour le CRM
+///         2026-08-11 09h57 — SA SERMATEC.mp3     l'audio prêt pour le CRM
 ///         Fiche.json                             les métadonnées de bran
 /// ```
 ///
@@ -56,7 +56,29 @@ public enum MeetingFolder {
     public static let sidecarName = "Fiche.json"
 
     public static let videoExtension = "mp4"
-    public static let audioExtension = "m4a"
+
+    /// L'extension de l'audio préparé pour le CRM.
+    ///
+    /// **C'était `m4a` jusqu'au 31/08/2026**, et le changement n'est pas
+    /// cosmétique : Azure ne sait pas décoder l'AAC au-delà d'une vingtaine de
+    /// minutes, quel que soit le profil, sur les deux moteurs. Le relevé est
+    /// dans `AudioExporter`.
+    public static let audioExtension = "mp3"
+
+    /// Ce que des versions antérieures de bran ont écrit dans les dossiers déjà
+    /// sur le disque.
+    ///
+    /// **Ces fichiers restent visibles, ils ne sont pas effacés.** Ce sont les
+    /// seuls audios de réunions passées, et certains ont été transcrits ; les
+    /// faire disparaître d'un dossier que l'utilisateur ouvre dans le Finder
+    /// pour une raison qui ne le concerne pas serait de la casse gratuite. Ils
+    /// sont simplement **non réutilisables** pour un envoi : le CRM les
+    /// refuserait, donc `UploadService` ré-extrait plutôt que de les reprendre.
+    public static let legacyAudioExtensions = ["m4a"]
+
+    /// Toutes les extensions à reconnaître comme « audio d'une réunion » lors
+    /// d'un balayage, la courante en tête.
+    public static var audioExtensions: [String] { [audioExtension] + legacyAudioExtensions }
 
     /// Suffixe des morceaux intermédiaires — `<base>-seg000.mp4`.
     ///

@@ -777,7 +777,24 @@ final class RecordingStore {
         // permet de rattraper sans rien casser.
         if let bundle = MeetingBundle.read(folder: folder) {
             rename(bundle.video, to: MeetingBundle.videoDestination(in: folder))
-            rename(bundle.audio, to: MeetingBundle.audioDestination(in: folder))
+
+            // **Un audio hérité garde son extension, donc son nom.** Le
+            // balayage rend aussi les `.m4a` d'avant le 31/08/2026 ; les passer
+            // à `audioDestination`, qui porte désormais `.mp3`, renommerait de
+            // l'AAC en MP3. Le fichier deviendrait alors doublement piégeux : il
+            // mentirait sur son format à qui l'ouvre, et il occuperait très
+            // exactement le chemin auquel `UploadService` reconnaît un audio
+            // réutilisable — donc il repartirait au CRM, qui le refuserait
+            // encore, en disant cette fois « Azure n'a pas réussi à lire ce
+            // fichier audio » à propos d'un fichier nommé `.mp3`.
+            //
+            // Renommer un fichier ne change pas ce qu'il contient : le suffixe
+            // de destination doit venir du fichier trouvé, pas du format que
+            // bran écrirait aujourd'hui.
+            if let audio = bundle.audio {
+                let name = "\(folder.lastPathComponent).\(audio.pathExtension)"
+                rename(audio, to: folder.appending(path: name))
+            }
         }
 
         sessionFolders[id] = folder

@@ -1,4 +1,5 @@
 import AVFoundation
+import BranCore
 import Foundation
 
 /// Extrait la piste audio d'un enregistrement au format que le CRM attend.
@@ -7,82 +8,51 @@ import Foundation
 /// c'est tout ce que la transcription utilise — et parce que le plafond est de
 /// 50 Mo, contre plusieurs giga-octets pour la vidéo.
 ///
-/// Cibles du §6 du contrat : **AAC mono 16 kHz**. Le mono n'est pas qu'une
-/// économie : en mode asynchrone, Azure n'analyse que le canal 0, et un fichier
-/// stéréo fait échouer tout le job avec un message qui ne parle jamais de
-/// canaux.
+/// ## Pourquoi du MP3, et pas l'AAC natif de macOS
 ///
-/// Le débit, lui, n'est plus une constante. Il est **déduit de la durée** pour
-/// que le fichier tienne sous le plafond quelle que soit la longueur de la
-/// réunion : voir `bitrate(forDurationSeconds:)`. Un débit fixe à 48 kbit/s
-/// marchait pour tout ce qui dure moins de deux heures et échouait purement et
-/// simplement au-delà — bran refusait alors d'envoyer une réunion qu'il aurait
-/// suffi d'encoder un cran plus bas.
+/// Parce qu'Azure ne sait pas décoder l'AAC que produit ce Mac. Ce n'est pas une
+/// déduction : c'est le relevé du **31/08/2026**, fait en envoyant un vrai
+/// closing de 32 min directement à l'API du CRM, dans quatre encodages du même
+/// signal.
+///
+///     AAC 16 kHz mono   (ce que bran produisait)   → 422 InvalidAudioFormat
+///     AAC 44,1 kHz mono                            → 422 InvalidAudioFormat
+///     AAC 44,1 kHz stéréo                          → 422 InvalidAudioFormat
+///     MP3 16 kHz mono 48 kbit/s                    → 200, transcrit en 60 s
+///
+/// Le même AAC déposé en `batch` — l'autre moteur, celui qui lit par URL — a
+/// échoué pareil, avec `InvalidData`. **Il n'existe donc aucun contournement
+/// côté serveur** : ni un profil AAC différent, ni un choix de moteur.
+///
+/// Ce que ça a coûté avant d'être vu : les trois seules réunions envoyées depuis
+/// bran duraient 5,9 s, 8 min et 32,7 min. Les deux premières ont été
+/// transcrites, la troisième a échoué — le seuil de refus d'Azure est autour de
+/// vingt minutes, et bran n'avait jamais envoyé de closing d'une vraie durée.
+/// La note interne du CRM le savait pourtant : « de l'AAC 16 kHz mono est refusé
+/// au-delà d'environ 20 min là où le même audio en MP3 passe ».
+///
+/// Et macOS **décode** le MP3 sans l'**encoder** : `afconvert -hf` annonce le
+/// format, puis répond `ExtAudioFileSetProperty ('cfmt') failed ('fmt?')` dès
+/// qu'on lui demande d'écrire. D'où `libmp3lame` dans `Sources/CLame`, et
+/// `MP3Encoder` pour l'habiller.
+///
+/// ## Le reste des cibles
+///
+/// **Mono 16 kHz**, comme avant : c'est ce que la reconnaissance vocale utilise,
+/// et le CRM encode exactement pareil dans son repli navigateur. Le débit, lui,
+/// est **déduit de la durée** pour que le fichier tienne sous le plafond quelle
+/// que soit la longueur de la réunion — voir `SpeechAudioBudget`.
 enum AudioExporter {
 
-    /// Le plafond du serveur : **50 Mo, c'est-à-dire 50 000 000 octets**.
-    ///
-    /// La valeur d'avant était `52_428_800`, soit 50 **Mio** — et le commentaire
-    /// qui la portait disait pourtant « mesuré côté Supabase : 50 passent, 52
-    /// sont refusés ». Confondre Mo et Mio plaçait donc la borne de bran à
-    /// 52,4 Mo, en plein dans la zone de refus mesurée : un fichier entre 50 et
-    /// 52,4 Mo passait la garde locale, montait en entier, et Foundry le
-    /// rejetait à l'arrivée en annonçant une taille maximale de 50 Mo. Tout le
-    /// temps de l'envoi était perdu, et le message ne disait pas à
-    /// l'utilisateur ce qu'il aurait fallu faire.
-    ///
-    /// Le serveur compte en méga-octets décimaux ; on compte comme lui. Les
-    /// 2,4 Mo d'écart ne valaient pas le risque de refaire ce trajet.
-    static let maximumBytes = 50_000_000
+    /// Le plafond du serveur. Ré-exposé ici parce que l'interface le cite ;
+    /// l'arithmétique, elle, vit dans `SpeechAudioBudget`, où elle se teste.
+    static let maximumBytes = SpeechAudioBudget.maximumBytes
 
-    /// Ce que l'encodage a le droit de viser : 90 % du plafond, soit 45 Mo.
-    ///
-    /// La marge n'est pas de la prudence décorative, elle couvre deux
-    /// dépassements mesurés :
-    ///
-    /// 1. **L'encodeur AAC d'Apple rend plus que ce qu'on lui demande.** À
-    ///    16 kHz mono : 12 kbit/s demandés → 13,0 kbit/s réels, 16 → 17,6,
-    ///    20 → 21,2, 24 → 24,5, 32 → 32,4, 40 → 40,4, 48 → 49,1. Le dépassement
-    ///    va de 2 à 10 %.
-    /// 2. **L'en-tête du conteneur MPEG-4 s'ajoute au flux.** Il est compris
-    ///    dans les chiffres ci-dessus, qui ont été relevés sur 30 s de signal :
-    ///    son poids relatif ne peut que décroître sur une réunion d'une heure.
-    ///
-    /// Viser le plafond exact aurait été de la fausse précision : le débit
-    /// demandé n'est qu'une consigne, seule la taille écrite est un fait — d'où
-    /// aussi le contrôle a posteriori en fin d'extraction.
-    static let workingBudgetBytes = maximumBytes * 9 / 10
-
-    /// Plancher et plafond de la fenêtre utilisable de l'encodeur AAC d'Apple
-    /// **à 16 kHz mono**.
-    ///
-    /// Mesuré avec `AVAssetWriterInput` et `AVEncoderBitRateKey`, sur 30 s de
-    /// signal synthétique :
-    ///
-    ///      8 kbit/s → ÉCHEC « Cannot Encode Media »
-    ///     12 kbit/s → ok, 13,0 kbit/s réels
-    ///     16 kbit/s → ok, 17,6 kbit/s réels
-    ///     20 kbit/s → ok, 21,2 kbit/s réels
-    ///     24 kbit/s → ok, 24,5 kbit/s réels
-    ///     32 kbit/s → ok, 32,4 kbit/s réels
-    ///     40 kbit/s → ok, 40,4 kbit/s réels
-    ///     48 kbit/s → ok, 49,1 kbit/s réels
-    ///     56 kbit/s → ÉCHEC « Cannot Encode Media »
-    ///     64 kbit/s → ÉCHEC « Cannot Encode Media »
-    ///
-    /// Hors de cette fenêtre l'encodeur ne signale pas un réglage inadapté : il
-    /// refuse le média entier, avec un message qui ne parle jamais de débit.
-    /// C'est pour ça que ces bornes sont dures et non « souhaitables ».
-    /// (ffmpeg accepte 64 kbit/s au même réglage — c'est un autre encodeur, et
-    /// il n'est pas dans l'app.)
-    ///
-    /// **Descendre à 8 kHz est écarté.** La fenêtre s'y déplace vers le bas —
-    /// 8 à 24 kbit/s passent, 32 et au-delà échouent — donc on y gagnerait
-    /// quelques kbit/s de plancher, mais la parole y perd et la transcription
-    /// avec elle. Le calcul de débit ci-dessous tient jusqu'à plus de huit
-    /// heures d'affilée : ce recours n'a plus de raison d'être.
-    static let minimumBitrate = 12_000
-    static let maximumBitrate = 48_000
+    /// La fréquence d'échantillonnage de la parole transcrite. Descendre à
+    /// 8 kHz ferait gagner quelques kbit/s et perdrait des consonnes ; le calcul
+    /// de débit tient jusqu'à douze heures d'affilée, ce recours n'a plus lieu
+    /// d'être.
+    static let sampleRate = 16_000
 
     struct Result: Sendable {
         let url: URL
@@ -92,7 +62,7 @@ enum AudioExporter {
         /// puisse dire « encodé à 24 kbit/s pour tenir sous 50 Mo » au lieu de
         /// laisser croire que la qualité est toujours la même.
         let bitrate: Int
-        let mimeType = "audio/mp4"
+        let mimeType = "audio/mpeg"
     }
 
     enum ExportError: LocalizedError {
@@ -119,7 +89,7 @@ enum AudioExporter {
             switch self {
             case .tooLarge:
                 """
-                Au-delà d'environ 8 h 20 d'affilée, même 12 kbit/s dépassent le plafond : \
+                Au-delà d'environ 12 h 30 d'affilée, même 8 kbit/s dépassent le plafond : \
                 l'enregistrement doit être découpé en deux, et chaque moitié envoyée sur \
                 son propre rendez-vous.
                 """
@@ -138,36 +108,13 @@ enum AudioExporter {
         }
     }
 
-    /// Le débit à demander pour qu'une réunion de `seconds` secondes tienne dans
-    /// le budget de travail.
-    ///
-    /// `budget × 8 / secondes`, arrondi **vers le bas** au millier — arrondir au
-    /// plus proche aurait pu remonter au-dessus du budget, et c'est exactement
-    /// le genre d'octets qu'on n'a pas — puis borné à la fenêtre de l'encodeur.
-    ///
-    /// Ce que ça donne concrètement, avec 45 Mo de budget :
-    ///
-    /// - **jusqu'à ≈ 2 h 05**, le calcul dépasse 48 kbit/s : on reste au
-    ///   maximum de l'encodeur, donc exactement la qualité d'aujourd'hui. Rien
-    ///   ne change pour la quasi-totalité des closings.
-    /// - **au-delà**, bran descend le débit au lieu de refuser l'envoi. Une
-    ///   réunion de 4 h part à 24 kbit/s : moins beau, mais transcrit — et
-    ///   Azure travaille sur de la parole à 16 kHz, pas sur de la musique.
-    /// - **le plancher de 12 kbit/s n'est atteint qu'à ≈ 8 h 20**. Au-delà,
-    ///   plus aucun réglage ne sauve l'envoi : c'est `ExportError.tooLarge`,
-    ///   levée avant d'encoder.
-    ///
-    /// Durée inconnue (`duration` non numérique sur un fichier abîmé) : on
-    /// demande le maximum et on laisse la mesure de fin trancher. Deviner bas
-    /// « au cas où » aurait dégradé tous les fichiers dont on ne sait rien.
+    /// Le débit à demander pour cette durée. Passe-plat vers `SpeechAudioBudget`,
+    /// gardé pour que les appelants n'aient pas à connaître les deux types.
     static func bitrate(forDurationSeconds seconds: Double) -> Int {
-        guard seconds > 0 else { return maximumBitrate }
-        let ideal = Double(workingBudgetBytes) * 8 / seconds
-        let flooredToThousand = Int(ideal / 1000) * 1000
-        return min(max(flooredToThousand, minimumBitrate), maximumBitrate)
+        SpeechAudioBudget.bitrate(forDurationSeconds: seconds)
     }
 
-    /// Relit un `.m4a` déjà préparé pour savoir s'il est réutilisable tel quel.
+    /// Relit un audio déjà préparé pour savoir s'il est réutilisable tel quel.
     ///
     /// Sert au chemin « l'audio est déjà à côté de la vidéo » : ré-encoder
     /// trente-six minutes d'audio qu'on possède déjà, c'est du temps pris à
@@ -180,6 +127,11 @@ enum AudioExporter {
     /// `nil` dès que le fichier ne peut pas servir : absent, vide, au-dessus du
     /// plafond, ou sans durée lisible. L'appelant repasse alors par une
     /// extraction complète, ce qui est toujours sûr.
+    ///
+    /// **L'extension n'est pas vérifiée ici**, et c'est volontaire : l'appelant
+    /// ne propose à cette fonction que le chemin de destination courant, qui
+    /// porte l'extension courante. Un `.m4a` laissé par une version antérieure
+    /// de bran n'est donc jamais candidat — il n'est pas à ce chemin.
     static func inspectPreparedAudio(at url: URL) async -> Result? {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path(percentEncoded: false))
         guard let size = attributes?[.size] as? Int, size > 0, size <= maximumBytes else { return nil }
@@ -236,24 +188,14 @@ enum AudioExporter {
 
         // Refus AVANT d'encoder, pas après.
         //
-        // L'encodage d'une réunion longue prend plusieurs minutes de calcul ; les
-        // dépenser pour lever `tooLarge` à la fin, alors que l'arithmétique le
-        // savait dès la première ligne, serait de la cruauté gratuite. Le seuil
-        // est celui du plancher : si même 12 kbit/s ne rentre pas, aucun réglage
-        // ne rentrera.
-        //
-        // **Le refus se mesure au plafond réel, pas au budget de travail.** Il
-        // regardait les 45 Mo du budget, ce qui refusait d'encoder entre 8 h 20
-        // et 9 h 15 d'enregistrement — des durées où le fichier à 12 kbit/s
-        // serait pourtant passé sous les 50 Mo. Le budget est une marge qu'on
-        // s'accorde pour VISER ; il n'a rien à faire dans la décision de renoncer,
-        // qui doit se prendre sur ce que le serveur refuse vraiment. La marge
-        // continue de jouer son rôle juste après, dans le choix du débit, et le
-        // contrôle a posteriori sur la taille écrite reste le seul juge.
-        let idealBitrate = seconds > 0 ? Double(maximumBytes) * 8 / seconds : .infinity
-        if idealBitrate < Double(minimumBitrate) {
+        // L'encodage d'une réunion longue prend plusieurs secondes de calcul ;
+        // les dépenser pour lever `tooLarge` à la fin, alors que l'arithmétique
+        // le savait dès la première ligne, serait de la cruauté gratuite. Le
+        // seuil est celui du plancher : si même 8 kbit/s ne rentre pas, aucun
+        // réglage ne rentrera.
+        guard SpeechAudioBudget.fits(durationSeconds: seconds) else {
             throw ExportError.tooLarge(
-                bytes: Int(seconds * Double(minimumBitrate) / 8),
+                bytes: SpeechAudioBudget.floorSizeBytes(durationSeconds: seconds),
                 durationSeconds: seconds
             )
         }
@@ -267,10 +209,10 @@ enum AudioExporter {
         //
         // Tant que la destination était un fichier temporaire, effacer d'abord ne
         // coûtait rien. Depuis que l'audio du CRM est CONSERVÉ dans le dossier du
-        // rendez-vous, ce `removeItem` détruisait un fichier existant avant même
+        // rendez-vous, effacer d'abord détruirait un fichier existant avant même
         // d'avoir commencé à produire son remplaçant : une ré-extraction qui
         // échoue — piste illisible, encodeur qui refuse, fichier trop lourd —
-        // laissait le dossier sans audio du tout, alors qu'il en avait un
+        // laisserait le dossier sans audio du tout, alors qu'il en avait un
         // parfaitement valable une seconde plus tôt.
         //
         // Le brouillon vit **dans le même dossier** que la destination, et pas
@@ -286,23 +228,19 @@ enum AudioExporter {
         // Aucun brouillon ne survit à cette fonction, quelle qu'en soit la
         // sortie. Après une mise en place réussie il n'existe plus, et
         // `removeItem` sur un fichier absent ne fait rien : un seul `defer`
-        // couvre donc les six chemins de sortie sans qu'il faille les énumérer,
-        // et sans qu'un chemin ajouté plus tard puisse l'oublier.
+        // couvre donc les chemins de sortie sans qu'il faille les énumérer, et
+        // sans qu'un chemin ajouté plus tard puisse l'oublier.
         defer { try? FileManager.default.removeItem(at: scratch) }
 
-        let writer = try AVAssetWriter(outputURL: scratch, fileType: .m4a)
         let reader = try AVAssetReader(asset: asset)
 
-        // `AVAssetWriter` n'est PAS un convertisseur : il encode ce qu'on lui
-        // donne, tel quel. Lui livrer du PCM 48 kHz stéréo en lui demandant de
-        // l'AAC mono 16 kHz échoue avec « Cannot Encode Media ».
-        //
-        // La conversion se fait donc à la LECTURE. `AVAssetReaderAudioMixOutput`
-        // est fait pour ça : c'est le seul chemin qui sache à la fois
-        // rééchantillonner et replier deux canaux sur un.
+        // La conversion se fait à la LECTURE. `AVAssetReaderAudioMixOutput` est
+        // le seul chemin qui sache à la fois rééchantillonner et replier deux
+        // canaux sur un ; `libmp3lame`, lui, ne fait qu'encoder ce qu'on lui
+        // donne et attend du PCM 16 bits à la fréquence de sortie.
         let output = AVAssetReaderAudioMixOutput(audioTracks: [track], audioSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 16_000,
+            AVSampleRateKey: sampleRate,
             AVNumberOfChannelsKey: 1,
             AVLinearPCMBitDepthKey: 16,
             AVLinearPCMIsFloatKey: false,
@@ -311,59 +249,26 @@ enum AudioExporter {
         ])
         reader.add(output)
 
-        var monoLayout = AudioChannelLayout()
-        monoLayout.mChannelLayoutTag = kAudioChannelLayoutTag_Mono
-
-        // Le débit vient du calcul, plus d'une constante : voir
-        // `bitrate(forDurationSeconds:)` pour la fenêtre de l'encodeur et les
-        // seuils. Sous deux heures, `bitrate` vaut 48 000 — soit très
-        // exactement le réglage d'avant, celui que le §6 du contrat CRM appelle
-        // « la marge confortable » à ≈ 22 Mo l'heure.
-        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVNumberOfChannelsKey: 1,      // mono : Azure n'analyse que le canal 0
-            AVSampleRateKey: 16_000,       // la parole est transcrite à 16 kHz
-            AVEncoderBitRateKey: bitrate,
-            AVChannelLayoutKey: Data(bytes: &monoLayout, count: MemoryLayout<AudioChannelLayout>.size),
-        ])
-        input.expectsMediaDataInRealTime = false
-        writer.add(input)
+        guard FileManager.default.createFile(atPath: scratch.path(percentEncoded: false), contents: nil) else {
+            throw ExportError.exportFailed("brouillon impossible à créer")
+        }
 
         guard reader.startReading() else {
             throw ExportError.exportFailed(reader.error?.localizedDescription ?? "lecture impossible")
         }
-        guard writer.startWriting() else {
-            throw ExportError.exportFailed(writer.error?.localizedDescription ?? "écriture impossible")
-        }
-        writer.startSession(atSourceTime: .zero)
 
-        await withCheckedContinuation { continuation in
-            let pump = AudioPump(output: output, input: input)
-            let resumed = ResumeGuard(continuation)
-
-            input.requestMediaDataWhenReady(on: DispatchQueue(label: "bran.audio.export")) {
-                while pump.input.isReadyForMoreMediaData {
-                    guard let sample = pump.output.copyNextSampleBuffer() else {
-                        pump.input.markAsFinished()
-                        resumed.fire()
-                        return
-                    }
-                    if pump.input.append(sample) == false {
-                        pump.input.markAsFinished()
-                        resumed.fire()
-                        return
-                    }
+        // **Hors du pool coopératif.** Lire et encoder trente minutes d'audio est
+        // un travail bloquant de plusieurs secondes ; le laisser sur un fil de
+        // `async` gèlerait autant de tâches Swift Concurrency, dont l'interface.
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue(label: "bran.audio.export").async {
+                do {
+                    try encode(reader: reader, output: output, to: scratch, bitrate: bitrate)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
                 }
             }
-        }
-
-        await writer.finishWriting()
-
-        guard writer.status == .completed else {
-            let detail = writer.error?.localizedDescription
-                ?? reader.error?.localizedDescription
-                ?? "statut \(writer.status.rawValue)"
-            throw ExportError.exportFailed(detail)
         }
 
         let attributes = try? FileManager.default.attributesOfItem(atPath: scratch.path(percentEncoded: false))
@@ -371,12 +276,10 @@ enum AudioExporter {
 
         // Le calcul de débit est une estimation, ceci est une mesure — et c'est
         // la mesure qui décide. Le contrôle reste donc en place malgré le
-        // budget à 90 % : l'encodeur peut déborder plus que ce qu'on a relevé,
-        // la durée peut être inconnue, un fichier abîmé peut produire n'importe
-        // quoi. Mieux vaut refuser ici, une fois, que faire refuser par Foundry
-        // après un envoi complet.
+        // budget à 90 % : la durée peut être inconnue, un fichier abîmé peut
+        // produire n'importe quoi. Mieux vaut refuser ici, une fois, que faire
+        // refuser par le CRM après un envoi complet.
         guard size > 0, size <= maximumBytes else {
-            try? FileManager.default.removeItem(at: scratch)
             throw ExportError.tooLarge(bytes: size, durationSeconds: seconds)
         }
 
@@ -393,7 +296,6 @@ enum AudioExporter {
                 try FileManager.default.moveItem(at: scratch, to: destination)
             }
         } catch {
-            try? FileManager.default.removeItem(at: scratch)
             throw ExportError.exportFailed(
                 "l'audio a bien été encodé mais n'a pas pu être mis en place — \(error.localizedDescription)"
             )
@@ -406,30 +308,66 @@ enum AudioExporter {
             bitrate: bitrate
         )
     }
-}
 
-private struct AudioPump: @unchecked Sendable {
-    let output: AVAssetReaderOutput
-    let input: AVAssetWriterInput
-}
+    /// La boucle lecture → encodage → disque. Bloquante, appelée sur sa propre
+    /// file.
+    ///
+    /// **Le fichier est écrit au fil de l'eau et non accumulé en mémoire.** Un
+    /// closing de quatre heures fait 460 Mo de PCM décompressé ; le garder en
+    /// RAM pour l'écrire d'un bloc à la fin ferait payer un pic de mémoire pour
+    /// rien, sur la machine de quelqu'un qui est peut-être encore en réunion.
+    private static func encode(
+        reader: AVAssetReader,
+        output: AVAssetReaderOutput,
+        to url: URL,
+        bitrate: Int
+    ) throws {
+        let encoder = try MP3Encoder(sampleRate: sampleRate, bitrate: bitrate)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
 
-/// `requestMediaDataWhenReady` peut rappeler après la fin. Reprendre deux fois
-/// une continuation fait planter le processus.
-private final class ResumeGuard: @unchecked Sendable {
-    private let continuation: CheckedContinuation<Void, Never>
-    private let lock = NSLock()
-    private var fired = false
+        while true {
+            guard let sample = output.copyNextSampleBuffer() else { break }
+            defer { CMSampleBufferInvalidate(sample) }
 
-    init(_ continuation: CheckedContinuation<Void, Never>) {
-        self.continuation = continuation
-    }
+            guard let block = CMSampleBufferGetDataBuffer(sample) else { continue }
+            let length = CMBlockBufferGetDataLength(block)
+            guard length > 0 else { continue }
 
-    func fire() {
-        lock.lock()
-        let alreadyFired = fired
-        fired = true
-        lock.unlock()
+            var bytes = [UInt8](repeating: 0, count: length)
+            let status = bytes.withUnsafeMutableBytes { raw in
+                CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: raw.baseAddress!)
+            }
+            guard status == noErr else {
+                throw ExportError.exportFailed("bloc audio illisible (\(status))")
+            }
 
-        if alreadyFired == false { continuation.resume() }
+            let encoded = try bytes.withUnsafeBytes { raw -> Data in
+                try encoder.encode(raw.bindMemory(to: Int16.self))
+            }
+            if encoded.isEmpty == false { try handle.write(contentsOf: encoded) }
+        }
+
+        // L'état du lecteur se consulte APRÈS la boucle : `copyNextSampleBuffer`
+        // rend `nil` aussi bien à la fin normale du flux que sur une piste qui
+        // se corrompt en cours de route, et les deux ne doivent pas produire le
+        // même fichier. Sans ce contrôle, une lecture interrompue à mi-parcours
+        // donnerait un MP3 parfaitement valable — et parfaitement tronqué.
+        guard reader.status == .completed else {
+            throw ExportError.exportFailed(
+                reader.error?.localizedDescription ?? "lecture interrompue (statut \(reader.status.rawValue))"
+            )
+        }
+
+        try handle.write(contentsOf: encoder.finish())
+
+        // La trame Info, écrite par-dessus celle que LAME avait réservée au
+        // début du flux. Elle porte le compte exact des trames, que l'encodeur
+        // ne connaît qu'ici — c'est elle qui permet à `AVURLAsset` de rendre une
+        // durée juste, celle-là même que bran annonce au CRM.
+        if let tag = encoder.infoTag() {
+            try handle.seek(toOffset: 0)
+            try handle.write(contentsOf: tag)
+        }
     }
 }

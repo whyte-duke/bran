@@ -223,7 +223,7 @@ final class UploadService {
     ///    plusieurs minutes prises à l'utilisateur pour produire un fichier
     ///    identique à celui qui est sous ses yeux. Sa taille et sa durée sont
     ///    relues sur le disque (`inspectPreparedAudio`) : les métadonnées de
-    ///    l'enregistrement décrivent la vidéo, pas ce `.m4a`, et le CRM compare
+    ///    l'enregistrement décrivent la vidéo, pas ce `.mp3`, et le CRM compare
     ///    ce qu'on lui annonce à ce qu'il reçoit.
     /// 2. **L'enregistrement a un dossier** : on extrait vers
     ///    `audioDestination` et on **garde** le fichier. C'est ce que
@@ -231,14 +231,25 @@ final class UploadService {
     ///    disponible sans repasser par bran. Le prochain envoi tombera alors
     ///    dans le cas 1.
     /// 3. **Ancien enregistrement à plat** (`audioDestination == nil`) : il n'y
-    ///    a pas de dossier où déposer quoi que ce soit, et semer des `.m4a`
+    ///    a pas de dossier où déposer quoi que ce soit, et semer des `.mp3`
     ///    dans la racine de la bibliothèque à côté des vidéos serait un gain
     ///    douteux payé par du désordre permanent. On repasse par le dossier
     ///    temporaire et on efface en sortant, exactement comme avant.
     private func prepareAudio(
         for recording: Recording
     ) async throws -> (audio: AudioExporter.Result, temporary: URL?) {
+        // **La réutilisation exige le chemin que bran écrirait aujourd'hui**, et
+        // pas seulement « un audio trouvé dans le dossier ».
+        //
+        // Le balayage rend aussi les audios hérités — les `.m4a` d'avant le
+        // 31/08/2026, que le CRM refuse désormais de décoder. Comparer à
+        // `audioDestination` les écarte par construction : ils ne sont pas à ce
+        // chemin, donc jamais candidats, et l'envoi ré-extrait en MP3. Filtrer
+        // sur l'extension aurait marché aussi, mais aurait demandé d'y repenser
+        // au prochain changement de format ; ici la règle est « ce que
+        // l'extraction produirait », qui reste vraie sans qu'on y touche.
         if let existing = recording.audioURL,
+           existing == recording.audioDestination,
            isAudioStillCurrent(existing, for: recording),
            let reused = await AudioExporter.inspectPreparedAudio(at: existing) {
             return (reused, nil)
@@ -268,7 +279,7 @@ final class UploadService {
         }
 
         let scratch = FileManager.default.temporaryDirectory
-            .appending(path: "\(recording.id.uuidString).m4a")
+            .appending(path: "\(recording.id.uuidString).\(MeetingFolder.audioExtension)")
         let audio = try await extract(to: scratch)
         return (audio, scratch)
     }
@@ -279,7 +290,7 @@ final class UploadService {
     /// un scénario réel, pas théorique : la vidéo finale est réécrite après
     /// coup — recollage des morceaux puis passe de compression — et une session
     /// interrompue peut être reprise et refusionnée bien après qu'un premier
-    /// envoi a préparé son `.m4a`. Le compte-rendu porterait alors sur une
+    /// envoi a préparé son audio. Le compte-rendu porterait alors sur une
     /// version de la réunion qui n'existe plus, sans que rien ne le signale :
     /// la taille et la durée seraient cohérentes, simplement fausses.
     ///
@@ -305,15 +316,20 @@ final class UploadService {
         return audioDate >= videoDate.addingTimeInterval(-1)
     }
 
-    /// `Closing_2026-08-04_orpheo.m4a` — lisible dans le CRM sans avoir à
+    /// `Closing_2026-08-04_orpheo.mp3` — lisible dans le CRM sans avoir à
     /// décoder un UUID.
+    ///
+    /// L'extension vient de `MeetingFolder` et n'est pas écrite en dur : le CRM
+    /// range le fichier sous ce nom-là dans son stockage, et un nom qui mentirait
+    /// sur le format rendrait indéchiffrable, six mois plus tard, la question
+    /// « qu'est-ce qu'Azure a réellement reçu ce jour-là ».
     private func fileName(for recording: Recording, booking: CRMBooking) -> String {
         let day = recording.metadata.startedAt.formatted(
             Date.ISO8601FormatStyle(timeZone: .current).year().month().day()
         )
         let who = (booking.company?.domain ?? booking.detected_domain ?? booking.attendee_name ?? "closing")
             .replacing(" ", with: "-")
-        return "Closing_\(day)_\(who).m4a"
+        return "Closing_\(day)_\(who).\(MeetingFolder.audioExtension)"
     }
 
     // MARK: - Suivi

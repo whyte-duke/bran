@@ -14,6 +14,53 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
     ],
     targets: [
+        // LAME 4.0, réduit à son encodeur. **La seule bibliothèque C du dépôt,
+        // et elle est là par nécessité, pas par confort.**
+        //
+        // Azure refuse de décoder l'AAC au-delà d'environ vingt minutes — mesuré
+        // le 31/08/2026 sur un vrai closing de 32 min, dans les trois profils
+        // qu'on pouvait produire (16 kHz mono, 44,1 kHz mono, 44,1 kHz stéréo),
+        // et sur les deux moteurs, `fast` comme `batch`. Le même audio en MP3
+        // passe en 60 s. Voir `AudioExporter` pour le relevé complet.
+        //
+        // Or macOS **décode** le MP3 mais ne l'**encode** pas : AudioToolbox
+        // annonce le format `.mp3` dans `afconvert -hf`, puis répond
+        // `ExtAudioFileSetProperty ('cfmt') failed ('fmt?')` dès qu'on lui
+        // demande d'écrire. Il n'existe aucun chemin système vers le seul format
+        // que le CRM accepte, d'où ce vendoring.
+        //
+        // Le sous-arbre est celui de `libmp3lame`, sans le décodeur (mpg123),
+        // sans l'exécutable `lame` et sans les analyseurs — 20 fichiers C. Le
+        // `config.h` est celui qu'un `./configure --disable-frontend
+        // --disable-decoder --disable-analyzer-hooks` produit sur macOS arm64 ;
+        // bran ne vise que macOS, une génération par plateforme serait de la
+        // cérémonie sans usage. LGPL 2.1, texte conservé dans le dossier.
+        .target(
+            name: "CLame",
+            cSettings: [
+                // `#include <config.h>` : les sources LAME le cherchent dans le
+                // chemin d'inclusion, pas à côté d'elles.
+                .headerSearchPath("."),
+                .define("HAVE_CONFIG_H"),
+
+                // **`-UDEBUG` n'est pas cosmétique.** SwiftPM compile les cibles
+                // C avec `-DDEBUG=1` en configuration de débogage, et LAME s'en
+                // sert pour activer des `printf` par trame : un closing de
+                // 32 min a produit 6,2 Mo de « count1: real: … » sur la sortie
+                // standard, et l'encodage est passé de quelques secondes à 30 s
+                // rien qu'à les écrire. `config.h` laisse pourtant `DEBUG` non
+                // défini — c'est bien l'outil de construction qui l'impose, pas
+                // le réglage de la bibliothèque, donc c'est ici que ça se
+                // reprend. Le drapeau arrive après celui de SwiftPM, qu'il
+                // annule.
+                //
+                // `unsafeFlags` est accepté parce que bran est un paquet racine
+                // dont personne ne dépend ; il n'y a pas d'autre moyen de
+                // *retirer* une définition dans l'API de `cSettings`.
+                .unsafeFlags(["-UDEBUG"]),
+            ]
+        ),
+
         // Logique pure. Aucune permission, aucun écran, aucun framework système.
         // C'est ce target qui porte l'objectif « 65 % testable en swift test ».
         .target(name: "BranCore"),
@@ -56,6 +103,7 @@ let package = Package(
         .executableTarget(
             name: "BranApp",
             dependencies: [
+                "CLame",
                 "BranCore",
                 "BranSpeech",
                 "BranVision",
