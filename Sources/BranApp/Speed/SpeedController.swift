@@ -117,13 +117,16 @@ final class SpeedController {
     private let version: String
     private var run: Task<Void, Never>?
     private var gate = LabelGate()
-    private var lastFinished: Date?
+    /// La porte du délai entre deux mesures. Homonyme sans parenté de
+    /// `LabelGate` ci-dessus, qui filtre des redessins : celle-ci filtre des
+    /// requêtes réseau.
+    private var cooldown = SpeedGate()
 
     init(version: String) {
         self.version = version
         reading = Self.load(Key.reading, from: defaults) ?? SpeedReading()
         previous = Self.load(Key.previous, from: defaults)
-        lastFinished = reading.measuredAt
+        cooldown = SpeedGate(lastReached: reading.measuredAt)
     }
 
     // MARK: - Le geste
@@ -137,17 +140,13 @@ final class SpeedController {
     /// finit par afficher une panne que bran a lui-même provoquée, sur une ligne
     /// qui va très bien.
     var canStart: Bool {
-        guard phase.isRunning == false else { return false }
-        guard let lastFinished else { return true }
-        return Date.now.timeIntervalSince(lastFinished) >= SpeedPlan.cooldown
+        phase.isRunning == false && cooldown.allows(at: .now)
     }
 
     /// Combien de temps il reste à attendre, en secondes entières. `nil` quand
     /// on peut y aller.
     var cooldownRemaining: Int? {
-        guard phase.isRunning == false, let lastFinished else { return nil }
-        let remaining = SpeedPlan.cooldown - Date.now.timeIntervalSince(lastFinished)
-        return remaining > 0 ? Int(remaining.rounded(.up)) : nil
+        phase.isRunning ? nil : cooldown.remaining(at: .now)
     }
 
     func start() {
@@ -163,12 +162,10 @@ final class SpeedController {
     func cancel() {
         run?.cancel()
         run = nil
-        // **Le délai court aussi après une annulation.** Il ne compte pas les
-        // octets, il compte les requêtes : celles-ci sont bel et bien parties, et
-        // c'est d'elles que les serveurs de mesure se protègent. Un bouton
-        // « Arrêter » qui remettrait le compteur à zéro offrirait exactement la
-        // rafale que le délai existe pour empêcher.
-        lastFinished = .now
+        // Une mesure interrompue a émis — les neuf sondes de latence partent
+        // dans la première seconde — donc elle compte. Un panneau simplement
+        // refermé n'a rien envoyé. `SpeedGate` porte la règle et son pourquoi.
+        cooldown.interrupted(wasMeasuring: phase.isRunning, at: .now)
         settle(.idle)
     }
 
@@ -339,7 +336,7 @@ final class SpeedController {
     private func commit(_ fresh: SpeedReading) {
         previous = reading.isEmpty ? nil : reading
         reading = fresh
-        lastFinished = fresh.measuredAt
+        cooldown.reached(at: fresh.measuredAt ?? .now)
         Self.save(fresh, at: Key.reading, in: defaults)
         if let previous { Self.save(previous, at: Key.previous, in: defaults) }
 
@@ -348,7 +345,9 @@ final class SpeedController {
     }
 
     private func fail(_ reason: String, spending bytes: Int) {
-        lastFinished = .now
+        // Un échec compte : les requêtes sont parties, et un `429` est
+        // précisément le signe qu'il faut cesser d'en envoyer.
+        cooldown.reached(at: .now)
         reading.spentBytes = bytes
         publish(.failed(reason))
         onFailure(reason)

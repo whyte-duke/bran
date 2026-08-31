@@ -40,7 +40,9 @@ import SwiftUI
 final class SpeedOverlay {
 
     private var panel: NSPanel?
+    private var hosting: SpeedHostingView?
     private let controller: SpeedController
+    private let chrome = SpeedChrome()
 
     init(controller: SpeedController) {
         self.controller = controller
@@ -70,23 +72,41 @@ final class SpeedOverlay {
             return
         }
 
-        let hosting = NSHostingView(rootView: SpeedPanel(controller: controller))
+        let view = SpeedHostingView(rootView: SpeedPanel(controller: controller, chrome: chrome))
+        view.liveArea = { [chrome] in chrome.closeFrame }
+        view.onHoverChange = { [chrome] hovering in chrome.isHoveringClose = hovering }
+        view.onClick = { [weak self] in self?.controller.cancel() }
+
         panel = OverlayPanel.make(
             frame: NSRect(origin: origin, size: size),
-            content: hosting,
-            // **Transparent aux clics, comme l'encoche.** Le panneau n'a aucun
-            // contrôle : il affiche une mesure qui dure neuf secondes et se
-            // referme seule. Intercepter un clic destiné à la fenêtre du dessous
-            // — celle où l'on travaillait pendant que ça mesurait — serait un
-            // défaut pur, et c'est exactement l'arbitrage que le paramètre de
-            // `OverlayPanel.make` existe pour rendre visible.
-            acceptsMouse: false
+            content: view,
+            // **Le panneau accepte la souris, mais seulement sur la croix.**
+            //
+            // Il ne l'acceptait pas. L'argument tenait — un afficheur d'état n'a
+            // pas de contrôle, et intercepter un clic destiné à la fenêtre du
+            // dessous est un défaut pur — mais il oubliait le cas où l'affichage
+            // lui-même est ce qui gêne : neuf secondes d'animation posées sur ce
+            // qu'on est en train de faire, sans aucun moyen de les faire taire.
+            //
+            // Le tri de ce qui est cliquable se fait dans le `hitTest` de
+            // `SpeedHostingView`, à partir du tracé que la croix publie : tout le
+            // reste du panneau continue de laisser passer les clics comme avant.
+            // C'est exactement ce que fait la pilule du veilleur, dont le panneau
+            // est lui aussi bien plus grand que sa zone sensible.
+            acceptsMouse: true
         )
+        hosting = view
     }
 
     private func hide() {
+        // Le panneau peut disparaître pendant que le curseur est posé sur la
+        // croix — l'échéance de cinq secondes suffit. Sans ce rappel, la main
+        // resterait sur la pile des curseurs et le pointeur garderait sa forme
+        // partout ailleurs. Même rite que la pilule du veilleur.
+        hosting?.releaseCursor()
         panel?.orderOut(nil)
         panel = nil
+        hosting = nil
     }
 
     enum Metric {
@@ -95,12 +115,126 @@ final class SpeedOverlay {
     }
 }
 
+/// L'état de la croix : son tracé, et si le curseur est dessus.
+///
+/// **Séparé du contrôleur, délibérément.** Où se trouve un bouton à l'écran et
+/// s'il est survolé ne dit rien sur le débit d'une ligne ; ranger ça dans
+/// `SpeedController` le rendrait dépendant d'une géométrie, et la sonde en ligne
+/// de commande — qui fait tourner la même mesure sans écran — hériterait de deux
+/// propriétés qui n'ont aucun sens pour elle. C'est le même partage que
+/// `AttentionContent`.
+@MainActor
+@Observable
+final class SpeedChrome {
+    /// Le tracé de la croix, en coordonnées SwiftUI. C'est la seule zone du
+    /// panneau qui intercepte un clic.
+    var closeFrame: CGRect = .zero
+    var isHoveringClose = false
+}
+
+/// La vue qui ne réclame la souris **que sur la croix**.
+///
+/// Copie assumée de `PillHostingView`, y compris ses raisons — elles sont les
+/// mêmes, mot pour mot, et elles ont été payées une fois : un panneau borderless
+/// et non activant ne devient jamais fenêtre clé, donc les gestes SwiftUI y sont
+/// au mieux incertains ; et `onHover` s'appuie sur une zone de suivi
+/// `.activeInActiveApp` qui ne se déclencherait jamais, ce panneau vivant par
+/// construction au-dessus d'une *autre* application.
+///
+/// Elles ne sont pas réunies dans un type commun parce que `NSHostingView` est
+/// générique sur sa vue racine : les factoriser demanderait d'effacer ce type,
+/// donc de perdre précisément ce que `NSHostingView` apporte. Ce qui *pouvait*
+/// être mis en commun — la configuration de la fenêtre — l'est déjà, dans
+/// `OverlayPanel`.
+private final class SpeedHostingView: NSHostingView<SpeedPanel> {
+
+    var liveArea: () -> CGRect = { .zero }
+    var onHoverChange: (Bool) -> Void = { _ in }
+    var onClick: () -> Void = {}
+
+    private var hoverArea: NSTrackingArea?
+    private var isInside = false
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard liveArea().contains(flip(convert(point, from: superview))) else { return nil }
+        return super.hitTest(point)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard liveArea().contains(flip(convert(event.locationInWindow, from: nil))) else {
+            super.mouseUp(with: event)
+            return
+        }
+        onClick()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        setInside(liveArea().contains(flip(convert(event.locationInWindow, from: nil))))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        setInside(liveArea().contains(flip(convert(event.locationInWindow, from: nil))))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        setInside(false)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
+            owner: self
+        )
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    func releaseCursor() {
+        guard isInside else { return }
+        isInside = false
+        NSCursor.pop()
+    }
+
+    private func setInside(_ value: Bool) {
+        guard value != isInside else { return }
+        isInside = value
+        onHoverChange(value)
+        if value { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+    }
+
+    /// SwiftUI place son origine en haut à gauche, AppKit en bas à gauche tant
+    /// que la vue n'est pas retournée. Sans cette conversion, la zone vivante
+    /// serait testée sur la moitié opposée du panneau : le clic ne marcherait
+    /// que là où il ne faut pas.
+    private func flip(_ point: NSPoint) -> CGPoint {
+        isFlipped ? point : CGPoint(x: point.x, y: bounds.height - point.y)
+    }
+
+    required init(rootView: SpeedPanel) { super.init(rootView: rootView) }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) n'est pas utilisé : le panneau est construit en code.") }
+}
+
 /// Ce que le panneau montre. Il observe le contrôleur directement : celui-ci est
 /// `@Observable`, donc il n'y a pas de raison d'interposer un objet de contenu
 /// comme le font l'encoche et la pilule — les deux le font parce que leur
 /// contrôleur, lui, n'est pas observable.
 private struct SpeedPanel: View {
     let controller: SpeedController
+    @Bindable var chrome: SpeedChrome
+
+    /// Le repère dans lequel la croix publie son tracé. Nommé, et pas
+    /// `.global` : sur un `NSHostingView`, `.global` ne garantit pas l'origine du
+    /// panneau, et un décalage silencieux rendrait la croix cliquable à côté
+    /// d'elle-même. Même précaution que la pilule du veilleur.
+    ///
+    /// `nonisolated` parce que `onGeometryChange` évalue sa transformation dans
+    /// une fermeture `Sendable`, hors de l'acteur principal où vit `View`.
+    private nonisolated static let space = "speed.panel"
 
     var body: some View {
         VStack(spacing: Space.small) {
@@ -138,11 +272,14 @@ private struct SpeedPanel: View {
             RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
                 .strokeBorder(.separator, lineWidth: Space.line)
         }
+        .coordinateSpace(.named(Self.space))
         .branAnimation(Motion.enter, value: controller.phase)
-        // Le panneau reste hors de la hiérarchie d'accessibilité — il ne se
-        // clique pas — mais ces attributs sont ce que lira quiconque
-        // l'atteindra, et ils coûtent trois lignes.
-        .accessibilityElement(children: .ignore)
+        // **`.contain` et non `.ignore`.** Le panneau était purement décoratif,
+        // donc il s'annonçait d'un bloc et masquait ses enfants. Il porte
+        // maintenant une commande : l'aplatir rendrait la croix inatteignable
+        // pour qui navigue au clavier ou à VoiceOver, c'est-à-dire précisément
+        // ceux pour qui un panneau surgissant est le plus coûteux à subir.
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilitySummary)
     }
 
@@ -155,7 +292,52 @@ private struct SpeedPanel: View {
                 .font(Type.panelHead)
                 .foregroundStyle(.secondary)
             Spacer(minLength: 0)
+            close
         }
+    }
+
+    /// **La croix : arrêter la mesure et faire disparaître le panneau.**
+    ///
+    /// Elle est **grande**, et c'est le point. Une croix de onze points au coin
+    /// d'un panneau qu'on n'a pas demandé est une croix qu'on ne trouve pas :
+    /// le panneau se pose au-dessus de ce qu'on est en train de faire, et le
+    /// geste qu'on cherche alors est le plus impatient de toute l'application.
+    /// Vingt-six points de cible, c'est deux fois la surface d'une pastille de
+    /// fenêtre, et ça reste discret tant qu'on ne la vise pas.
+    ///
+    /// **Elle est là dans tous les états**, pas seulement pendant la mesure. Un
+    /// verdict s'affiche cinq secondes, ce qui est court quand on le lit et long
+    /// quand on l'a déjà lu ; un échec reste quatre secondes de plus. Il n'y a
+    /// aucun état de ce panneau où « je veux qu'il parte » soit une demande
+    /// illégitime.
+    ///
+    /// Le clic lui-même n'est pas ici : c'est `SpeedHostingView.mouseUp` qui
+    /// l'actionne, à partir du tracé publié juste dessous. Un panneau borderless
+    /// et non activant ne devient jamais fenêtre clé, et les gestes SwiftUI y
+    /// sont au mieux incertains — la leçon est celle de la pilule du veilleur,
+    /// et elle a déjà été payée une fois.
+    private var close: some View {
+        Image(systemName: "xmark")
+            .font(.system(size: Metric.crossGlyph, weight: .semibold))
+            .foregroundStyle(chrome.isHoveringClose ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+            .frame(width: Metric.cross, height: Metric.cross)
+            .background(
+                Circle().fill(chrome.isHoveringClose ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
+            )
+            .contentShape(.circle)
+            .branAnimation(Motion.hover, value: chrome.isHoveringClose)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: {
+                chrome.closeFrame = $0
+            }
+            .accessibilityLabel("Arrêter la mesure")
+            .accessibilityAddTraits(.isButton)
+    }
+
+    private enum Metric {
+        /// La cible. Deux fois la surface d'une pastille de fenêtre.
+        static let cross: CGFloat = 26
+        /// Le trait de la croix à l'intérieur.
+        static let crossGlyph: CGFloat = 13
     }
 
     /// Les deux lignes du bas. **Elles changent avec la phase**, parce qu'un

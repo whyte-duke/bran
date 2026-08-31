@@ -516,3 +516,81 @@ struct SpeedReadingCodingTests {
         #expect(SpeedReading(spentBytes: 80_000_000).isEmpty)
     }
 }
+
+
+@Suite("Le délai entre deux mesures")
+struct SpeedGateTests {
+
+    private let start = Date(timeIntervalSince1970: 1_788_000_000)
+
+    @Test("Sans mesure passée, on peut y aller tout de suite")
+    func openByDefault() {
+        let gate = SpeedGate()
+        #expect(gate.allows(at: start))
+        #expect(gate.remaining(at: start) == nil)
+    }
+
+    @Test("Une mesure terminée ferme la porte pour le délai complet")
+    func reachedCloses() {
+        var gate = SpeedGate()
+        gate.reached(at: start)
+
+        #expect(gate.allows(at: start) == false)
+        #expect(gate.remaining(at: start) == Int(SpeedPlan.cooldown))
+        #expect(gate.allows(at: start.addingTimeInterval(SpeedPlan.cooldown - 1)) == false)
+        #expect(gate.allows(at: start.addingTimeInterval(SpeedPlan.cooldown)))
+    }
+
+    @Test("Une mesure interrompue compte : ses sondes sont parties")
+    func interruptedWhileMeasuringCounts() {
+        var gate = SpeedGate()
+        // Une seconde de mesure, c'est déjà les neuf sondes de latence envoyées.
+        gate.interrupted(wasMeasuring: true, at: start)
+        #expect(gate.allows(at: start) == false)
+    }
+
+    @Test("Refermer un panneau déjà terminé ne repousse pas le délai")
+    func dismissingDoesNotPunish() {
+        // **Le défaut que ce type existe pour fermer.**
+        //
+        // La croix du panneau sert à deux gestes : arrêter une mesure, et
+        // chasser un résultat déjà affiché. Estampiller sans distinguer les deux
+        // repartait de trente secondes **à partir du clic** — donc plus on
+        // refermait vite, plus on attendait. La punition tombait à l'envers.
+        var gate = SpeedGate()
+        gate.reached(at: start)
+
+        // Cinq secondes plus tard, on chasse le résultat qu'on vient de lire.
+        let dismissal = start.addingTimeInterval(5)
+        gate.interrupted(wasMeasuring: false, at: dismissal)
+
+        // Il doit rester vingt-cinq secondes, pas trente.
+        #expect(gate.remaining(at: dismissal) == Int(SpeedPlan.cooldown) - 5)
+        // Et la porte s'ouvre bien à l'heure prévue par la **mesure**, pas par
+        // le clic.
+        #expect(gate.allows(at: start.addingTimeInterval(SpeedPlan.cooldown)))
+    }
+
+    @Test("Le décompte s'arrondit au supérieur : jamais « 0 s » sur un bouton éteint")
+    func countdownRoundsUp() {
+        var gate = SpeedGate()
+        gate.reached(at: start)
+        // Il reste un dixième de seconde : le bouton est encore éteint, donc le
+        // décompte doit dire « 1 », pas « 0 ».
+        let almost = start.addingTimeInterval(SpeedPlan.cooldown - 0.1)
+        #expect(gate.remaining(at: almost) == 1)
+        #expect(gate.allows(at: almost) == false)
+    }
+
+    @Test("Une horloge remise en arrière n'éteint pas le bouton indéfiniment")
+    func clockGoingBackwards() {
+        // Changement d'heure, ou horloge corrigée par le réseau : la dernière
+        // mesure se retrouve dans le futur. Sans borne, la soustraction rendrait
+        // un délai arbitrairement long — un bouton éteint pendant une heure,
+        // sans que rien à l'écran ne l'explique.
+        var gate = SpeedGate()
+        gate.reached(at: start.addingTimeInterval(3600))
+        let remaining = try! #require(gate.remaining(at: start))
+        #expect(remaining == Int(SpeedPlan.cooldown))
+    }
+}
