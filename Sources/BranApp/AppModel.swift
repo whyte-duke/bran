@@ -85,6 +85,15 @@ public final class AppModel {
     /// fermeture, câblée plus bas.
     let meter = ResourceMeter()
 
+    /// Le test de débit. Le plus autonome des modules après l'éveil : il ne
+    /// connaît ni les réunions, ni la dictée, ni le veilleur, et rien de tout ça
+    /// ne le connaît. Il tire des octets, les compte, et mémorise le résultat.
+    ///
+    /// Il reçoit la version parce qu'il l'annonce au serveur de mesure — voir
+    /// `SpeedPlan.userAgent` : bran dit son nom plutôt que de se déguiser en
+    /// navigateur, et c'est le seul endroit où cette chaîne sort de la machine.
+    let speed: SpeedController
+
     /// Le journal de bord. **La seule chose du modèle qui lise les quatre
     /// sources d'un coup** — et elle ne les possède pas : elle relit le journal
     /// du veilleur en lecture seule, et la vue lui passe les repères des trois
@@ -102,6 +111,12 @@ public final class AppModel {
     /// l'encoche : deux panneaux ne se volent rien, alors que deux présentateurs
     /// pour un même panneau, si.
     private var attention: AttentionOverlay?
+
+    /// Le compteur de débit. Encore un panneau à lui — le troisième — et pour la
+    /// raison écrite dans `SpeedOverlay` : l'encoche est partagée par deux
+    /// fonctions dont les fins de course sont déjà finement arbitrées, et le
+    /// test de débit n'a aucun de leurs besoins.
+    private var speedOverlay: SpeedOverlay?
 
     /// Réunion détectée, en attente d'une décision de l'utilisateur.
     /// Non nil ≠ enregistrement en cours.
@@ -186,6 +201,10 @@ public final class AppModel {
         self.uploads = UploadService(store: store)
         self.directory = MeetingDirectory(configuration: uploads.configuration)
         self.awake = AwakeController(settings: awakeSettings)
+        // La version vient de `UpdateService`, seul endroit du programme qui la
+        // lise, et le compteur ne s'en sert que pour se nommer auprès du serveur
+        // de mesure. Voir `SpeedPlan.userAgent`.
+        self.speed = SpeedController(version: updates.installedVersion)
 
         let settings = self.dictationSettings
         let dictationStore = DictationStore(
@@ -333,6 +352,7 @@ public final class AppModel {
         startWatch()
         startAwake()
         startMeter()
+        startSpeed()
         clipboard.start(monitor: shortcuts.monitor)
 
         // La surveillance est permanente. Il n'y a pas de raison de la
@@ -417,9 +437,15 @@ public final class AppModel {
         // Le panneau se tait pendant que l'encoche travaille. Une fermeture, et
         // aucune propriété partagée : `NotchPresenter` garde son panneau, le
         // veilleur a le sien.
+        // **Le compteur de débit s'ajoute aux deux fonctions qui faisaient déjà
+        // taire la pilule**, et pour la même raison de place : son panneau
+        // occupe exactement le même coin de l'écran, sous la partie droite de la
+        // barre de menus. Deux surfaces flottantes superposées ne se disputent
+        // pas — elles se recouvrent, et c'est celle du dessous qui devient
+        // illisible sans que personne ne sache pourquoi.
         attention = AttentionOverlay(isSuppressed: { [weak self] in
             guard let self else { return true }
-            return dictation.isBusy || snapshot.isBusy
+            return dictation.isBusy || snapshot.isBusy || speed.phase.isRunning
         })
 
         // Le clic sur la pilule est le geste de retour. Un échec passe par
@@ -514,6 +540,27 @@ public final class AppModel {
         }
 
         meter.start()
+    }
+
+    // MARK: - Le débit
+
+    /// Deux fermetures, et rien d'autre — le patron de l'éveil.
+    ///
+    /// L'échec repart par `report`, comme tous les autres : bran a déjà un canal
+    /// pour dire ce qui a raté, il n'en aura pas un second. L'affichage passe par
+    /// `onPresent` plutôt que par une propriété partagée, pour que le contrôleur
+    /// reste ignorant de l'existence d'un panneau — c'est ce qui permet à la
+    /// sonde en ligne de commande de faire tourner la même mesure sans écran.
+    private func startSpeed() {
+        speedOverlay = SpeedOverlay(controller: speed)
+
+        speed.onPresent = { [weak self] visible in
+            self?.speedOverlay?.setVisible(visible)
+        }
+
+        speed.onFailure = { [weak self] reason in
+            self?.report(reason)
+        }
     }
 
     /// Ce que le modèle de dictée coûte, ou `nil` s'il ne coûte rien.

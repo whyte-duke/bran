@@ -8,16 +8,24 @@ import SwiftUI
 /// laisser aucun moyen d'appeler celui d'origine. Une vingtaine de lignes ici
 /// évitent donc de réimplémenter un démarrage SwiftUI à la main.
 ///
-/// Ce qui passe avant l'interface est **une** sonde de diagnostic, qui ne
-/// s'exécute que sur un drapeau explicite et qui sort sans rien afficher. Elle
-/// est là et pas dans `BranSpike` pour une raison qui n'a pas d'échappatoire :
-/// ce qu'elle mesure est attaché à l'identité de l'application signée, et un
-/// exécutable en ligne de commande hérite de celle du terminal. Voir
-/// `PasteboardAccessProbe`.
+/// Ce qui passe avant l'interface, ce sont **deux** sondes de diagnostic, qui ne
+/// s'exécutent que sur un drapeau explicite et sortent sans rien afficher.
+///
+/// `PasteboardAccessProbe` est là et pas dans `BranSpike` pour une raison qui
+/// n'a pas d'échappatoire : ce qu'elle mesure est attaché à l'identité de
+/// l'application signée, et un exécutable en ligne de commande hérite de celle
+/// du terminal.
+///
+/// `SpeedProbeReport` y est pour une raison plus faible mais suffisante : elle
+/// mesure du réseau, donc elle *pourrait* vivre dans `BranSpike` — mais elle
+/// mesurerait alors une copie du code au lieu de celui qui tourne, et c'est
+/// exactement la question qu'on lui pose quand un chiffre paraît faux. Elle
+/// partage la porte plutôt que le code.
 @main
 struct BranLaunch {
     static func main() {
         if PasteboardAccessProbe.runIfRequested() { return }
+        if SpeedProbeReport.runIfRequested() { return }
         BranApp.main()
     }
 }
@@ -53,7 +61,17 @@ struct BranApp: App {
             Label {
                 Text(model.menuBarTitle).monospacedDigit()
             } icon: {
-                Image(systemName: model.menuBarSymbol)
+                // **Deux constructions, parce qu'un symbole à valeur variable en
+                // demande une autre.** Le test de débit est la seule fonction
+                // qui s'en serve : ses points s'allument avec le débit pendant
+                // les neuf secondes de la mesure. Passer `0` au lieu de choisir
+                // ne marcherait pas — un cadran à zéro est une image, l'absence
+                // de valeur en est une autre. Voir `menuBarVariableValue`.
+                if let fill = model.menuBarVariableValue {
+                    Image(systemName: model.menuBarSymbol, variableValue: fill)
+                } else {
+                    Image(systemName: model.menuBarSymbol)
+                }
             }
         }
 

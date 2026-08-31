@@ -39,6 +39,10 @@ struct MenuBarContent: View {
 
         Divider()
 
+        SpeedMenu(speed: model.speed)
+
+        Divider()
+
         dictationItems
 
         Text(model.statusSummary)
@@ -266,6 +270,21 @@ extension AppModel {
         case .idle, .pasting, .failed: break
         }
 
+        // **Le test de débit passe devant l'enregistrement, comme la dictée.**
+        //
+        // C'est la règle 1 appliquée telle qu'elle est écrite : un événement
+        // court d'abord. Un test dure neuf secondes, un enregistrement une
+        // heure — et pendant ces neuf secondes, l'aiguille *est* le produit :
+        // c'est ce qu'on est venu regarder en cliquant. L'échange est le même
+        // que celui que la dictée fait déjà, et il coûte la même chose : la
+        // pastille rouge disparaît le temps d'un geste qu'on vient de demander
+        // soi-même, ce qui est très différent de disparaître toute seule.
+        //
+        // Le symbole est à **valeur variable** — voir `menuBarVariableValue` —
+        // donc ses points s'allument avec le débit au lieu de rester figés. Un
+        // cadran immobile pendant neuf secondes ressemble à un cadran en panne.
+        if speed.phase.isRunning { return "gauge.with.dots.needle.bottom.50percent" }
+
         switch engine.state {
         case .recording, .finalizing: return "record.circle.fill"
         case .paused: return "pause.circle.fill"
@@ -279,6 +298,19 @@ extension AppModel {
         // bougera pas. Ce qui demande quelque chose passe devant ce qui dure.
         if pendingMeeting != nil { return "bell.badge" }
         return awake.isOn ? Self.awakeSymbol : "eye"
+    }
+
+    /// De quoi remplir un symbole à valeur variable, ou `nil`.
+    ///
+    /// **Une seule fonction s'en sert**, et c'est ce qui justifie une propriété
+    /// plutôt qu'un cas particulier dans la vue : `Image(systemName:variableValue:)`
+    /// est un initialiseur différent, donc la scène doit choisir entre deux
+    /// constructions, et ce choix doit se lire au même endroit que le symbole
+    /// lui-même. `nil` veut dire « le symbole ordinaire », pas « zéro » — un
+    /// cadran à zéro et un cadran plein sont deux images différentes, un cadran
+    /// absent n'en est pas une.
+    var menuBarVariableValue: Double? {
+        speed.phase.isRunning ? speed.needle : nil
     }
 
     /// Court, mais présent : c'est ce qui rend l'élément repérable dans une
@@ -302,6 +334,12 @@ extension AppModel {
         case .transcribing: return "…"
         case .idle, .pasting, .failed: break
         }
+
+        // Le chiffre en direct, à la place du chrono, pendant les neuf secondes
+        // que dure la mesure. `SpeedFormat.menuBarLabel` le remplit en U+2007
+        // pour que l'icône ne saute pas au passage de 9,8 à 10,2 — la leçon que
+        // `ResourceFormat` avait déjà payée.
+        if speed.phase.isRunning { return speed.label }
 
         switch engine.state {
         case .recording: return elapsedDescription
