@@ -51,7 +51,8 @@ struct SpeedMenu: View {
             Text(detail)
             Text(SpeedGrade.summary(
                 download: speed.reading.download,
-                latency: speed.reading.latency
+                latency: speed.reading.latency,
+                jitter: speed.reading.jitter
             ))
 
             // **Le relevé d'avant, et seulement s'il y en a un.**

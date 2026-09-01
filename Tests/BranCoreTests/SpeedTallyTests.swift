@@ -362,32 +362,115 @@ struct SpeedBudgetTests {
 @Suite("Ce que la ligne permet")
 struct SpeedGradeTests {
 
-    /// La ligne mesurée : 14,3 Mo/s en descente, 71 ms d'aller-retour.
+    /// La ligne du poste un bon jour : 14,3 Mo/s, 71 ms, 2 ms de gigue.
     private let download: Double = 14_300_000
     private let latency: TimeInterval = 0.071
+    private let jitter: TimeInterval = 0.002
+
+    // MARK: - La régularité
+
+    @Test("Une ligne irrégulière ne permet ni la visio ni le jeu, même à latence basse")
+    func jitterBreaksRealTime() {
+        // **Les chiffres exacts relevés sur la ligne du propriétaire**, capture à
+        // l'appui : 0,2 Mo/s, 40 ms de latence, 153 ms de gigue. bran annonçait
+        // « suffisant jusqu'à : jeu en ligne », donc aussi la visioconférence.
+        // Les deux sont impraticables à cette gigue-là, et la gigue était
+        // affichée deux lignes plus haut dans le même menu.
+        let d = 200_000.0, l = 0.040, j = 0.153
+
+        let video = SpeedGrade.uses.first { $0.title == "Visioconférence" }!
+        let game = SpeedGrade.uses.first { $0.title == "Jeu en ligne" }!
+        let calls = SpeedGrade.uses.first { $0.title == "Appels audio" }!
+
+        #expect(video.verdict(download: d, latency: l, jitter: j) == false)
+        #expect(game.verdict(download: d, latency: l, jitter: j) == false)
+        #expect(calls.verdict(download: d, latency: l, jitter: j) == false)
+
+        // Ce qui se met en mémoire tampon encaisse : un morceau de musique ne
+        // sait pas que la ligne est irrégulière.
+        let music = SpeedGrade.uses.first { $0.title == "Musique en streaming" }!
+        #expect(music.verdict(download: d, latency: l, jitter: j) == true)
+    }
+
+    @Test("Le jeu tient le seuil le plus serré : il n'a aucun tampon à opposer")
+    func gamingIsStrictest() {
+        let game = SpeedGrade.uses.first { $0.title == "Jeu en ligne" }!
+        let video = SpeedGrade.uses.first { $0.title == "Visioconférence" }!
+
+        // 40 ms de gigue : la visio encaisse, le jeu non.
+        #expect(video.verdict(download: download, latency: latency, jitter: 0.040) == true)
+        #expect(game.verdict(download: download, latency: latency, jitter: 0.040) == false)
+    }
+
+    @Test("Le résumé dit ce que la gigue coûte, et le nomme")
+    func summaryNamesWhatJitterCosts() {
+        let text = SpeedGrade.summary(download: 200_000, latency: 0.040, jitter: 0.153)
+        // Le plafond descend jusqu'à la musique, puisque tout le temps réel tombe.
+        #expect(text.contains("musique"))
+        // Et la seconde phrase dit pourquoi, avec le chiffre.
+        #expect(text.contains("gigue"))
+        #expect(text.contains("153"))
+        #expect(text.contains("visioconférence"))
+        #expect(text.contains("jeu en ligne"))
+    }
+
+    @Test("Une ligne rapide mais irrégulière ne s'annonce pas simplement « 4K »")
+    func fastButJitteryIsNotJustFast() {
+        // Le cas le plus trompeur : tous les seuils de débit passent largement,
+        // et pourtant c'est l'usage pour lequel on a lancé le test qui échoue.
+        let text = SpeedGrade.summary(download: 26_900_000, latency: 0.040, jitter: 0.153)
+        #expect(text.contains("4k"))
+        #expect(text.contains("gigue"))
+        #expect(text.contains("visioconférence"))
+    }
+
+    @Test("Une ligne régulière n'a pas de seconde phrase")
+    func steadyLineSaysNothingMore() {
+        let text = SpeedGrade.summary(download: download, latency: latency, jitter: jitter)
+        #expect(text == "Suffisant jusqu'à : streaming 4k.")
+    }
+
+    @Test("« Limité par la gigue » ne se dit que si le reste passait")
+    func jitterBlameIsPrecise() {
+        let video = SpeedGrade.uses.first { $0.title == "Visioconférence" }!
+        // Débit et latence bons, gigue mauvaise → c'est bien elle la coupable.
+        #expect(video.limitedByJitter(download: download, latency: latency, jitter: 0.153))
+        // Débit insuffisant : la gigue n'est pas ce qu'il faut corriger, et
+        // l'accuser enverrait régler le mauvais problème.
+        #expect(video.limitedByJitter(download: 50_000, latency: latency, jitter: 0.153) == false)
+        // Tout va bien : rien à dire.
+        #expect(video.limitedByJitter(download: download, latency: latency, jitter: jitter) == false)
+        // Un usage sans plafond de gigue n'est jamais accusé.
+        let music = SpeedGrade.uses.first { $0.title == "Musique en streaming" }!
+        #expect(music.limitedByJitter(download: download, latency: latency, jitter: 0.153) == false)
+    }
+
+    // MARK: - Ce qu'on ne sait pas
 
     @Test("Un usage jugé sur la latence ne répond pas oui faute de latence")
     func unknownPropagates() {
         let game = SpeedGrade.uses.first { $0.title == "Jeu en ligne" }!
         // Sans latence mesurée, la ligne du jeu ne peut rien affirmer — même
-        // avec un débit de fibre. C'était le défaut à fermer : la plupart des
-        // compteurs cochent le jeu en ligne dès que le débit passe, et donnent
-        // donc un ✓ à une ligne dont les 200 ms le rendent injouable.
-        #expect(game.verdict(download: 125_000_000, latency: nil) == nil)
-        #expect(game.verdict(download: nil, latency: 0.030) == true)
-        #expect(game.verdict(download: nil, latency: 0.200) == false)
+        // avec un débit de fibre.
+        #expect(game.verdict(download: 125_000_000, latency: nil, jitter: jitter) == nil)
+        // Sans gigue non plus : c'est une exigence comme les autres.
+        #expect(game.verdict(download: 125_000_000, latency: 0.030, jitter: nil) == nil)
+        #expect(game.verdict(download: nil, latency: 0.030, jitter: 0.002) == true)
+        #expect(game.verdict(download: nil, latency: 0.200, jitter: 0.002) == false)
     }
 
-    @Test("Les deux exigences sont conjonctives")
-    func bothRequirementsMustHold() {
+    @Test("Les trois exigences sont conjonctives")
+    func allRequirementsMustHold() {
         let video = SpeedGrade.uses.first { $0.title == "Visioconférence" }!
-        // Le débit passe largement, la latence non : une visio sur une ligne
-        // satellite. La réponse est non.
-        #expect(video.verdict(download: download, latency: 0.400) == false)
-        #expect(video.verdict(download: download, latency: latency) == true)
+        // Le débit passe largement, la latence non : une ligne satellite.
+        #expect(video.verdict(download: download, latency: 0.400, jitter: jitter) == false)
         // La latence passe, le débit non.
-        #expect(video.verdict(download: 100_000, latency: latency) == false)
+        #expect(video.verdict(download: 100_000, latency: latency, jitter: jitter) == false)
+        // Les trois passent.
+        #expect(video.verdict(download: download, latency: latency, jitter: jitter) == true)
     }
+
+    // MARK: - L'ordre
 
     @Test("Les exigences de débit sont croissantes")
     func listIsOrdered() {
@@ -405,20 +488,22 @@ struct SpeedGradeTests {
         // le débit, donc il n'a pas sa place sur cette échelle.
         #expect(SpeedGrade.uses.filter { $0.megabits == nil }.count == 1)
 
-        // Et la conséquence recherchée : sur une ligne donnée, tout ce qui est
-        // tenu parmi les usages jugés au débit précède tout ce qui ne l'est pas.
+        // Et la conséquence recherchée, **sur une ligne régulière** : tout ce
+        // qui est tenu précède tout ce qui ne l'est pas. La régularité, elle,
+        // coupe en travers de cet ordre — c'est justement ce qui la rend digne
+        // d'une phrase à part dans le résumé.
         let byBandwidth = SpeedGrade.uses.filter { $0.megabits != nil }
-        let verdicts = byBandwidth.map { $0.verdict(download: 700_000, latency: 0.071) }
+        let verdicts = byBandwidth.map { $0.verdict(download: 700_000, latency: 0.071, jitter: 0.002) }
         #expect(verdicts.drop(while: { $0 == true }).allSatisfy { $0 != true })
     }
 
     @Test("Le résumé nomme le plus exigeant des usages tenus")
     func summaryNamesTheCeiling() {
-        #expect(SpeedGrade.summary(download: download, latency: latency).contains("4k"))
+        #expect(SpeedGrade.summary(download: download, latency: latency, jitter: jitter).contains("4k"))
         // Une ligne à 6 Mbit/s : la HD passe, la 4K non.
-        #expect(SpeedGrade.summary(download: 750_000, latency: latency).contains("hd"))
+        #expect(SpeedGrade.summary(download: 750_000, latency: latency, jitter: jitter).contains("hd"))
         // Rien mesuré du tout : on le dit, on n'invente pas une liste vide.
-        #expect(SpeedGrade.summary(download: nil, latency: nil) == "Rien n'a pu être mesuré.")
+        #expect(SpeedGrade.summary(download: nil, latency: nil, jitter: nil) == "Rien n'a pu être mesuré.")
     }
 }
 
