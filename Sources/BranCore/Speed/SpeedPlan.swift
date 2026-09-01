@@ -203,15 +203,47 @@ public enum SpeedPlan {
         }
     }
 
-    /// **Le délai imposé entre deux tests.**
-    ///
-    /// Il n'est pas là pour économiser les octets — le plafond s'en charge — mais
-    /// pour la raison mesurée en tête de fichier : les services de mesure
-    /// limitent le débit de requêtes, et Cloudflare a fermé la porte plus de
-    /// vingt minutes après une rafale. Un bouton qu'on peut mitrailler finit par
-    /// afficher une erreur causée par bran lui-même, sur une ligne qui va très
-    /// bien. Trente secondes n'empêchent aucun usage légitime : personne ne
-    /// mesure sa ligne deux fois dans la même demi-minute pour une autre raison
-    /// que l'impatience.
-    public static let cooldown: TimeInterval = 30
+    // MARK: - Le délai qui n'existe plus
+    //
+    // **Il y avait ici un `cooldown` de trente secondes, et `SpeedGate` pour le
+    // faire respecter. Les deux ont été retirés.**
+    //
+    // L'argument tenait, et il est toujours vrai : Cloudflare limite sur le
+    // volume cumulé et a fermé la porte plus de vingt minutes après une rafale
+    // (voir l'en-tête). Un bouton qu'on mitraille finit par afficher une panne
+    // que bran a lui-même provoquée.
+    //
+    // Ce qu'il ne pesait pas, c'est **à quoi sert ce compteur**. Il était écrit
+    // pour la curiosité — « combien fait ma ligne » — et son commentaire le
+    // disait : « personne ne mesure sa ligne deux fois dans la même demi-minute
+    // pour une autre raison que l'impatience ». C'est faux dès qu'on s'en sert
+    // pour ce à quoi il est réellement le plus utile : **diagnostiquer une panne
+    // intermittente**. Une coupure d'une seconde toutes les dix minutes ne se
+    // trouve qu'en tirant des mesures quand on la soupçonne, en rafale, sans
+    // qu'un minuteur décide à votre place que vous êtes impatient. Le
+    // propriétaire du poste a exactement cette panne, et le délai le gênait
+    // pendant qu'il la cherchait.
+    //
+    // **Ce qui remplace le délai, et pourquoi c'est suffisant.** Le risque n'a
+    // jamais été symétrique :
+    //
+    // - La **descente** tire sur `proof.ovh.net`, un fichier statique qui n'a
+    //   jamais limité quoi que ce soit, même sous rafale d'essais. C'est le
+    //   chiffre qu'on vient chercher, et il est désormais relançable sans aucune
+    //   retenue.
+    // - La **montée** tire sur Cloudflare, le seul à l'accepter, et c'était lui
+    //   le risque. Il s'avère plus petit qu'on ne le craignait : la limite
+    //   mesurée portait sur `__down?bytes=`, et `__up` a encaissé sans broncher
+    //   **240 Mo en huit POST simultanés de 30 Mo** (01/09/2026), tous en `200`.
+    //   Six POST de 20 Mo à la suite, également tous en `200`. Le mur des vingt
+    //   minutes gardait la porte de descente, pas celle de montée — et bran
+    //   n'utilise plus la première.
+    //
+    //   Ça ne prouve pas qu'aucune limite n'existe, et le filet reste : si un
+    //   `429` arrive, il ne fait pas échouer le test — il ne le faisait déjà pas
+    //   — mais il est désormais **nommé**, voir `SpeedMiss`. Le relevé disait
+    //   « ↑ — » sans rien expliquer, ce qui, sur un compteur qu'on relance en
+    //   boucle, aurait fini par faire accuser la ligne à la place de bran.
+    //   C'était le vrai danger de retirer le délai, et c'est celui-là qu'on
+    //   ferme — en nommant le coupable plutôt qu'en interdisant le geste.
 }

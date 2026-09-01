@@ -30,9 +30,13 @@ struct SpeedMenu: View {
         // Un test dure une dizaine de secondes et consomme des octets ; laisser
         // « Mesure en cours… » en gris obligerait à attendre la fin d'un test
         // qu'on vient de lancer par erreur, ou au mauvais moment — en partage de
-        // connexion, juste avant une visio. Le reste du temps, le bouton est
-        // éteint pendant le délai, selon la règle du dépôt : on n'offre pas un
-        // clic qui ne produirait rien.
+        // connexion, juste avant une visio.
+        //
+        // **Le reste du temps, le bouton est toujours allumé.** Il portait un
+        // décompte — « Nouveau test dans 25 s » — et restait éteint pendant ce
+        // temps-là. Voir `SpeedPlan` pour ce que ce délai coûtait à l'usage qui
+        // compte le plus : traquer une coupure intermittente, ce qui se fait en
+        // rafale et au moment où on la soupçonne.
         if speed.phase.isRunning {
             Button("Arrêter la mesure", systemImage: "stop.circle") {
                 speed.cancel()
@@ -65,18 +69,26 @@ struct SpeedMenu: View {
             if let previous = speed.previous, previous.isEmpty == false {
                 Text("Avant : ↓ \(SpeedFormat.megabytesSigned(previous.download))\(Self.age(of: previous.measuredAt).map { ", \($0)" } ?? "")")
             }
+
+            // **Pourquoi la montée manque, quand elle manque.**
+            //
+            // La ligne n'existait pas : le relevé affichait « ↑ — » et se
+            // taisait. C'était supportable tant qu'un délai de trente secondes
+            // rendait le cas rare ; il devient ordinaire depuis qu'on peut
+            // relancer en rafale, et c'est précisément la contrepartie de ce
+            // retrait. Un tiret muet, sur un compteur qu'on mitraille, ferait
+            // accuser la connexion à la place du serveur de mesure — le mauvais
+            // coupable, et celui qui envoie appeler son opérateur pour rien.
+            if let miss = speed.reading.uploadMiss {
+                Text(miss.summary)
+            }
         }
     }
 
-    /// Le libellé porte l'état, parce que le menu est le seul endroit d'où l'on
-    /// puisse comprendre pourquoi le bouton est éteint.
+    /// Le libellé dit si l'on part de rien ou si l'on remesure. Il portait aussi
+    /// le décompte du délai ; ce délai n'existe plus, et le bouton avec lui.
     private var buttonTitle: String {
-        if let remaining = speed.cooldownRemaining {
-            // Le délai vient de bran, pas de la ligne : voir `SpeedPlan.cooldown`.
-            // Le dire évite qu'on l'attribue à une connexion qui va très bien.
-            return "Nouveau test dans \(remaining) s"
-        }
-        return speed.reading.isEmpty ? "Tester le débit" : "Tester à nouveau"
+        speed.reading.isEmpty ? "Tester le débit" : "Tester à nouveau"
     }
 
     /// Les deux chiffres, avec leurs flèches. Espace cadratin entre eux : un

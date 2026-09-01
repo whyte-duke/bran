@@ -1,5 +1,46 @@
 import Foundation
 
+/// **Pourquoi un sens manque**, quand il manque.
+///
+/// Le type existe pour une seule distinction, et elle est celle qui compte quand
+/// on regarde un « — » : est-ce **la ligne** qui n'a pas répondu, ou **bran** qui
+/// en a trop demandé ?
+///
+/// La question n'était pas posée tant qu'un délai de trente secondes séparait
+/// deux mesures : on ne heurtait presque jamais la limite du serveur. Elle
+/// devient centrale maintenant que ce délai n'existe plus (voir `SpeedPlan`) —
+/// un compteur qu'on relance en boucle pour traquer une panne intermittente
+/// finira par se faire dire `429`, et un « ↑ — » muet, ce jour-là, ferait
+/// accuser la connexion à la place du compteur. C'est exactement le mauvais
+/// coupable, et c'est le genre d'erreur qui envoie appeler son opérateur.
+public enum SpeedMiss: String, Codable, Sendable, Equatable {
+
+    /// Le serveur de mesure a répondu `429`. **Ce n'est pas la ligne.**
+    ///
+    /// Mesuré : après une série d'essais, `speed.cloudflare.com` a refusé toute
+    /// requête de plus de 5 Mo pendant plus de vingt minutes. La descente, elle,
+    /// continue de passer — elle ne tire pas sur le même hôte.
+    case throttled
+
+    /// Le serveur n'a pas répondu, ou le transfert s'est interrompu. Là, on ne
+    /// peut pas trancher : ça peut être l'hôte comme la ligne, et prétendre
+    /// savoir serait pire que de ne rien dire.
+    case unreachable
+
+    /// Ce qui s'écrit dans le menu, à côté du « — ».
+    ///
+    /// Deux phrases distinctes parce que les deux cas appellent deux gestes
+    /// différents : attendre une minute, ou regarder sa connexion.
+    public var summary: String {
+        switch self {
+        case .throttled:
+            "Montée non mesurée : le serveur de mesure demande une pause, pas votre ligne."
+        case .unreachable:
+            "Montée non mesurée : le serveur n'a pas répondu."
+        }
+    }
+}
+
 /// **Un relevé de débit**, tel qu'il s'affiche et tel qu'il se conserve.
 ///
 /// Les quatre nombres sont indépendamment optionnels, et c'est le point du type :
@@ -12,6 +53,13 @@ public struct SpeedReading: Equatable, Sendable, Codable {
     /// Octets par seconde. `nil` = pas mesuré, jamais « zéro ».
     public var download: Double?
     public var upload: Double?
+
+    /// Pourquoi la montée manque, quand elle manque. `nil` quand elle a été
+    /// mesurée — ou quand personne n'a essayé.
+    ///
+    /// **Il porte une raison et pas un booléen** : `upload == nil` dit déjà
+    /// qu'elle manque, ce champ dit à qui la faute. Voir `SpeedMiss`.
+    public var uploadMiss: SpeedMiss?
 
     /// Secondes.
     public var latency: TimeInterval?
@@ -33,6 +81,7 @@ public struct SpeedReading: Equatable, Sendable, Codable {
     public init(
         download: Double? = nil,
         upload: Double? = nil,
+        uploadMiss: SpeedMiss? = nil,
         latency: TimeInterval? = nil,
         jitter: TimeInterval? = nil,
         source: String? = nil,
@@ -41,6 +90,7 @@ public struct SpeedReading: Equatable, Sendable, Codable {
     ) {
         self.download = download
         self.upload = upload
+        self.uploadMiss = uploadMiss
         self.latency = latency
         self.jitter = jitter
         self.source = source
@@ -72,6 +122,7 @@ public struct SpeedReading: Equatable, Sendable, Codable {
         let box = try decoder.container(keyedBy: CodingKeys.self)
         download = try box.decodeIfPresent(Double.self, forKey: .download)
         upload = try box.decodeIfPresent(Double.self, forKey: .upload)
+        uploadMiss = try box.decodeIfPresent(SpeedMiss.self, forKey: .uploadMiss)
         latency = try box.decodeIfPresent(TimeInterval.self, forKey: .latency)
         jitter = try box.decodeIfPresent(TimeInterval.self, forKey: .jitter)
         source = try box.decodeIfPresent(String.self, forKey: .source)

@@ -28,9 +28,12 @@ enum SpeedProbe {
         /// Le service a demandé une pause : `429`. **Ce n'est pas la ligne.**
         /// Mesuré : après une rafale d'essais, `speed.cloudflare.com` a refusé
         /// les requêtes de plus de 5 Mo pendant plus de vingt minutes. C'est la
-        /// raison d'être de `SpeedPlan.cooldown`, et si l'utilisateur le voit
-        /// quand même, il doit lire « attendez », pas « votre connexion est
-        /// cassée ».
+        /// raison pour laquelle une montée refusée n'emporte pas le test : elle
+        /// se range en `SpeedMiss.throttled`, qui dit « attendez » et non
+        /// « votre connexion est cassée ». C'est la seule protection qui reste
+        /// depuis que le délai entre deux mesures a été retiré — voir
+        /// `SpeedPlan` — et c'est celle qui compte, puisqu'elle nomme le
+        /// coupable au lieu de le laisser deviner.
         case throttled
         /// Un code inattendu. Porté avec son numéro : c'est la seule chose qui
         /// permette de distinguer un serveur en panne d'un serveur qui a bougé.
@@ -46,6 +49,21 @@ enum SpeedProbe {
                 "Le serveur de mesure a répondu \(code)."
             case .unreachable(let reason):
                 "Impossible de joindre le serveur de mesure — \(reason)"
+            }
+        }
+
+        /// Comment cet échec se **conserve** dans un relevé.
+        ///
+        /// Trois cas d'un côté, deux de l'autre, et c'est volontaire :
+        /// `SpeedMiss` vit dans `BranCore` et n'a pas à connaître les codes HTTP.
+        /// Ce qu'il doit distinguer tient en une question — est-ce le serveur qui
+        /// nous freine, ou la ligne qui ne répond pas ? — et un `refused(503)`
+        /// se range du second côté parce qu'on ne peut pas en dire plus sans
+        /// inventer.
+        var miss: SpeedMiss {
+            switch self {
+            case .throttled: .throttled
+            case .refused, .unreachable: .unreachable
             }
         }
     }

@@ -117,36 +117,30 @@ final class SpeedController {
     private let version: String
     private var run: Task<Void, Never>?
     private var gate = LabelGate()
-    /// La porte du délai entre deux mesures. Homonyme sans parenté de
-    /// `LabelGate` ci-dessus, qui filtre des redessins : celle-ci filtre des
-    /// requêtes réseau.
-    private var cooldown = SpeedGate()
 
     init(version: String) {
         self.version = version
         reading = Self.load(Key.reading, from: defaults) ?? SpeedReading()
         previous = Self.load(Key.previous, from: defaults)
-        cooldown = SpeedGate(lastReached: reading.measuredAt)
     }
 
     // MARK: - Le geste
 
     /// Peut-on lancer un test maintenant ?
     ///
-    /// Le délai est celui de `SpeedPlan.cooldown`, et il existe pour une raison
-    /// mesurée qui n'a rien à voir avec les octets : les services de mesure
-    /// limitent le débit de requêtes, et Cloudflare a fermé la porte plus de
-    /// vingt minutes après une rafale d'essais. Un bouton qu'on peut mitrailler
-    /// finit par afficher une panne que bran a lui-même provoquée, sur une ligne
-    /// qui va très bien.
+    /// **La seule condition est qu'il n'y en ait pas déjà un qui tourne.** Il y
+    /// avait ici un délai de trente secondes, et `SpeedGate` pour le tenir : les
+    /// deux ont été retirés, et `SpeedPlan` porte le raisonnement complet. En
+    /// deux lignes : ce délai avait été pensé pour un compteur qu'on consulte
+    /// par curiosité, alors que l'usage qui compte vraiment est de traquer une
+    /// coupure intermittente — ce qui demande de tirer des mesures en rafale,
+    /// au moment où on la soupçonne.
+    ///
+    /// Ce que le délai protégeait n'a pas disparu pour autant : c'est la montée
+    /// qui peut se faire dire `429`, et ce cas est maintenant nommé plutôt
+    /// qu'affiché en « — » muet. Voir `SpeedMiss`.
     var canStart: Bool {
-        phase.isRunning == false && cooldown.allows(at: .now)
-    }
-
-    /// Combien de temps il reste à attendre, en secondes entières. `nil` quand
-    /// on peut y aller.
-    var cooldownRemaining: Int? {
-        phase.isRunning ? nil : cooldown.remaining(at: .now)
+        phase.isRunning == false
     }
 
     func start() {
@@ -162,10 +156,6 @@ final class SpeedController {
     func cancel() {
         run?.cancel()
         run = nil
-        // Une mesure interrompue a émis — les neuf sondes de latence partent
-        // dans la première seconde — donc elle compte. Un panneau simplement
-        // refermé n'a rien envoyé. `SpeedGate` porte la règle et son pourquoi.
-        cooldown.interrupted(wasMeasuring: phase.isRunning, at: .now)
         settle(.idle)
     }
 
@@ -270,6 +260,14 @@ final class SpeedController {
         } catch {
             follower.cancel()
             fresh.spentBytes += counter.snapshot.totalBytes
+            // **La raison est retenue, pas seulement l'échec.** Le `catch`
+            // avalait tout et laissait « ↑ — » sans explication. Tant qu'un
+            // délai de trente secondes séparait deux mesures, le cas était
+            // rare ; maintenant qu'on peut relancer en boucle — et c'est bien
+            // l'objet du retrait — heurter la limite de Cloudflare devient
+            // ordinaire, et un tiret muet ferait accuser la ligne à la place du
+            // compteur. Voir `SpeedMiss`.
+            fresh.uploadMiss = (error as? SpeedProbe.Failure)?.miss ?? .unreachable
             FeatureLog.record("débit — montée échouée")
         }
 
@@ -336,7 +334,6 @@ final class SpeedController {
     private func commit(_ fresh: SpeedReading) {
         previous = reading.isEmpty ? nil : reading
         reading = fresh
-        cooldown.reached(at: fresh.measuredAt ?? .now)
         Self.save(fresh, at: Key.reading, in: defaults)
         if let previous { Self.save(previous, at: Key.previous, in: defaults) }
 
@@ -345,9 +342,6 @@ final class SpeedController {
     }
 
     private func fail(_ reason: String, spending bytes: Int) {
-        // Un échec compte : les requêtes sont parties, et un `429` est
-        // précisément le signe qu'il faut cesser d'en envoyer.
-        cooldown.reached(at: .now)
         reading.spentBytes = bytes
         publish(.failed(reason))
         onFailure(reason)

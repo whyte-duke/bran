@@ -603,79 +603,72 @@ struct SpeedReadingCodingTests {
 }
 
 
-@Suite("Le délai entre deux mesures")
-struct SpeedGateTests {
+@Suite("Pourquoi un sens manque")
+struct SpeedMissTests {
 
-    private let start = Date(timeIntervalSince1970: 1_788_000_000)
+    /// **Ce qui remplace `SpeedGateTests`.**
+    ///
+    /// Il y avait ici six cas qui vérifiaient un délai de trente secondes entre
+    /// deux mesures. Le délai a été retiré — voir `SpeedPlan` — et les garder
+    /// avec un plafond nul aurait produit exactement ce qu'un dépôt ne doit pas
+    /// contenir : des tests qui passent en ne vérifiant rien.
+    ///
+    /// Ce qui les remplace teste la protection qui **reste**, et qui est la
+    /// seule à porter du sens maintenant : quand la montée manque, le relevé
+    /// dit-il à qui la faute ?
 
-    @Test("Sans mesure passée, on peut y aller tout de suite")
-    func openByDefault() {
-        let gate = SpeedGate()
-        #expect(gate.allows(at: start))
-        #expect(gate.remaining(at: start) == nil)
+    @Test("Un refus du serveur ne se lit pas comme une panne de la ligne")
+    func throttledBlamesTheServer() {
+        // C'est toute la raison d'être du type. `429` veut dire « bran en a trop
+        // demandé », jamais « votre connexion est cassée » — et les deux phrases
+        // envoient faire deux choses opposées : attendre une minute, ou appeler
+        // son opérateur.
+        #expect(SpeedMiss.throttled.summary.contains("pas votre ligne"))
+        #expect(SpeedMiss.unreachable.summary.contains("pas votre ligne") == false)
+        // Les deux se présentent quand même comme ce qu'elles sont.
+        #expect(SpeedMiss.throttled.summary.hasPrefix("Montée non mesurée"))
+        #expect(SpeedMiss.unreachable.summary.hasPrefix("Montée non mesurée"))
     }
 
-    @Test("Une mesure terminée ferme la porte pour le délai complet")
-    func reachedCloses() {
-        var gate = SpeedGate()
-        gate.reached(at: start)
-
-        #expect(gate.allows(at: start) == false)
-        #expect(gate.remaining(at: start) == Int(SpeedPlan.cooldown))
-        #expect(gate.allows(at: start.addingTimeInterval(SpeedPlan.cooldown - 1)) == false)
-        #expect(gate.allows(at: start.addingTimeInterval(SpeedPlan.cooldown)))
+    @Test("Une montée manquée n'emporte pas une descente réussie")
+    func downloadSurvivesAMissedUpload() {
+        // Le serveur de montée est un autre hôte, avec ses propres pannes : un
+        // relevé qui exigerait les quatre nombres jetterait trois mesures bonnes
+        // à cause d'une quatrième.
+        let reading = SpeedReading(
+            download: 21_500_000, upload: nil, uploadMiss: .throttled,
+            latency: 0.026, jitter: 0.001
+        )
+        #expect(reading.isEmpty == false)
+        #expect(reading.download == 21_500_000)
+        #expect(reading.uploadMiss == .throttled)
     }
 
-    @Test("Une mesure interrompue compte : ses sondes sont parties")
-    func interruptedWhileMeasuringCounts() {
-        var gate = SpeedGate()
-        // Une seconde de mesure, c'est déjà les neuf sondes de latence envoyées.
-        gate.interrupted(wasMeasuring: true, at: start)
-        #expect(gate.allows(at: start) == false)
+    @Test("La raison se conserve d'un lancement à l'autre")
+    func missSurvivesTheRoundTrip() throws {
+        let original = SpeedReading(
+            download: 21_500_000, uploadMiss: .unreachable,
+            latency: 0.026, jitter: 0.001, spentBytes: 80_000_000
+        )
+        let data = try JSONEncoder().encode(original)
+        #expect(try JSONDecoder().decode(SpeedReading.self, from: data) == original)
     }
 
-    @Test("Refermer un panneau déjà terminé ne repousse pas le délai")
-    func dismissingDoesNotPunish() {
-        // **Le défaut que ce type existe pour fermer.**
-        //
-        // La croix du panneau sert à deux gestes : arrêter une mesure, et
-        // chasser un résultat déjà affiché. Estampiller sans distinguer les deux
-        // repartait de trente secondes **à partir du clic** — donc plus on
-        // refermait vite, plus on attendait. La punition tombait à l'envers.
-        var gate = SpeedGate()
-        gate.reached(at: start)
-
-        // Cinq secondes plus tard, on chasse le résultat qu'on vient de lire.
-        let dismissal = start.addingTimeInterval(5)
-        gate.interrupted(wasMeasuring: false, at: dismissal)
-
-        // Il doit rester vingt-cinq secondes, pas trente.
-        #expect(gate.remaining(at: dismissal) == Int(SpeedPlan.cooldown) - 5)
-        // Et la porte s'ouvre bien à l'heure prévue par la **mesure**, pas par
-        // le clic.
-        #expect(gate.allows(at: start.addingTimeInterval(SpeedPlan.cooldown)))
+    @Test("Un relevé écrit avant ce champ se relit sans raison, pas sans relevé")
+    func olderReadingsDecode() throws {
+        // Même défaut que celui que `spentBytes` a déjà coûté : un décodeur qui
+        // échouerait sur la clé absente ferait disparaître, en silence, le
+        // dernier relevé de quelqu'un qui met bran à jour.
+        let legacy = Data(#"{"download":21500000,"upload":19900000,"spentBytes":140000000}"#.utf8)
+        let reading = try JSONDecoder().decode(SpeedReading.self, from: legacy)
+        #expect(reading.download == 21_500_000)
+        #expect(reading.upload == 19_900_000)
+        #expect(reading.uploadMiss == nil)
     }
 
-    @Test("Le décompte s'arrondit au supérieur : jamais « 0 s » sur un bouton éteint")
-    func countdownRoundsUp() {
-        var gate = SpeedGate()
-        gate.reached(at: start)
-        // Il reste un dixième de seconde : le bouton est encore éteint, donc le
-        // décompte doit dire « 1 », pas « 0 ».
-        let almost = start.addingTimeInterval(SpeedPlan.cooldown - 0.1)
-        #expect(gate.remaining(at: almost) == 1)
-        #expect(gate.allows(at: almost) == false)
-    }
-
-    @Test("Une horloge remise en arrière n'éteint pas le bouton indéfiniment")
-    func clockGoingBackwards() {
-        // Changement d'heure, ou horloge corrigée par le réseau : la dernière
-        // mesure se retrouve dans le futur. Sans borne, la soustraction rendrait
-        // un délai arbitrairement long — un bouton éteint pendant une heure,
-        // sans que rien à l'écran ne l'explique.
-        var gate = SpeedGate()
-        gate.reached(at: start.addingTimeInterval(3600))
-        let remaining = try! #require(gate.remaining(at: start))
-        #expect(remaining == Int(SpeedPlan.cooldown))
+    @Test("Un relevé complet n'a pas de raison à donner")
+    func measuredUploadHasNoMiss() {
+        let reading = SpeedReading(download: 21_500_000, upload: 19_900_000)
+        #expect(reading.uploadMiss == nil)
     }
 }
