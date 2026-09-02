@@ -170,8 +170,18 @@ final class SnapshotController {
             "déclenchement — autorisation déclarée=\(ScreenAccess.isDeclaredGranted) "
             + "titres de fenêtres lisibles=\(ScreenAccess.canSeeOtherWindows)"
         )
-        guard ScreenAccess.isUsable else {
-            if ScreenAccess.isDeclaredGranted == false { CGRequestScreenCaptureAccess() }
+        // **Ne bloquer que sur `.blocked`.** L'état `.unconfirmed` — déclaré
+        // accordé, mais aucune fenêtre titrée d'une autre application pour le
+        // confirmer — était traité comme un refus. Or il survient aussi quand
+        // toutes les autres applications sont réduites, ou quand bran est seul
+        // au premier plan : ⌘⇧2 refusait alors de s'ouvrir, en conseillant de
+        // retirer et rajouter bran dans les Réglages système, sur une
+        // autorisation parfaitement valide.
+        //
+        // On tente, et c'est le résultat qui tranche : voir plus bas, là où un
+        // texte vide est interprété.
+        if ScreenAccess.verdict == .blocked {
+            CGRequestScreenCaptureAccess()
             apply(machine.handle(.failed(.screenRecordingBlind(ScreenAccess.diagnosis))))
             return
         }
@@ -266,7 +276,17 @@ final class SnapshotController {
                             sourceApp: pending.sourceApp,
                             pixelWidth: pending.image.width,
                             pixelHeight: pending.image.height,
-                            failure: "Aucun texte lisible dans cette zone. L'image est conservée : ouvrez-la pour voir ce qui a été capturé."
+                            // **Le seul endroit où l'on peut trancher entre les
+                            // deux causes d'une image vide.** Si l'autorisation
+                            // n'a pas pu être confirmée avant la capture et que
+                            // la capture ne rend rien, ce n'est presque jamais
+                            // une zone sans texte : c'est le fond d'écran rendu
+                            // fenêtres retirées, symptôme d'une autorisation
+                            // accordée à une signature antérieure. Le dire ici
+                            // vaut mieux que de le supposer avant.
+                            failure: ScreenAccess.verdict == .unconfirmed
+                                ? ScreenAccess.diagnosis
+                                : "Aucun texte lisible dans cette zone. L'image est conservée : ouvrez-la pour voir ce qui a été capturé."
                         ),
                         image: pending.image
                     )

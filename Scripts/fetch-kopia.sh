@@ -26,21 +26,47 @@ set -euo pipefail
 
 VERSION="0.23.1"
 SHA256="19e6ed637221f4dfd46a46e978ec4c509c386b522d746db2cd6762b217478111"
+# L'empreinte du binaire **extrait**, pas seulement de l'archive.
+#
+# Elle n'est pas publiée par le projet kopia : elle est dérivée de l'archive
+# ci-dessus, une fois celle-ci vérifiée contre son empreinte officielle. C'est
+# la même chaîne de confiance, prolongée d'un cran — et ce cran manquait.
+#
+# Relevée le 02/09/2026 en téléchargeant l'archive épinglée, en confirmant son
+# SHA-256, puis en hachant le `kopia` qu'elle contient. À refaire à chaque
+# montée de version, par le même chemin.
+BINARY_SHA256="2b73694b6cfc3bd064e4db744aa9e9674dc804997a67405351f43c95a9d274fa"
 
 ROOT="${0:A:h:h}"
 DEST="$ROOT/Vendor/kopia"
 ARCHIVE="kopia-${VERSION}-macOS-arm64.tar.gz"
 URL="https://github.com/kopia/kopia/releases/download/v${VERSION}/${ARCHIVE}"
 
-# Déjà là et à la bonne version : ne rien télécharger. Ce script est appelé par
-# la construction, qui tourne des dizaines de fois par jour.
-if [[ -x "$DEST/kopia" ]]; then
-  have=$("$DEST/kopia" --version 2>/dev/null | awk '{print $1}') || have=""
-  if [[ "$have" == "$VERSION" ]]; then
-    echo "→ kopia $VERSION déjà présent"
+# Déjà là et **authentique** : ne rien télécharger. Ce script est appelé par la
+# construction, qui tourne des dizaines de fois par jour.
+#
+# **Le raccourci reposait sur `--version`, et c'était un trou.** Il exécutait le
+# binaire trouvé sur place et l'acceptait dès que sa première sortie valait
+# « 0.23.1 » — n'importe quel exécutable qui imprime cette chaîne passait. Or ce
+# qui est accepté ici est ensuite copié dans le paquet par `build-app.sh`, puis
+# **signé avec l'identité de bran** : un cache de construction empoisonné
+# suffisait à produire une application valablement signée embarquant du code
+# étranger, avec accès à l'écran, au micro et à tous les fichiers que
+# l'utilisateur demande de sauvegarder.
+#
+# Le SHA-256 ne coûte que quelques centaines de millisecondes sur 46 Mo, et il
+# se calcule **sans exécuter le fichier** — ce qui est l'autre moitié du
+# problème : l'ancienne vérification lançait le binaire suspect pour décider
+# s'il était digne de confiance.
+if [[ -f "$DEST/kopia" ]]; then
+  have=$(shasum -a 256 "$DEST/kopia" | cut -d' ' -f1)
+  if [[ "$have" == "$BINARY_SHA256" ]]; then
+    echo "→ kopia $VERSION déjà présent (empreinte vérifiée)"
     exit 0
   fi
-  echo "→ kopia présent en version « ${have:-inconnue} », attendu $VERSION — remplacement"
+  echo "→ kopia présent mais d'empreinte inattendue — remplacement"
+  echo "   attendue : $BINARY_SHA256"
+  echo "   obtenue  : $have"
 fi
 
 work=$(mktemp -d)
@@ -69,6 +95,21 @@ fi
 mkdir -p "$DEST"
 cp "$binary" "$DEST/kopia"
 chmod +x "$DEST/kopia"
+
+# L'empreinte du binaire extrait, avant tout lancement. Sans ce contrôle, la
+# constante `BINARY_SHA256` ne servirait qu'au raccourci du haut, et une montée
+# de version qui oublierait de la mettre à jour laisserait passer en silence un
+# binaire que le raccourci refuserait ensuite à chaque construction.
+posee=$(shasum -a 256 "$DEST/kopia" | cut -d' ' -f1)
+if [[ "$posee" != "$BINARY_SHA256" ]]; then
+  echo "✗ le binaire extrait n'a pas l'empreinte épinglée."
+  echo "  attendue : $BINARY_SHA256"
+  echo "  obtenue  : $posee"
+  echo "  L'archive est authentique mais son contenu a changé : mettez à jour"
+  echo "  BINARY_SHA256 en connaissance de cause, ou arrêtez-vous ici."
+  rm -f "$DEST/kopia"
+  exit 1
+fi
 
 # Vérifier que le binaire posé **s'exécute** et annonce la version attendue.
 # Une archive valide contenant un binaire pour une autre architecture passerait
