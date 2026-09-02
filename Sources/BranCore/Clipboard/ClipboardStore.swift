@@ -46,15 +46,27 @@ public struct ClipboardBlobPayload: Sendable, Equatable {
     }
 }
 
-/// Ce nom-là ne désigne pas un fichier de la bibliothèque, et on ne l'écrira pas.
+/// Ce contenu-là ne sera pas écrit, et voici laquelle des deux raisons.
 ///
-/// Levé par les deux seules écritures qui composent un nom de contenu — poser
+/// Levée par les deux seules écritures qui composent un nom de contenu — poser
 /// les blobs d'une nouvelle entrée, recopier ceux d'une entrée épinglée. Les
 /// deux appelants savent déjà quoi en faire : ils rendent l'entrée sans ses
 /// contenus, ou refusent l'épinglage, en écrivant le message dans le bandeau.
-struct BlobNameRefused: LocalizedError {
-    let name: String
-    var errorDescription: String? { "nom de contenu refusé (\(name))" }
+enum BlobRefused: LocalizedError {
+
+    /// Le nom ne désigne pas un enfant du dossier des contenus lourds — voir
+    /// `ClipboardStore.containedBlobName`.
+    case name(String)
+
+    /// Le fichier n'a pas pu être lu, ou pèse plus que ce que le magasin écrit.
+    case unreadable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .name(let name): "nom de contenu refusé (\(name))"
+        case .unreadable(let name): "contenu illisible ou trop gros (\(name))"
+        }
+    }
 }
 
 // MARK: - Le magasin
@@ -1335,6 +1347,35 @@ public final class ClipboardStore {
         return DayRead(entries: sorted, faults: truth.faults, rebuilt: worthRewriting)
     }
 
+    /// Les octets d'un fichier, **si sa taille a été demandée d'abord**.
+    ///
+    /// `Data(contentsOf:)` matérialise ce qu'on lui donne, et un `JSONDecoder`
+    /// ne peut refuser qu'après : lire puis refuser, c'est avoir déjà payé. Un
+    /// `<uuid>.json` de 2 Gio déposé dans un dossier-jour faisait donc réclamer
+    /// 2 Gio à l'ouverture du panneau — et la bibliothèque est justement un
+    /// dossier ordinaire, qu'on invite à ouvrir, à copier d'un Mac à l'autre et
+    /// à restaurer d'une sauvegarde.
+    ///
+    /// La taille est lue par `resourceValues`, qui est un `stat` : elle ne
+    /// touche pas au contenu. Un chemin qui n'est pas un fichier régulier est
+    /// refusé au passage — un dossier nommé `index.jsonl` se lit autrement, et
+    /// pas comme des octets.
+    ///
+    /// `nil` veut dire « non lisible », ce que les deux appelants savent déjà
+    /// traiter : le sidecar est compté comme une panne, l'index — qui est
+    /// dérivé — est reconstruit depuis les sidecars.
+    nonisolated static func readable(_ url: URL, upTo ceiling: Int) -> Data? {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+        guard values?.isRegularFile == true, let size = values?.fileSize else { return nil }
+        guard size <= ceiling else {
+            clipboardLog.error(
+                "Fichier trop gros pour être lu : \(url.lastPathComponent, privacy: .public) (\(size, privacy: .public) octets)"
+            )
+            return nil
+        }
+        return try? Data(contentsOf: url)
+    }
+
     /// Le contenu d'un dossier, en distinguant « vide » de « illisible ».
     ///
     /// **La distinction que `try? … ?? []` efface, et ce qu'elle coûtait.** Un
@@ -1379,7 +1420,7 @@ public final class ClipboardStore {
     /// plutôt qu'un doublon.
     nonisolated static func readIndex(in dayFolder: URL) -> (entries: [ClipboardEntry], faults: Int) {
         let url = dayFolder.appending(path: indexFileName)
-        guard let data = try? Data(contentsOf: url),
+        guard let data = readable(url, upTo: ClipboardEntry.maximumIndexBytes),
               let text = String(data: data, encoding: .utf8)
         else { return ([], 0) }
 
@@ -1432,7 +1473,7 @@ public final class ClipboardStore {
                 continue
             }
             let url = dayFolder.appending(path: name)
-            guard let data = try? Data(contentsOf: url),
+            guard let data = readable(url, upTo: ClipboardEntry.maximumSidecarBytes),
                   let entry = try? decoder.decode(ClipboardEntry.self, from: data)
             else {
                 faults += 1
@@ -1470,7 +1511,7 @@ public final class ClipboardStore {
         var refs: [ClipboardBlobRef] = []
         for payload in payloads {
             let ref = payload.ref
-            guard let name = containedBlobName(ref) else { throw BlobNameRefused(name: ref.fileName) }
+            guard let name = containedBlobName(ref) else { throw BlobRefused.name(ref.fileName) }
             let url = blobs.appending(path: name)
             if manager.fileExists(atPath: url.path(percentEncoded: false)) == false {
                 try payload.data.write(to: url, options: .atomic)
@@ -1514,11 +1555,17 @@ public final class ClipboardStore {
             // lui, `source.appending(path:)` composait un nom venu du JSON et
             // recopiait dans la bibliothèque un fichier pris n'importe où sur le
             // disque. Épingler est un geste qui écrit ; il refuse en entier.
-            guard let name = containedBlobName(ref) else { throw BlobNameRefused(name: ref.fileName) }
+            guard let name = containedBlobName(ref) else { throw BlobRefused.name(ref.fileName) }
             let destination = pinnedBlobs.appending(path: name)
             guard manager.fileExists(atPath: destination.path(percentEncoded: false)) == false
             else { continue }
-            let data = try Data(contentsOf: source.appending(path: name))
+            // La taille est demandée avant les octets : le magasin n'écrit
+            // jamais plus de `maximumBlobBytes`, mais une bibliothèque restaurée
+            // ou synchronisée peut contenir n'importe quoi, et épingler ne doit
+            // pas être le geste qui charge 2 Gio en mémoire.
+            guard let data = readable(
+                source.appending(path: name), upTo: ClipboardEntry.maximumBlobBytes
+            ) else { throw BlobRefused.unreadable(name) }
             try data.write(to: destination, options: .atomic)
         }
     }

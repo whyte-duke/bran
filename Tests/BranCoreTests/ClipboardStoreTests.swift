@@ -1227,6 +1227,38 @@ struct ClipboardStoreTests {
         #expect(names(in: store.pinnedBlobsFolder).isEmpty)
     }
 
+    // MARK: - Un fichier trop gros
+
+    /// **Lire puis refuser, c'est avoir déjà payé.** `Data(contentsOf:)`
+    /// matérialise le fichier entier et `JSONDecoder` ne peut dire non
+    /// qu'ensuite : un `<uuid>.json` de 2 Gio déposé dans un dossier-jour
+    /// faisait réclamer 2 Gio à l'ouverture du panneau.
+    ///
+    /// Le sidecar de ce test est **valide** et se décoderait sans le plafond —
+    /// c'est ce qui prouve que c'est bien la taille qui le refuse, et non un
+    /// JSON abîmé.
+    @Test("Un sidecar plus gros que le plafond n'est pas même lu")
+    func sidecarTropGrosNestPasLu() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        await store.save(text("celle qui reste"))
+
+        let enorme = ClipboardEntry(
+            copiedAt: Self.noon,
+            kind: .text,
+            preview: "a",
+            plainText: String(repeating: "a", count: ClipboardEntry.maximumSidecarBytes + 1)
+        )
+        try await ClipboardStore.writeSidecar(enorme, in: dossierDuJour(root, Self.noon))
+
+        let relu = makeStore(at: root)
+        #expect(await relu.load() == 1)
+        #expect(relu.recent.contains { $0.id == enorme.id } == false)
+
+        // Et il est toujours là : on refuse de le lire, jamais de le garder.
+        #expect(names(in: dossierDuJour(root, Self.noon)).contains("\(enorme.id.uuidString).json"))
+    }
+
     // MARK: - Ce que l'écran promet doit survivre au redémarrage
 
     /// **Le disque a dit non, et la ligne était là quand même.** L'entrée était
