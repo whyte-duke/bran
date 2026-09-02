@@ -72,6 +72,24 @@ struct WeekPane: View {
     /// il redessinerait toute la page, blocs et pistes compris.
     @State private var readAt = Date.now
 
+    /// Combien de jalons la page compose d'un coup.
+    ///
+    /// **Le `LazyVStack` extérieur ne protégeait rien.** Les deux panneaux du
+    /// bas — « Sur quoi » et « Ce qui en est sorti » — sont chacun **un seul**
+    /// de ses enfants, et un enfant paresseux se construit en entier dès qu'il
+    /// entre dans la zone visible. À l'intérieur, deux `ForEach` non bornés :
+    /// sur une période chargée — 10 000 dictées, captures et réunions, ce que
+    /// trente jours d'usage réel produisent —, arriver au bas de la page
+    /// composait 10 000 `MilestoneRow` d'un coup, chacune avec son survol et son
+    /// libellé d'accessibilité.
+    ///
+    /// Le remède est une borne explicite plutôt qu'une pile paresseuse
+    /// imbriquée : `Panel` peint un fond et un contour dimensionnés sur son
+    /// contenu, et une pile paresseuse à l'intérieur lui donnerait une hauteur
+    /// qui change pendant qu'on défile. Un bouton dit combien il en reste — ce
+    /// qu'un défilement infini, lui, ne dit jamais.
+    @State private var shownRows = WeekMetric.rowPage
+
     private var loader: WeekLoader { model.week }
     private var summary: WeekSummary { loader.summary }
 
@@ -106,6 +124,11 @@ struct WeekPane: View {
         // s'écrit toutes les quatre secondes, et relire sept fichiers à chaque
         // battement pour déplacer une barre d'un pixel serait absurde.
         .task(id: reloadKey) { await load() }
+        // Changer de portée ou de recherche recompose une autre liste : garder
+        // la borne relevée d'un « afficher la suite » précédent ferait rouvrir
+        // la page sur mille lignes.
+        .onChange(of: reloadKey) { _, _ in shownRows = WeekMetric.rowPage }
+        .onChange(of: query) { _, _ in shownRows = WeekMetric.rowPage }
         // Le battement des durées relatives. Il vit ici plutôt que dans
         // `DayPane` pour une raison qui compte : la tâche est annulée quand la
         // section disparaît, donc rien ne bat pendant qu'on lit ses dictées.
@@ -197,6 +220,8 @@ struct WeekPane: View {
         if loader.phase == .loading, summary.isEmpty {
             skeleton
         } else if summary.isEmpty {
+            // Voir `DictationPane.content` : hors du `ScrollView`, donc plancher
+            // vertical de la fenêtre.
             ContentUnavailableView {
                 Label("Rien à raconter pour l'instant", systemImage: "calendar.day.timeline.left")
             } description: {
@@ -207,8 +232,10 @@ struct WeekPane: View {
                         .buttonStyle(.borderedProminent)
                 }
             }
+            .branWidthFloor()
         } else if isFiltered, visibleProjects.isEmpty, visibleTimeline.isEmpty {
             ContentUnavailableView.search(text: query)
+                .branWidthFloor()
         } else {
             ScrollView {
                 // **Deux écrans sous un seul sélecteur de portée.** « Aujourd'hui »
@@ -437,7 +464,7 @@ struct WeekPane: View {
                 help: "Le dossier de travail, toutes branches confondues. À défaut de dossier, l'application. La barre compare au plus long de la période, pas au total."
             ) {
                 VStack(alignment: .leading, spacing: Space.tight) {
-                    ForEach(visibleProjects) { project in
+                    ForEach(boundedProjects) { project in
                         ShareRow(
                             name: project.name,
                             segments: [
@@ -451,9 +478,16 @@ struct WeekPane: View {
                             note: project.laneCount > 1 ? "\(project.laneCount) voies" : nil
                         )
                     }
+
+                    moreButton(shown: boundedProjects.count, total: visibleProjects.count, noun: "projets")
                 }
             }
         }
+    }
+
+    /// Les projets réellement composés. Voir `shownRows`.
+    private var boundedProjects: [WeekSummary.ProjectRow] {
+        Array(visibleProjects.prefix(shownRows))
     }
 
     private var longestProject: TimeInterval {
@@ -475,10 +509,11 @@ struct WeekPane: View {
         if visibleTimeline.isEmpty == false {
             Panel(
                 title: "Ce qui en est sorti",
+                trailing: "\(milestoneCount)",
                 help: "Réunions, dictées et captures, sur la même horloge que le reste."
             ) {
                 VStack(alignment: .leading, spacing: Space.stack) {
-                    ForEach(visibleTimeline) { day in
+                    ForEach(boundedTimeline) { day in
                         VStack(alignment: .leading, spacing: Space.small) {
                             Text(Self.dayTitle(day.date))
                                 .font(Type.groupHead)
@@ -489,8 +524,51 @@ struct WeekPane: View {
                             }
                         }
                     }
+
+                    moreButton(shown: shownMilestones, total: milestoneCount, noun: "jalons")
                 }
             }
+        }
+    }
+
+    /// Les jalons réellement composés, pris dans l'ordre des jours. Voir
+    /// `shownRows`.
+    private var boundedTimeline: [WeekSummary.MilestoneDay] {
+        var remaining = shownRows
+        var days: [WeekSummary.MilestoneDay] = []
+        for day in visibleTimeline {
+            guard remaining > 0 else { break }
+            let kept = Array(day.markers.prefix(remaining))
+            remaining -= kept.count
+            days.append(WeekSummary.MilestoneDay(key: day.key, date: day.date, markers: kept))
+        }
+        return days
+    }
+
+    private var milestoneCount: Int {
+        visibleTimeline.reduce(0) { $0 + $1.markers.count }
+    }
+
+    private var shownMilestones: Int {
+        boundedTimeline.reduce(0) { $0 + $1.markers.count }
+    }
+
+    /// « Afficher 200 jalons de plus », et le reste dit en toutes lettres.
+    ///
+    /// Le nombre restant est écrit parce que c'est la seule chose qu'un
+    /// défilement infini ne dit jamais : sans lui, on ne sait pas si l'on est à
+    /// dix lignes de la fin ou à neuf mille.
+    @ViewBuilder
+    private func moreButton(shown: Int, total: Int, noun: String) -> some View {
+        if total > shown {
+            let next = min(WeekMetric.rowPage, total - shown)
+            Button("Afficher \(next) \(noun) de plus — il en reste \(total - shown)") {
+                shownRows += WeekMetric.rowPage
+            }
+            .buttonStyle(.plain)
+            .font(Type.meta)
+            .foregroundStyle(.tint)
+            .padding(.top, Space.tight)
         }
     }
 
@@ -550,6 +628,18 @@ private enum WeekMetric {
     /// La largeur de la colonne d'icône d'un jalon, pour que les titres
     /// s'alignent d'une ligne à l'autre.
     static let markerGutter: CGFloat = 18
+
+    /// Combien de lignes les deux listes du bas composent d'un coup — et
+    /// combien un clic sur « afficher la suite » en ajoute.
+    ///
+    /// **200 est un ordre de grandeur, pas un réglage fin.** Une `MilestoneRow`
+    /// est une ligne de texte avec son survol et son libellé d'accessibilité ;
+    /// deux cents tiennent largement dans un budget d'ouverture, dix mille non.
+    /// Le chiffre est aussi choisi pour dépasser franchement ce qu'une période
+    /// ordinaire produit — sept jours de travail réel donnent quelques dizaines
+    /// de jalons — pour que le bouton ne se montre que quand il y a vraiment
+    /// quelque chose à borner.
+    static let rowPage = 200
 }
 
 // MARK: - Les pièces

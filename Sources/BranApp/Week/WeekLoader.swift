@@ -55,12 +55,34 @@ final class WeekLoader {
 
     // MARK: - Chargement
 
+    /// Le numéro du chargement en cours.
+    ///
+    /// **Un chargement abandonné pouvait publier sous la nouvelle portée.** La
+    /// vue annule bien sa `.task(id:)` quand la portée change, mais le travail
+    /// réel est dans un `Task.detached` : il ne porte pas l'annulation de son
+    /// appelant, et rien ne l'interrogeait au retour. La liste de jours `keys`
+    /// est capturée **avant** l'attente, tandis que `span` était relu
+    /// **après** — donc un chargement « Aujourd'hui » qui revenait pendant que
+    /// l'utilisateur venait de choisir « 30 jours » construisait un résumé
+    /// étiqueté sur trente jours à partir des seuls fichiers du jour, et il
+    /// restait à l'écran jusqu'à ce que le second chargement finisse.
+    ///
+    /// Un compteur, et pas seulement `Task.isCancelled` : le bouton
+    /// « Actualiser » lance des tâches que personne ne conserve, donc que
+    /// personne n'annule. Deux clics rapprochés se départagent au numéro.
+    private var generation = 0
+
     func load(markers: [WeekMarker], now: Date = .now, calendar: Calendar = .current) async {
         // On n'annonce « en cours » que si l'écran est encore vide. Repasser en
         // squelette à chaque rafraîchissement ferait clignoter une vue qui a
         // déjà tout ce qu'il faut à montrer.
         if summary.isEmpty { phase = .loading }
 
+        generation &+= 1
+        let mine = generation
+        // La portée du moment, figée avec les jours qu'elle a produits : c'est
+        // la paire qui doit rester cohérente jusqu'à la publication.
+        let requestedSpan = span
         let keys = dayKeys(now: now, calendar: calendar)
         let directory = folder()
 
@@ -68,14 +90,19 @@ final class WeekLoader {
             Self.harvest(from: directory, days: keys)
         }.value
 
+        // Trois raisons de se taire, et la dernière couvre le cas où la portée a
+        // changé sans qu'un nouveau chargement ait encore démarré.
+        guard Task.isCancelled == false else { return }
+        guard mine == generation, requestedSpan == span else { return }
+
         summary = WeekSummary.make(
             events: harvest.events,
             markers: markers,
             now: now,
-            span: span,
+            span: requestedSpan,
             calendar: calendar
         )
-        today = span == .day
+        today = requestedSpan == .day
             ? DaySummary.make(
                 events: harvest.events,
                 presence: harvest.presence,
