@@ -184,9 +184,38 @@ public struct KopiaProgressReader: Sendable {
         case "KB": multiplier = 1_000
         case "MB": multiplier = 1_000_000
         case "GB": multiplier = 1_000_000_000
+        // **`TB` manquait, et son absence ne se voyait pas — elle tuait la
+        // sauvegarde.** Kopia formate ses tailles avec l'unité qui convient :
+        // au-delà de 1 To hachés, la ligne de progression porte `TB`, ce
+        // `switch` rendait `nil`, `parse(line:)` rendait `nil`, et
+        // `accept()` un tableau vide. Or `KopiaDriver` ne rafraîchit son
+        // horloge de blocage que sur une progression **décodée** : dix
+        // minutes plus tard, le chien de garde concluait « plus rien
+        // n'avance » et tuait un run parfaitement sain. À chaque tentative.
+        //
+        // Autrement dit : un Mac de plus d'un téraoctet — c'est-à-dire
+        // exactement celui qui a le plus à perdre — n'était jamais
+        // sauvegardé, et la chaîne réseau restait verte pendant ce temps.
+        // C'est la panne fondatrice de bran, reconstruite un cran plus loin.
+        //
+        // `PB` est là par la même logique : le jour où il apparaît, il ne
+        // doit pas coûter une seconde enquête.
+        case "TB": multiplier = 1_000_000_000_000
+        case "PB": multiplier = 1_000_000_000_000_000
         default: return nil
         }
-        return Int64((value * multiplier).rounded())
+        // `Int64(_:)` d'un `Double` non fini ou hors plage est une **erreur
+        // fatale**, pas un `nil` : `Double("1e400")` rend `+∞` sans se
+        // plaindre, et la conversion faisait tomber le processus. Kopia
+        // n'écrit pas cette notation, mais un parseur qui plante sur une
+        // entrée qu'il ne reconnaît pas n'a pas à exister quand le refuser
+        // coûte trois lignes.
+        let octets = (value * multiplier).rounded()
+        guard octets.isFinite,
+              octets >= Double(Int64.min),
+              octets <= Double(Int64.max)
+        else { return nil }
+        return Int64(octets)
     }
 
     /// « 0s left », « 13m30s left », « 2h5m left » → des secondes. Les trois
