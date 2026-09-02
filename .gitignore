@@ -19,3 +19,8 @@ dist/
 # dont tout le reste est du texte.
 Vendor/
 .gstack/
+
+# L'identité de signature exportée par Scripts/make-signing-identity.sh.
+# C'est la clé privée qui signe bran : elle vaut exactement ce que valent les
+# autorisations d'écran et d'accessibilité qu'elle préserve.
+*.p12
