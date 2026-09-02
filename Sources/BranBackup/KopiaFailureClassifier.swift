@@ -179,11 +179,14 @@ public enum KopiaFailureClassifier {
         return result
     }
 
-    // Les deux motifs sont compilés une fois pour toutes plutôt qu'à chaque
-    // appel de `maskSecrets`. `NSRegularExpression` est déclarée `Sendable`
-    // par l'overlay Foundation actuel, donc un `static let` suffit :
-    // `nonisolated(unsafe)` était ici, et le compilateur le signale
-    // maintenant comme une affirmation inutile sur le type.
+    // `NSRegularExpression` est `Sendable` depuis que l'overlay Foundation le
+    // déclare : elle est immuable une fois compilée et son appariement ne mute
+    // aucun état interne partagé. Le `nonisolated(unsafe)` qui était posé sur
+    // ces deux constantes n'est donc plus une précaution mais un mensonge sur
+    // le type, et le compilateur le signale en concurrence stricte complète.
+    // Le retirer ne change rien à l'exécution : elles restent construites une
+    // fois, au lieu de recompiler les motifs à chaque appel de `maskSecrets`.
+
     /// `Authorization` d'abord et à part : sa valeur va jusqu'à la fin de
     /// ligne. Groupe 3, comme dans `secretPattern`, pour que la boucle de
     /// remplacement soit la même.
@@ -198,6 +201,10 @@ public enum KopiaFailureClassifier {
         return try! NSRegularExpression(pattern: pattern)
     }()
 
+    /// `Authorization` n'est plus dans cette liste : sa valeur contient un
+    /// espace dans les deux formes que kopia journalise (`Bearer <jeton>`,
+    /// signature AWS SigV4), et `[^\s"]{3,}` s'arrêtait donc au premier mot.
+    /// Voir `authorizationPattern` juste au-dessus.
     private static let secretPattern: NSRegularExpression = {
         let names = "secretAccessKey|password|KOPIA_PASSWORD"
         // Groupe 3 : la valeur, un seul jeton sans espace ni guillemet — ce

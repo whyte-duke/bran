@@ -146,7 +146,29 @@ struct BackupSettingsSection: View {
             SecretRenewalRow(
                 title: "Mot de passe du dépôt",
                 isStored: backup.hasStoredSecret(.repositoryPassword),
-                value: $newRepositoryPassword
+                value: $newRepositoryPassword,
+                // **Le seul secret de cet écran dont le remplacement détruit
+                // quelque chose.** La clé S3 se re-génère côté MinIO : la
+                // remplacer par erreur coûte une reconnexion. Le mot de passe
+                // du dépôt, lui, est la clé de chiffrement de bout en bout, et
+                // il n'existe qu'ici. L'écraser ne casse pas le prochain
+                // snapshot : il rend illisibles **tous les précédents**, et
+                // personne au monde ne peut revenir en arrière.
+                //
+                // Le texte d'avertissement était déjà là, juste en dessous, et
+                // il est excellent. Mais un paragraphe n'est pas un garde-fou :
+                // il se lit après coup. Ce qui manquait, c'est le geste
+                // supplémentaire qui laisse le temps de comprendre.
+                destruction: """
+                    Remplacer le mot de passe du dépôt rendra illisible tout ce \
+                    qui a déjà été sauvegardé depuis ce Mac — pas seulement les \
+                    prochaines sauvegardes, toutes les précédentes.
+
+                    Personne ne peut annuler cette opération : ni vous, ni \
+                    Castral, ni Kopia. Ne continuez que si vous êtes en train de \
+                    provisionner un dépôt neuf, ou si vous avez noté le mot de \
+                    passe actuel ailleurs.
+                    """
             ) {
                 let saved = backup.renewSecret(.repositoryPassword, to: newRepositoryPassword)
                 if saved { newRepositoryPassword = "" }
@@ -338,10 +360,19 @@ private struct SecretRenewalRow: View {
     let title: String
     let isStored: Bool
     @Binding var value: String
+    /// Non `nil` quand écraser ce secret détruit quelque chose d'irrécupérable.
+    /// Le texte est celui de la fenêtre de confirmation — il doit nommer la
+    /// conséquence, pas demander « êtes-vous sûr ? », qui n'informe personne.
+    ///
+    /// La confirmation n'est demandée que s'il y a **déjà** un secret
+    /// enregistré : le premier enregistrement n'écrase rien, et poser une
+    /// question au moment du provisionnement n'apprendrait rien à personne.
+    var destruction: String?
     let save: () -> Bool
 
     @State private var isEditing = false
     @State private var problem: String?
+    @State private var isConfirmingDestruction = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.tight) {
@@ -350,12 +381,11 @@ private struct SecretRenewalRow: View {
                     SecureField(title, text: $value, prompt: Text("Nouvelle valeur"))
                         .textContentType(.password)
                     Button("Enregistrer") {
-                        guard save() else {
-                            problem = "Le Trousseau a refusé l'écriture. Réessayez, ou vérifiez qu'il n'est pas verrouillé."
-                            return
+                        if destruction != nil, isStored {
+                            isConfirmingDestruction = true
+                        } else {
+                            commit()
                         }
-                        problem = nil
-                        isEditing = false
                     }
                     .disabled(value.isEmpty)
                     Button("Annuler") {
@@ -385,6 +415,29 @@ private struct SecretRenewalRow: View {
             }
         }
         .font(Type.cardBody)
+        .confirmationDialog(
+            "Remplacer « \(title) » ?",
+            isPresented: $isConfirmingDestruction,
+            titleVisibility: .visible
+        ) {
+            // Le verbe du bouton dit ce qui se passe, pas « OK ». Quelqu'un
+            // qui clique vite doit lire la conséquence sur le bouton lui-même.
+            Button("Remplacer et perdre les sauvegardes existantes", role: .destructive) {
+                commit()
+            }
+            Button("Annuler", role: .cancel) {}
+        } message: {
+            Text(destruction ?? "")
+        }
+    }
+
+    private func commit() {
+        guard save() else {
+            problem = "Le Trousseau a refusé l'écriture. Réessayez, ou vérifiez qu'il n'est pas verrouillé."
+            return
+        }
+        problem = nil
+        isEditing = false
     }
 }
 
