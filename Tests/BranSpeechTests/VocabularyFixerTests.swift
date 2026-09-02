@@ -110,4 +110,70 @@ struct VocabularyFixerTests {
     func emptyNeedleTerminates() {
         #expect(VocabularyFixer.replace("", with: "x", in: "abc") == "abc")
     }
+
+    // MARK: - Ce qu'une règle peut faire à une autre
+
+    /// **La promesse « règles longues d'abord » tombait sur son propre
+    /// exemple.** La documentation du type l'écrit ainsi : « "google meet" doit
+    /// gagner contre "meet" ». La règle longue passait bien la première, mais
+    /// la courte relisait ensuite le texte **déjà corrigé** et remplaçait le
+    /// « Meet » que la longue venait d'écrire.
+    ///
+    /// Le test existant ne le voyait pas : il corrigeait « meet » en « Meet »,
+    /// donc la seconde substitution rendait le même texte. Il suffit que la
+    /// règle courte écrive autre chose pour que la panne se voie.
+    @Test("Une règle courte ne remange pas ce qu'une règle longue vient d'écrire")
+    func laRegleCourteNeMangePasLaLongue() {
+        let subject = fixer(("meet", "réunion"), ("google meet", "Google Meet"))
+        #expect(subject.apply(to: "sur google meet") == "sur Google Meet")
+        // Et « meet » seul est toujours corrigé, sinon le correctif aurait
+        // simplement désactivé la règle courte.
+        #expect(subject.apply(to: "sur meet") == "sur réunion")
+    }
+
+    /// Le même défaut, dans l'autre sens : un remplacement qui fabrique le motif
+    /// d'une **autre** règle ne doit pas le lui livrer. Le texte corrigé est un
+    /// résultat, pas une nouvelle entrée.
+    @Test("Un remplacement qui fabrique le motif d'une autre règle n'est pas relu")
+    func leRemplacementNestPasRelu() {
+        let subject = fixer(("sdr", "commercial"), ("commercial", "vendeur"))
+        #expect(subject.apply(to: "le sdr appelle") == "le commercial appelle")
+        #expect(subject.apply(to: "le commercial appelle") == "le vendeur appelle")
+    }
+
+    /// Une règle qui se remplace par elle-même est l'identité, pas une boucle.
+    @Test("Une règle qui écrit ce qu'elle entend ne boucle pas")
+    func regleIdentite() {
+        #expect(fixer(("crm", "crm")).apply(to: "le crm") == "le crm")
+        #expect(fixer(("crm", "crm crm")).apply(to: "le crm") == "le crm crm")
+    }
+
+    /// Aucune `Regex` n'est en jeu — c'est écrit dans la documentation du type —
+    /// et ce test le prouve plutôt que de le répéter : les métacaractères sont
+    /// des caractères comme les autres, des deux côtés de la règle.
+    @Test("Les métacaractères sont du texte, pas des motifs")
+    func metacaracteresLitteraux() {
+        #expect(fixer((".*", "tout")).apply(to: "a .* b") == "a tout b")
+        #expect(fixer((".*", "tout")).apply(to: "abc") == "abc")
+        #expect(fixer(("c++", "C++")).apply(to: "du c++ partout") == "du C++ partout")
+        #expect(fixer(("java", "$1\\n")).apply(to: "du java") == "du $1\\n")
+    }
+
+    /// Deux règles de même longueur ne doivent pas dépendre de l'ordre dans
+    /// lequel un tri instable les a laissées : la première déclarée gagne.
+    @Test("À longueur égale, la règle déclarée en premier gagne")
+    func longueurEgaleOrdreStable() {
+        let subject = fixer(("crm", "CRM"), ("crm", "Castral"))
+        #expect(subject.apply(to: "le crm") == "le CRM")
+    }
+
+    /// Le remplacement conserve ce qui l'entoure, y compris quand la
+    /// correspondance est plus longue que l'aiguille — « résumé » fait six
+    /// caractères comme « resume », mais neuf en NFD.
+    @Test("Un texte accentué en NFD se corrige comme sa forme composée")
+    func nfdSeCorrigeAussi() {
+        let subject = fixer(("resume", "compte-rendu"))
+        let nfd = "envoie le résumé demain".decomposedStringWithCanonicalMapping
+        #expect(subject.apply(to: nfd) == "envoie le compte-rendu demain")
+    }
 }
