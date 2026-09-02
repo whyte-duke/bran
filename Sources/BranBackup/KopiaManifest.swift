@@ -370,8 +370,30 @@ public enum KopiaManifest {
             throw KopiaDecodingFailure.noRecognizableJSON(context: context)
         }
 
+        // **Le bruit d'après, pas seulement le bruit d'avant.** Ce repli
+        // reconstruisait `lines[startIndex...]` jusqu'à la fin de la sortie :
+        // il savait retirer ce qui précède le JSON, jamais ce qui le suit.
+        // Sur la sortie
+        //
+        //     []
+        //     Finished maintenance.
+        //
+        // — code de sortie 0, dépôt sain, aucun snapshot — le payload valait
+        // « []\nFinished maintenance.\n », `JSONDecoder` échouait, et un dépôt
+        // vide parfaitement valide ressortait classé « JSON tronqué », donc
+        // `.unparseable`, donc un rouge sur un écran où il n'y a rien de
+        // cassé. C'est le cas vécu le 02/09/2026 à un message près.
+        //
+        // On isole donc la première valeur JSON **complète** avant de décoder.
         let payloadText = lines[startIndex...].joined(separator: "\n")
-        guard let payload = payloadText.data(using: .utf8) else {
+        let trimmed = payloadText.drop { $0.isWhitespace }
+        guard let isolated = firstJSONValue(in: trimmed, opening: leadingDelimiter) else {
+            throw KopiaDecodingFailure.truncatedJSON(
+                context: context,
+                underlying: "la valeur JSON commencée par « \(leadingDelimiter) » n'est jamais refermée"
+            )
+        }
+        guard let payload = isolated.data(using: .utf8) else {
             throw KopiaDecodingFailure.notUTF8(context: context)
         }
         do {
@@ -379,6 +401,52 @@ public enum KopiaManifest {
         } catch {
             throw KopiaDecodingFailure.truncatedJSON(context: context, underlying: String(describing: error))
         }
+    }
+
+    /// La première valeur JSON complète de `text`, qui doit commencer par
+    /// `opening` (`{` ou `[`) — ou `nil` si elle n'est jamais refermée.
+    ///
+    /// Compte les délimiteurs de même famille en profondeur, et **ne compte
+    /// pas ceux qui se trouvent dans une chaîne**. C'est le seul piège réel de
+    /// cette fonction : un nom de fichier de snapshot peut contenir `]` ou
+    /// `}`, y compris échappé (`"dossier \"[bis]\""`), et s'arrêter dessus
+    /// couperait le JSON en plein milieu — c'est-à-dire reproduirait le défaut
+    /// qu'on ferme, dans l'autre sens.
+    ///
+    /// Le délimiteur de l'autre famille est ignoré volontairement : `[{"a":1}]`
+    /// se referme sur le `]` de profondeur zéro, quel que soit le nombre
+    /// d'accolades traversées.
+    private static func firstJSONValue(in text: Substring, opening: Character) -> Substring? {
+        let closing: Character = opening == "{" ? "}" : "]"
+        var depth = 0
+        var insideString = false
+        var escaped = false
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            let character = text[index]
+            if insideString {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    insideString = false
+                }
+            } else {
+                switch character {
+                case "\"": insideString = true
+                case opening: depth += 1
+                case closing:
+                    depth -= 1
+                    if depth == 0 { return text[text.startIndex...index] }
+                    if depth < 0 { return nil }
+                default: break
+                }
+            }
+            index = text.index(after: index)
+        }
+        return nil
     }
 
     // MARK: - Les dates

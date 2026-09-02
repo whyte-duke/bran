@@ -521,3 +521,164 @@ struct RestoreDestinationValidationTests {
         #expect(problems.isEmpty)
     }
 }
+
+// MARK: - Les entrées hostiles
+
+/// **Ce que ce fichier protège** : que le clic sur « restaurer » ne tue pas
+/// l'application avant même d'avoir lancé kopia, et que le chien de garde de
+/// la restauration ne tue pas une restauration qui avance.
+///
+/// Trois défauts de la même famille, tous déclenchés par une sortie kopia
+/// bien formée :
+///
+/// - `Int64(_:)` d'un `Double` non fini est une **erreur fatale**, pas un
+///   `nil`. `Processed 1 (nan MB) of 2 (1 MB).` arrêtait le processus.
+/// - `Int64((Double(Int64.max) * 1.05).rounded(.up))` déborde : mesuré,
+///   9,684 5 × 10¹⁸ contre un `Int64.max` de 9,223 4 × 10¹⁸. Un manifeste
+///   annonçant `"size":9223372036854775807` — valeur légale pour ce champ —
+///   arrêtait le processus au clic sur « restaurer ».
+/// - `parseSize` ne connaissait ni `TB` ni `PB`. C'est exactement le défaut
+///   qui tuait la **sauvegarde** des Macs de plus d'un téraoctet, ici du côté
+///   de la restauration : ligne illisible → aucun événement → l'horloge du
+///   chien de garde ne repart pas → restauration saine interrompue, le jour
+///   précis où on en a besoin.
+@Suite("La restauration face aux nombres qui n'en sont pas")
+struct RestoreCatalogHostileNumbersTests {
+
+    // MARK: - La progression
+
+    @Test("Une taille « nan » rend la ligne illisible, au lieu d'arrêter l'application")
+    func nanSizeIsRefusedRatherThanFatal() {
+        #expect(RestoreProgressReader.parse(line: "Processed 1 (nan MB) of 2 (1 MB).") == nil)
+        #expect(RestoreProgressReader.parse(line: "Processed 1 (1 MB) of 2 (nan MB).") == nil)
+    }
+
+    @Test("Une taille infinie ou hors Int64 est refusée, jamais convertie")
+    func nonFiniteOrOverflowingSizeIsRefused() {
+        // `Double("1e400")` rend `+∞` sans se plaindre — mesuré.
+        #expect(RestoreProgressReader.parse(line: "Processed 1 (1e400 GB) of 2 (1 MB).") == nil)
+        #expect(RestoreProgressReader.parse(line: "Processed 1 (inf MB) of 2 (1 MB).") == nil)
+        #expect(RestoreProgressReader.parse(line: "Processed 1 (99999999999 PB) of 2 (1 MB).") == nil)
+    }
+
+    @Test("Un débit « nan » rend la ligne illisible, au lieu d'arrêter l'application")
+    func nanRateIsRefusedRatherThanFatal() {
+        #expect(RestoreProgressReader.parse(
+            line: "Processed 11 (0.9 MB) of 12 (2.6 MB) nan KB/s (35.4%) remaining 1s."
+        ) == nil)
+        #expect(RestoreProgressReader.parse(
+            line: "Processed 11 (0.9 MB) of 12 (2.6 MB) 1e400 KB/s (35.4%) remaining 1s."
+        ) == nil)
+    }
+
+    /// La conséquence, dite dans les termes du pilote : ce qui compte n'est
+    /// pas que la ligne se lise, c'est que `accept()` rende un événement —
+    /// c'est ce retour, et lui seul, qui repousse l'échéance du chien de garde
+    /// de `KopiaRestoreDriver`.
+    @Test("Une restauration en téraoctets nourrit le chien de garde, au lieu de l'affamer")
+    func terabyteProgressFeedsTheWatchdog() {
+        var reader = RestoreProgressReader()
+        let events = reader.accept("Processed 12 (1.5 TB) of 40 (2 TB).\n")
+        #expect(events.isEmpty == false)
+
+        let event = RestoreProgressReader.parse(line: "Processed 12 (1.5 TB) of 40 (2 TB).")
+        guard case .progress(let progress) = event else {
+            Issue.record("attendu un événement de progression")
+            return
+        }
+        #expect(progress.processedBytes == 1_500_000_000_000)
+        #expect(progress.totalBytes == 2_000_000_000_000)
+    }
+
+    @Test("Le pétaoctet aussi, pour que le jour venu ne coûte pas une seconde enquête")
+    func petabyteProgressIsUnderstood() {
+        let event = RestoreProgressReader.parse(line: "Processed 12 (1 PB) of 40 (2 PB).")
+        guard case .progress(let progress) = event else {
+            Issue.record("attendu un événement de progression")
+            return
+        }
+        #expect(progress.processedBytes == 1_000_000_000_000_000)
+    }
+
+    // MARK: - La garde disque
+
+    @Test("Une taille égale à Int64.max est refusée par manque de place, sans arrêter l'application")
+    func int64MaxRequirementIsRefusedRatherThanFatal() {
+        let facts = RestoreDestinationFacts(
+            exists: true, isDirectory: true, isWritable: true, isEmpty: true,
+            availableBytes: 1_000_000_000_000
+        )
+        let problems = RestoreCatalog.validateDestination(
+            facts, requiredBytes: .max, overwrite: .refuseIfNotEmpty
+        )
+        #expect(problems.contains { if case .insufficientSpace = $0 { true } else { false } })
+    }
+
+    @Test("La marge de 5 % reste exacte sur les tailles ordinaires")
+    func fivePercentMarginIsUnchangedForOrdinarySizes() {
+        // 1 000 000 × 1,05 = 1 050 000 : un octet de moins ne suffit pas.
+        let tooSmall = RestoreDestinationFacts(
+            exists: true, isDirectory: true, isWritable: true, isEmpty: true,
+            availableBytes: 1_049_999
+        )
+        #expect(RestoreCatalog.validateDestination(
+            tooSmall, requiredBytes: 1_000_000, overwrite: .refuseIfNotEmpty
+        ).contains { if case .insufficientSpace = $0 { true } else { false } })
+
+        let justEnough = RestoreDestinationFacts(
+            exists: true, isDirectory: true, isWritable: true, isEmpty: true,
+            availableBytes: 1_050_000
+        )
+        #expect(RestoreCatalog.validateDestination(
+            justEnough, requiredBytes: 1_000_000, overwrite: .refuseIfNotEmpty
+        ).isEmpty)
+
+        // L'arrondi au supérieur, que l'arithmétique entière doit reproduire
+        // à l'identique : 7 × 1,05 = 7,35, donc il faut 8 octets.
+        let sevenBytes = RestoreDestinationFacts(
+            exists: true, isDirectory: true, isWritable: true, isEmpty: true,
+            availableBytes: 7
+        )
+        #expect(RestoreCatalog.validateDestination(
+            sevenBytes, requiredBytes: 7, overwrite: .refuseIfNotEmpty
+        ).contains { if case .insufficientSpace = $0 { true } else { false } })
+    }
+
+    // MARK: - Les tailles négatives, refusées au décodage
+
+    @Test("Une taille négative dans le résumé d'un dossier est un refus nommé")
+    func negativeSummarySizeIsRefused() throws {
+        let json = #"""
+        {"stream":"kopia:directory","entries":[],\#
+        "summary":{"size":-1,"files":0,"dirs":0,"symlinks":0,"numFailed":0}}
+        """#
+        do {
+            _ = try RestoreCatalog.decodeDirectoryListing(Data(json.utf8))
+            Issue.record("aurait dû échouer : taille négative")
+        } catch let failure as KopiaDecodingFailure {
+            guard case .implausibleCounter(let path, _, _) = failure else {
+                Issue.record("mauvais cas : \(failure)")
+                return
+            }
+            #expect(path == "summary.size")
+        }
+    }
+
+    @Test("Un compteur de fichiers négatif est un refus nommé, pas un affichage absurde")
+    func negativeFileCountIsRefused() throws {
+        let json = #"""
+        {"stream":"kopia:directory","entries":[],\#
+        "summary":{"size":0,"files":-3,"dirs":0,"symlinks":0,"numFailed":0}}
+        """#
+        do {
+            _ = try RestoreCatalog.decodeDirectoryListing(Data(json.utf8))
+            Issue.record("aurait dû échouer : compteur négatif")
+        } catch let failure as KopiaDecodingFailure {
+            guard case .implausibleCounter(let path, _, _) = failure else {
+                Issue.record("mauvais cas : \(failure)")
+                return
+            }
+            #expect(path == "summary.files")
+        }
+    }
+}
