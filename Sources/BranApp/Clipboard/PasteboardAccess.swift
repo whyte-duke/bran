@@ -93,6 +93,7 @@ actor PasteboardAccess {
         let sources = pasteboard.pasteboardItems ?? []
 
         var items: [SavedItem] = []
+        var read = 0
         for source in sources {
             var representations: [SavedRepresentation] = []
             for type in source.types {
@@ -104,6 +105,28 @@ actor PasteboardAccess {
                 representations.append(
                     SavedRepresentation(type: type.rawValue, data: data)
                 )
+
+                // **Le budget est vérifié entre deux représentations, et il
+                // fait renoncer à l'instantané entier.**
+                //
+                // Cet instantané n'existe que pour être remis en place après le
+                // ⌘V de la dictée : le garder veut dire le garder **en
+                // mémoire**, pour toute la durée de la dictée. Or un élément du
+                // presse-papiers annonce jusqu'à 43 types distincts — mesuré
+                // sur un historique réel — et rien n'oblige aucun d'eux à être
+                // petit. Une image de plusieurs gigaoctets posée par une autre
+                // application les faisait tous matérialiser, l'un après
+                // l'autre, sans qu'aucune borne n'existe.
+                //
+                // Renoncer est le comportement déjà prévu pour « je n'ai rien
+                // de fiable à rapporter » (point 2) : `Paster.adopt` garde son
+                // instantané à `nil`, et la restitution est simplement sautée.
+                // On rend alors le presse-papiers à l'utilisateur tel que la
+                // dictée l'a laissé — ce qui est le contraire de ce qu'on
+                // voudrait, mais mille fois moins grave que d'être tué par
+                // macOS pour avoir voulu être poli.
+                read += data.count
+                if read > ClipboardEntry.maximumReadingBytes { return nil }
             }
             guard representations.isEmpty == false else { continue }
             items.append(SavedItem(representations: representations))
@@ -176,6 +199,8 @@ actor PasteboardAccess {
         let wanted = Set(plan.types)
 
         var items: [[String: Data]] = []
+        var read = 0
+        var exhausted = false
         for source in pasteboard.pasteboardItems ?? [] {
             var representations: [String: Data] = [:]
             for type in source.types where wanted.contains(type.rawValue) {
@@ -185,8 +210,30 @@ actor PasteboardAccess {
                 if Task.isCancelled { return nil }
                 guard let data = source.data(forType: type) else { continue }
                 representations[type.rawValue] = data
+
+                // **On garde ce qui vient d'être lu, y compris hors gabarit, et
+                // on s'arrête là.**
+                //
+                // `ClipboardStore` refuse déjà d'écrire une entrée dont un
+                // contenu dépasse `maximumBlobBytes` — mais il ne le découvrait
+                // qu'après que *toutes* les représentations du plan aient été
+                // matérialisées. Un texte enrichi en demande trois ; une image
+                // de deux gigaoctets se payait donc plusieurs fois avant qu'un
+                // refus déjà certain soit prononcé.
+                //
+                // Ce qui a été lu est conservé, et c'est délibéré : c'est lui
+                // qui porte la taille que l'entrée annoncera comme refusée. La
+                // jeter rendrait une entrée vide, sans rien à dire — alors que
+                // « image de 2 Go non conservée » est exactement ce que
+                // l'utilisateur a besoin de lire.
+                read += data.count
+                if read > ClipboardEntry.maximumReadingBytes {
+                    exhausted = true
+                    break
+                }
             }
             items.append(representations)
+            if exhausted { break }
         }
 
         if Task.isCancelled { return nil }
