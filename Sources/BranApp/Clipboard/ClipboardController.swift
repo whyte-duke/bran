@@ -156,7 +156,24 @@ final class ClipboardController {
     /// et c'est ça qu'on espace. Une copie faite à la souris apparaît donc dans
     /// l'historique jusqu'à deux secondes plus tard ; celle faite au clavier est
     /// immédiate, et c'est l'écrasante majorité.
-    static let pollInterval: Duration = .seconds(2)
+    static let pollInterval: Duration = .seconds(ClipboardCadence.attentive)
+
+    /// La session est-elle verrouillée ? Tenu par notification : il n'y a pas
+    /// d'API pour le demander — même constat et même remède que
+    /// `WatchController.isScreenLocked`, qui explique pourquoi
+    /// `CGSessionCopyCurrentDictionary` ne répond pas à cette question.
+    ///
+    /// Défaut « déverrouillé » : bran démarre dans une session ouverte, et se
+    /// tromper dans ce sens fait sonder trop vite quelques secondes, jamais
+    /// manquer une copie.
+    private var isScreenLocked = false
+
+    /// Le panneau d'historique est-il visible ? Lu par la cadence.
+    private var panelIsOpen: Bool { panel.isOpen }
+
+    /// Les observateurs de verrouillage et de réveil. Retenus pour être retirés
+    /// à la fin : un observateur de centre distribué survit à son objet.
+    private var sessionObservers: [any NSObjectProtocol] = []
 
     init(store: ClipboardStore, settings: ClipboardSettings) {
         self.store = store
@@ -178,6 +195,7 @@ final class ClipboardController {
     /// fichier.
     func start(monitor: HotkeyMonitor) {
         self.monitor = monitor
+        observeSession()
         applySettings()
 
         // **Le guet doit être posé, pas seulement renseigné.** `bind` inscrit la
@@ -353,19 +371,109 @@ final class ClipboardController {
     /// retiendrait alors le contrôleur pour toujours, à travers une boucle qui
     /// ne se termine jamais, et le `[weak self]` ne servirait plus à rien. Prise
     /// dans un `if let`, la référence meurt avec sa portée, avant le `sleep`.
+    /// **La cadence n'est plus fixe.** Elle est relue à chaque tour, d'après
+    /// l'inactivité du clavier et l'état de l'écran : voir `ClipboardCadence`,
+    /// qui porte la règle et son prix. Deux secondes quand quelqu'un est là,
+    /// dix quand personne n'a touché à rien depuis une minute, soixante écran
+    /// éteint — 1 800 réveils par heure, 360, ou 60.
+    ///
+    /// `clock: .suspending`, comme la boucle du veilleur : une pause de dix
+    /// secondes ne doit pas devenir une pause de huit heures parce qu'on a
+    /// refermé le capot au milieu. Et la tolérance laisse le système grouper ce
+    /// réveil avec les siens, ce qui est exactement le but sur batterie.
     private func startPolling() {
         polling?.cancel()
         polling = Task { [weak self] in
             while Task.isCancelled == false {
                 let count = await pasteboardAccess.changeCount()
+                let interval: TimeInterval
                 if let controller = self {
                     controller.pollTick(count)
+                    interval = controller.currentPollInterval()
                 } else {
                     return
                 }
-                try? await Task.sleep(for: Self.pollInterval)
+                try? await Task.sleep(
+                    for: .seconds(interval),
+                    tolerance: .seconds(interval / 4),
+                    clock: .suspending
+                )
             }
         }
+    }
+
+    /// Verrouillage, déverrouillage, réveil — les trois moments où la cadence
+    /// doit changer **sans attendre** le prochain réveil du sondeur.
+    ///
+    /// Sans ça, quelqu'un qui déverrouille son Mac aurait jusqu'à soixante
+    /// secondes de sondage parqué avant que le filet lent ne reprenne son
+    /// rythme, et une copie faite dans la foulée arriverait avec ce retard-là.
+    /// `restartPolling()` relit `changeCount` tout de suite et repart sur la
+    /// cadence attentive.
+    ///
+    /// **Trois centres de notifications, et il faut le bon à chaque fois** :
+    /// `com.apple.screenIs(Un)Locked` n'existe que sur le centre **distribué**,
+    /// la veille et le réveil sur celui de `NSWorkspace`. S'abonner au mauvais
+    /// ne lève aucune erreur — l'observateur ne se déclenche simplement jamais,
+    /// et le défaut ne se voit qu'en verrouillant son écran pour de vrai.
+    private func observeSession() {
+        guard sessionObservers.isEmpty else { return }
+        let distributed = DistributedNotificationCenter.default()
+
+        sessionObservers.append(distributed.addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.isScreenLocked = true }
+        })
+
+        sessionObservers.append(distributed.addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.isScreenLocked = false
+                self.restartPolling()
+            }
+        })
+
+        sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restartPolling() }
+        })
+    }
+
+    /// Relance le sondeur immédiatement, si et seulement s'il tournait déjà.
+    /// Rallumer une capture que le réglage a éteinte serait exactement le
+    /// contraire de ce que l'interrupteur promet.
+    private func restartPolling() {
+        guard polling != nil, settings.capturesCopies else { return }
+        startPolling()
+    }
+
+    /// Ce que la machine dit d'elle-même, traduit en intervalle.
+    ///
+    /// Les trois lectures sont gratuites : `secondsSinceLastEventType` est
+    /// mesuré sous la microseconde, `CGDisplayIsAsleep` est une lecture du
+    /// serveur de fenêtres, et le verrou est un booléen tenu par notification.
+    /// Aucune n'appelle `tccd` ni n'énumère quoi que ce soit.
+    private func currentPollInterval() -> TimeInterval {
+        let idle = CGEventSource.secondsSinceLastEventType(
+            .hidSystemState,
+            eventType: CGEventType(rawValue: ~0) ?? .null
+        )
+        let facts = ClipboardCadence.Facts(
+            // Une journée entière sans un événement n'est pas une mesure, c'est
+            // un capteur mort : même garde que `WatchController.presence`.
+            idleSeconds: (idle.isFinite && idle >= 0 && idle < 86_400) ? idle : nil,
+            isDisplayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
+            isScreenLocked: isScreenLocked
+        )
+        // Le panneau ouvert veut dire que quelqu'un regarde l'historique en ce
+        // moment même : on ne le laisse pas prendre dix secondes de retard sur
+        // une copie faite dans l'application d'à côté.
+        if panelIsOpen { return ClipboardCadence.attentive }
+        return ClipboardCadence.interval(for: facts)
     }
 
     private func pollTick(_ count: Int) {

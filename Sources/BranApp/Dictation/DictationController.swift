@@ -381,6 +381,13 @@ final class DictationController {
 
         Task { [weak self] in
             guard let self else { return }
+            // **Le PCM est rendu au système dès que la dictée est persistée,
+            // pas à la dictée suivante.** Voir `MicCapture.releaseSamples` pour
+            // les 38,4 Mo en jeu. Le `defer` couvre les deux issues — texte
+            // transcrit ou échec enregistré — et les deux sorties anticipées sur
+            // jeton périmé, où il ne fait rien : c'est justement le cas où une
+            // autre dictée est propriétaire du tampon.
+            defer { releaseSamples(token: token) }
             do {
                 let outcome = try await host.transcribe(samples, language: settings.language)
                 guard token == currentToken else { return }  // annulée entre-temps
@@ -418,6 +425,19 @@ final class DictationController {
                 apply(machine.handle(.failed(.transcriptionFailed(error.localizedDescription))))
             }
         }
+    }
+
+    /// Libère les échantillons de la dictée que `token` désigne, si elle est
+    /// toujours la dictée courante.
+    ///
+    /// Le jeton est la même garde que partout ailleurs dans ce fichier : après
+    /// un `await`, « je suis toujours celui qui a commencé » est une question.
+    /// Un jeton périmé veut dire qu'une annulation ou une nouvelle capture est
+    /// passée entre-temps — elle possède le tampon, et l'a déjà vidé ou rempli.
+    private func releaseSamples(token: UUID) {
+        guard token == currentToken else { return }
+        capturedSamples = []
+        mic.releaseSamples()
     }
 
     private func discardCapture() {

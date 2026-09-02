@@ -267,17 +267,61 @@ final class SpeechModelHost {
 
         do {
             let loaded = try await task.value
+            // **L'identité de la tâche, pas seulement son existence.**
+            // `cancelLoad()` met `loadTask` à `nil` et repose `availability`
+            // lui-même ; sans cette comparaison, la tâche annulée revenait
+            // ensuite par son `catch` et écrasait cet état par « échec :
+            // annulé », c'est-à-dire une panne affichée pour un geste
+            // volontaire.
+            guard loadTask == task else { throw CancellationError() }
             manager = loaded
             loadTask = nil
             lastLoadDuration = Date().timeIntervalSince(started)
             availability = .ready
             return loaded
         } catch {
+            guard loadTask == task else { throw error }
             loadTask = nil
             availability = .failed(Self.explain(error))
             throw error
         }
     }
+
+    /// Annule le téléchargement ou le chargement en cours.
+    ///
+    /// **483 Mo qu'on ne pouvait pas arrêter.** La tâche était conservée depuis
+    /// le début — c'est elle qui fait que deux dictées lancées coup sur coup ne
+    /// téléchargent pas deux fois — mais aucune API ne l'annulait, et l'écran
+    /// d'accueil n'avait donc aucun bouton à offrir. Un transfert lancé par
+    /// erreur sur un partage de connexion continuait jusqu'au bout, panneau
+    /// fermé compris.
+    ///
+    /// **Ce qui reste sur le disque n'est pas supprimé, et c'est volontaire.**
+    /// FluidAudio écrit fichier par fichier dans son propre cache ; les
+    /// fichiers déjà complets sont réutilisables tels quels à la reprise, et
+    /// c'est `AsrModels.modelsExist` — pas bran — qui sait lesquels comptent.
+    /// Effacer le dossier ferait payer deux fois ce qui a déjà été téléchargé,
+    /// et prendrait le risque d'effacer un modèle valide.
+    ///
+    /// L'état repart de ce que le disque dit, pas de ce qu'on croyait : si le
+    /// modèle était déjà installé et qu'on annulait un simple chargement en
+    /// mémoire, on revient à « installé », pas à « à télécharger ».
+    ///
+    /// Ce qu'on ne peut pas promettre : que FluidAudio coupe sa requête HTTP à
+    /// l'instant même. L'annulation de tâche Swift est coopérative, et c'est sa
+    /// boucle de téléchargement qui décide quand la lire.
+    func cancelLoad() {
+        guard let task = loadTask else { return }
+        loadTask = nil
+        task.cancel()
+        availability = Self.isDownloaded ? .installed : .absent
+        FeatureLog.record("dictée — chargement du modèle annulé")
+    }
+
+    /// Y a-t-il un chargement ou un téléchargement en cours qu'on puisse
+    /// annuler ? Lu par l'écran des autorisations pour décider d'afficher le
+    /// bouton.
+    var isLoading: Bool { loadTask != nil }
 
     // MARK: - Transcription
 

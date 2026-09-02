@@ -103,9 +103,13 @@ final class WatchStore {
     private var ledger: WatchLedger
     private var presenceLedger: PresenceLedger
 
-    /// Le `FileHandle` du jour, gardé ouvert. Rouvert au changement de jour.
+    /// Le `FileHandle` du jour, gardé ouvert. Rouvert au changement de jour
+    /// **et au changement de dossier** — voir `handle(for:)`.
     private var handle: FileHandle?
     private var openDay: String?
+    /// Le fichier que `handle` désigne. C'est lui, et non le jour, qui dit si le
+    /// descripteur ouvert écrit encore au bon endroit.
+    private var openURL: URL?
 
     init(
         root: @escaping @MainActor () -> URL,
@@ -355,25 +359,54 @@ final class WatchStore {
         }
     }
 
+    /// Le descripteur du jour, **ouvert en ajout et vérifié contre son chemin**.
+    ///
+    /// Deux défauts corrigés ici, et ils sont indépendants.
+    ///
+    /// **1. Le descripteur survivait à un changement de dossier.** `folder`
+    /// interroge la fermeture `root()` à chaque appel, donc il reflète la
+    /// nouvelle destination dès que l'utilisateur en choisit une. Le
+    /// descripteur, lui, n'était rouvert qu'au changement de *jour*. Changer de
+    /// dossier à 14 h laissait donc bran lire le nouveau et écrire dans
+    /// l'ancien jusqu'à minuit : le panneau hebdomadaire montrait une journée
+    /// vide pendant que les lignes continuaient d'arriver sur l'ancien volume —
+    /// et si celui-ci était une clé qu'on venait de débrancher, elles étaient
+    /// simplement perdues. La comparaison porte donc sur l'URL, pas sur le jour.
+    ///
+    /// **2. Deux instances s'écrasaient mutuellement.** `seekToEnd()` fixe
+    /// l'offset une seule fois, à l'ouverture : les octets qu'un *autre*
+    /// processus ajoute derrière ne le font pas avancer, et la ligne suivante
+    /// repart de la position d'avant.
+    ///
+    /// **Mesuré**, deux processus écrivant chacun 400 lignes dans le même
+    /// fichier : avec `seekToEnd()`, il en restait **400 sur 800** — un des deux
+    /// journaux avait intégralement disparu sous l'autre. Avec `O_APPEND`,
+    /// 800 sur 800, aucune ligne malformée. `O_APPEND` déplace le choix de la
+    /// position dans le noyau : chaque `write` va à la fin **du fichier tel
+    /// qu'il est à cet instant**. Une ligne d'intervalle fait quelques dizaines
+    /// d'octets et part en un seul `write`, donc elle ne peut pas non plus
+    /// s'entrelacer avec une autre.
     private func handle(for day: String) throws -> FileHandle {
-        if let handle, openDay == day { return handle }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appending(path: "\(day).jsonl")
+
+        if let handle, openDay == day, openURL == url { return handle }
 
         closeFile()
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
-        let url = folder.appending(path: "\(day).jsonl")
-        if FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) == false {
-            FileManager.default.createFile(atPath: url.path(percentEncoded: false), contents: nil)
+        let path = url.path(percentEncoded: false)
+        let descriptor = open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard descriptor >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [
+                NSLocalizedDescriptionKey:
+                    "impossible d'ouvrir \(url.lastPathComponent) : \(String(cString: strerror(errno)))",
+            ])
         }
 
-        let opened = try FileHandle(forWritingTo: url)
-        // Une seule fois : les écritures suivantes repartent d'où celle-ci
-        // s'arrête. Chercher la fin à chaque ligne serait un appel système de
-        // plus pour une position qu'on connaît déjà.
-        try opened.seekToEnd()
-
+        let opened = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         handle = opened
         openDay = day
+        openURL = url
         return opened
     }
 
@@ -387,6 +420,7 @@ final class WatchStore {
         try? handle?.close()
         handle = nil
         openDay = nil
+        openURL = nil
     }
 
     /// Le jour a-t-il changé depuis la dernière écriture ?

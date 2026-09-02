@@ -353,12 +353,19 @@ public final class ClipboardStore {
     /// l'épinglage achète.
     public func blobURL(for ref: ClipboardBlobRef, of entry: ClipboardEntry) -> URL? {
         guard entry.blobsArePurged == false else { return nil }
+        // Le nom vient d'un sidecar, donc de personne en particulier : voir
+        // `containedBlobName`. C'est le seul entonnoir de lecture — la vignette,
+        // le collage, le panneau et le cache passent tous par ici — mais il est
+        // doublé devant les deux autres effets, la copie d'épinglage et le test
+        // d'existence, parce qu'une garde unique ne tient que tant que personne
+        // n'ajoute un second chemin.
+        guard let name = Self.containedBlobName(ref) else { return nil }
         if entry.isPinned {
-            return pinnedBlobsFolder.appending(path: ref.fileName)
+            return pinnedBlobsFolder.appending(path: name)
         }
         return dayFolder(entry.dayFolderName())
             .appending(path: Self.blobsFolderName, directoryHint: .isDirectory)
-            .appending(path: ref.fileName)
+            .appending(path: name)
     }
 
     /// Change la politique et applique tout de suite ce qu'elle rend caduc :
@@ -822,8 +829,12 @@ public final class ClipboardStore {
     nonisolated static func allBlobsExist(_ refs: [ClipboardBlobRef], in folder: URL) async -> Bool {
         let manager = FileManager.default
         return refs.allSatisfy { reference in
-            manager.fileExists(
-                atPath: folder.appending(path: reference.fileName).path(percentEncoded: false)
+            // Un nom que ce magasin n'aurait pas pu écrire compte comme absent :
+            // l'entrée se marque purgée, ce qui est exactement ce qu'on veut
+            // d'une référence qu'on refuse de suivre.
+            guard let name = containedBlobName(reference) else { return false }
+            return manager.fileExists(
+                atPath: folder.appending(path: name).path(percentEncoded: false)
             )
         }
     }
@@ -1450,10 +1461,19 @@ public final class ClipboardStore {
         let source = dayFolder.appending(path: blobsFolderName, directoryHint: .isDirectory)
 
         for ref in refs {
-            let destination = pinnedBlobs.appending(path: ref.fileName)
+            // **Le nom est revalidé devant l'écriture, pas seulement devant la
+            // lecture.** C'est le chemin le plus dangereux des trois : un nom
+            // sorti d'un sidecar hostile ferait ici un `write` hors du dossier
+            // épinglé, avec le contenu d'un fichier également choisi par lui. On
+            // lance plutôt qu'on saute : épingler est une promesse de garder des
+            // octets, et une promesse tenue à moitié vaut moins qu'un refus.
+            guard let name = Self.containedBlobName(ref) else {
+                throw ClipboardStoreError.unknownBlobName(ref.fileName)
+            }
+            let destination = pinnedBlobs.appending(path: name)
             guard manager.fileExists(atPath: destination.path(percentEncoded: false)) == false
             else { continue }
-            let data = try Data(contentsOf: source.appending(path: ref.fileName))
+            let data = try Data(contentsOf: source.appending(path: name))
             try data.write(to: destination, options: .atomic)
         }
     }
@@ -1635,6 +1655,13 @@ public final class ClipboardStore {
     /// coûte des octets ; un fichier de tiers supprimé coûte la confiance dans un
     /// dossier qu'on invite justement à ouvrir.
     nonisolated static func isSelfWritten(_ name: String) -> Bool {
+        // **Les séparateurs sont refusés ici, et pas seulement chez l'appelant.**
+        // Le découpage ci-dessous ne coupe qu'au premier point : une extension
+        // valant `png/../../x` laissait donc passer un nom dont l'empreinte est
+        // parfaitement bien formée. C'est la moitié du chemin d'évasion de
+        // `containedBlobName`, et elle se referme au même endroit que le test de
+        // forme plutôt qu'à côté.
+        guard name.contains("/") == false, name.contains("\0") == false else { return false }
         let parts = name.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
         // Une extension vide est possible — `ClipboardBlobRef.fileName` rend
         // alors l'empreinte nue — mais un point suivi de rien ne l'est pas.
@@ -1642,6 +1669,43 @@ public final class ClipboardStore {
         let hash = parts[0]
         guard hash.count == 64 else { return false }
         return hash.allSatisfy(\.isHexDigit) && hash.allSatisfy { $0.isUppercase == false }
+    }
+
+    /// Ce contenu désigne-t-il un fichier **de ce dossier**, et sous quel nom ?
+    ///
+    /// **Le sidecar est un fichier JSON, et rien ne garantit qui l'a écrit.**
+    /// `ClipboardBlobRef.fileName` concaténait `hash` et `ext` sans jamais les
+    /// relire : un sidecar déposé dans `Clipboard/<jour>/` portant
+    /// `"hash":"../../../../Documents/secret","ext":"png"` résolvait vers
+    /// `~/Documents/secret.png`, et un clic sur « copier » chargeait ce fichier
+    /// dans le presse-papiers comme s'il était le contenu de l'entrée. Le même
+    /// nom passait aussi par `copyBlobsToPinned`, qui **écrit** — donc l'évasion
+    /// marchait dans les deux sens.
+    ///
+    /// Le critère est celui qui existait déjà pour le ramassage des orphelins,
+    /// `isSelfWritten`, appliqué à l'autre bout du même problème : un nom
+    /// acceptable est un nom que ce magasin **aurait pu écrire**, c'est-à-dire
+    /// 64 caractères hexadécimaux minuscules et une extension non vide. Vérifier
+    /// la forme entière est plus strict que chasser les `..` un par un, et c'est
+    /// ce qui évite d'avoir à deviner quelle graphie exotique reste à couvrir.
+    ///
+    /// Le repli est celui d'un fichier disparu du Finder : l'entrée survit sans
+    /// son contenu lourd et le dit. Perdre une image vaut mieux que lire le
+    /// fichier de quelqu'un d'autre.
+    nonisolated static func containedBlobName(_ ref: ClipboardBlobRef) -> String? {
+        let name = ref.fileName
+        guard name != ".", name != "..", isSelfWritten(name) else { return nil }
+        return name
+    }
+
+    /// Ce que le magasin refuse de faire.
+    ///
+    /// Un seul cas pour l'instant, et il est volontairement bruyant : un nom de
+    /// contenu qui ne peut pas venir de nous n'est pas une donnée manquante,
+    /// c'est une donnée fabriquée. La lecture, elle, échoue en silence — voir
+    /// `blobURL` — parce qu'elle a un repli honnête à offrir.
+    enum ClipboardStoreError: Error, Equatable {
+        case unknownBlobName(String)
     }
 
     /// Le total des octets occupés par les `blobs/`, tous jours confondus.

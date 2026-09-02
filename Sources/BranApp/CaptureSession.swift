@@ -201,7 +201,36 @@ public actor CaptureSession: CaptureBackend {
     /// tombait sur le `guard` et rendait la main sans rien faire, et la capture
     /// continuait de tourner sans que personne ne la surveille — en rapportant
     /// un succès. On ne lâche donc la référence qu'une fois l'arrêt obtenu.
+    /// **Une seule fermeture à la fois, et les autres attendent la sienne.**
+    ///
+    /// Un acteur sérialise les *appels*, pas les *attentes* : dès le premier
+    /// `await`, un second appel entre. Or une fermeture attend
+    /// `stream.stopCapture()` puis la finalisation, mesurée jusqu'à douze
+    /// minutes — la fenêtre de réentrance est donc énorme, et la référence au
+    /// flux n'est délibérément relâchée qu'à la fin. Pause puis Arrêter coup sur
+    /// coup faisaient donc `stopCapture()` deux fois sur le même `SCStream`,
+    /// puis deux attentes de finalisation sur le même fichier.
+    ///
+    /// Le second appelant partage la tâche du premier : il obtient le même
+    /// résultat, la même erreur, au même moment. Rendre la main tout de suite
+    /// aurait été pire — il aurait rapporté un succès pour un travail pas
+    /// encore fait, ce qui est exactement le défaut que ce fichier documente
+    /// déjà à propos de `stop()`.
+    private var closing: Task<Void, Error>?
+
     private func closeCurrentSegment() async throws {
+        if let closing { return try await closing.value }
+        guard stream != nil else { return }
+
+        let task = Task { try await self.performClose() }
+        closing = task
+        // Relâché quel qu'en soit le sort : un échec doit rester réessayable,
+        // c'est ce qui permet à `openSegment()` de constater qu'un flux traîne.
+        defer { closing = nil }
+        try await task.value
+    }
+
+    private func performClose() async throws {
         guard let stream else { return }
 
         // `stopCapture()` retire la sortie d'enregistrement ET finalise.

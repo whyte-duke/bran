@@ -69,13 +69,51 @@ actor PostProcessor {
         let originalBytes = usable.reduce(Int64.zero) { $0 + Self.sizeOf($1) }
 
         let composition = try await Self.compose(usable)
-        try await Self.transcode(composition, to: destination, onProgress: onProgress)
+
+        // **Le fichier final n'apparaît qu'une fois entier**, et c'est deux
+        // défauts corrigés d'un coup.
+        //
+        // L'encodage écrivait directement à la destination, après un
+        // `removeItem` qui détruisait le résultat précédent. Un disque plein, un
+        // encodeur qui cale, une coupure de courant à la vingtième minute
+        // laissaient donc un `.mp4` tronqué **à l'emplacement officiel** — et
+        // rien ne le supprimait. La bibliothèque, elle, considère la simple
+        // existence de ce fichier comme prioritaire sur les segments bruts
+        // (`Recording.playbackURL`) : le lecteur ouvrait la version tronquée,
+        // les segments intacts restaient invisibles à côté, et l'avertissement
+        // réservé à l'absence du final ne s'affichait pas. Une réunion
+        // récupérable était présentée comme une réunion à moitié perdue.
+        //
+        // Le brouillon vit dans le dossier de remplacement que le système
+        // donne pour cette destination : garanti sur le même volume, donc le
+        // remplacement est un renommage, et invisible du balayage de la
+        // bibliothèque — qui, lui, ne regarde que les `.mp4` de la racine.
+        let replacementFolder = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: destination,
+            create: true
+        )
+        // Le dossier part dans tous les cas : succès, échec, ou annulation.
+        // C'est lui qui garantit qu'aucun brouillon ne survit à sa tentative.
+        defer { try? FileManager.default.removeItem(at: replacementFolder) }
+        let draft = replacementFolder.appending(path: destination.lastPathComponent)
+
+        try await Self.transcode(composition, to: draft, onProgress: onProgress)
 
         // Les segments ne disparaissent qu'une fois le fichier final écrit et
         // vérifié. Un échec laisse la matière première intacte : on peut
         // relancer, ou récupérer les morceaux à la main.
-        let finalBytes = Self.sizeOf(destination)
+        let finalBytes = Self.sizeOf(draft)
         guard finalBytes > 0 else { throw ProcessingError.writerFailed("fichier final vide") }
+
+        // **`replaceItemAt` même quand la destination n'existe pas.** Le doute
+        // a été levé par la mesure plutôt que par le commentaire du dépôt qui
+        // affirmait le contraire : sur macOS 26.5, l'appel réussit et crée le
+        // fichier, que le brouillon soit dans le même dossier ou dans le
+        // dossier de remplacement du système. C'est donc un seul chemin pour
+        // les deux cas, au lieu d'un `moveItem` et d'une branche à tester.
+        _ = try FileManager.default.replaceItemAt(destination, withItemAt: draft)
 
         // Un `SegmentCleanup` vide dit la vérité : rien n'a été tenté, donc rien
         // n'a échoué. C'est à l'appelant d'expliquer pourquoi les morceaux sont
@@ -200,6 +238,10 @@ actor PostProcessor {
 
         let bitrate = Int(Double(size.width) * Double(size.height) * frameRate * bitsPerPixelPerFrame)
 
+        // La destination est ici un brouillon dans un dossier neuf — voir
+        // `process`. Le `removeItem` reste par prudence : rien n'interdit à un
+        // appelant futur de viser un fichier existant, et `AVAssetWriter` refuse
+        // de démarrer si son URL de sortie est déjà occupée.
         try? FileManager.default.removeItem(at: destination)
         let writer = try AVAssetWriter(outputURL: destination, fileType: .mp4)
         let reader = try AVAssetReader(asset: asset)

@@ -135,6 +135,18 @@ enum SpeedProbe {
             defer { lock.unlock() }
             return tally
         }
+
+        /// L'instant du **premier octet**, `nil` tant qu'il n'est pas tombé.
+        ///
+        /// Lu par l'échéance murale de `run`, qui doit compter à partir du même
+        /// zéro que le budget — sans quoi elle inclurait la résolution DNS et la
+        /// poignée TLS, mesurées jusqu'à 0,9 s, dans les quatre secondes qu'on
+        /// a promis de consacrer au transfert.
+        var startedAt: SuspendingClock.Instant? {
+            lock.lock()
+            defer { lock.unlock() }
+            return origin
+        }
     }
 
     // MARK: - La descente
@@ -162,7 +174,7 @@ enum SpeedProbe {
         // et ferme la question.
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
 
-        try await run(request, counter: counter, kind: .download)
+        try await run(request, counter: counter, budget: budget, kind: .download)
     }
 
     // MARK: - La montée
@@ -191,9 +203,31 @@ enum SpeedProbe {
         // Mac et le serveur ne voit le corps, donc personne ne peut le
         // compresser. Fabriquer des octets aléatoires coûterait du processeur au
         // moment précis où l'on mesure autre chose.
-        request.httpBody = Data(count: budget.byteCap)
+        //
+        // **Streamé, et non matérialisé, et c'est un correctif double.**
+        //
+        // Le corps valait `Data(count: budget.byteCap)`, soit 60 Mo alloués et
+        // rendus résidents pendant la montée. Surtout, il **se terminait tout
+        // seul** : 60 Mo à 30 Mo/s font deux secondes, et
+        // `SpeedTally.plateauMean` réclame le plancher de 2,25 s — quatre
+        // tranches closes après la rampe. Sur une fibre symétrique, le test
+        // dépensait donc 60 Mo pour afficher « Montée — », sans erreur ni
+        // explication, puisqu'il ne s'était rien passé d'anormal. Le plafond du
+        // budget doit couper la mesure ; ce n'est pas au corps HTTP de décider
+        // quand elle s'arrête.
+        //
+        // `/dev/zero` n'a pas de fin : c'est `Counter.record` qui annule au
+        // budget, et l'échéance murale de `run` qui borne le reste. Le corps
+        // sans longueur connue passe en `Transfer-Encoding: chunked` —
+        // **vérifié contre le vrai serveur**, `speed.cloudflare.com/__up`
+        // répond 200 et accepte le flux ; mesuré, 9,4 Mo montés en continu là
+        // où le corps matérialisé en montait 10,5 pour 60 Mo alloués.
+        guard let body = InputStream(fileAtPath: "/dev/zero") else {
+            throw Failure.unreachable("le flux de montée n'a pas pu être ouvert")
+        }
+        request.httpBodyStream = body
 
-        try await run(request, counter: counter, kind: .upload)
+        try await run(request, counter: counter, budget: budget, kind: .upload)
     }
 
     // MARK: - La latence
@@ -216,10 +250,35 @@ enum SpeedProbe {
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
 
-        let session = URLSession(configuration: .ephemeral)
+        // **Les deux délais sont posés, et sans eux la série n'a aucune borne.**
+        //
+        // `URLSessionConfiguration.ephemeral` part sur le défaut système :
+        // 60 s d'inactivité par requête, aucune borne de durée totale. Neuf
+        // sondes séquentielles par source et deux sources font donc, dans le
+        // pire cas — un DNS qui ne répond pas, un serveur qui accepte la
+        // connexion et se tait — **dix-huit minutes** avant que le test n'ait
+        // seulement commencé à transférer quoi que ce soit. Le panneau reste
+        // figé sur « Latence » tout ce temps, pour un nombre dont l'absence
+        // n'empêche rien.
+        //
+        // Cinq secondes : la plus mauvaise ligne qu'on veuille mesurer est un
+        // partage de connexion en bord de réseau, où l'aller-retour applicatif
+        // — DNS, TLS, HTTP — reste très en dessous. Descendre plus bas
+        // exclurait des lignes réelles ; c'est la borne haute d'un RTT
+        // mesurable, pas une préférence.
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 5
+        configuration.timeoutIntervalForResource = 5
+        let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
 
         var latency = SpeedLatency()
+        // **Trois échecs d'affilée arrêtent la série.** Chaque erreur était
+        // ignorée et la boucle continuait : un serveur qui refuse coûtait neuf
+        // délais au lieu d'un. Trois plutôt qu'un, parce qu'une perte isolée
+        // est exactement ce que huit sondes existent pour absorber — c'est
+        // écrit dans `SpeedLatency`.
+        var consecutiveFailures = 0
         for _ in 0..<SpeedLatency.probeCount {
             if Task.isCancelled { break }
             let start = SuspendingClock.now
@@ -227,7 +286,10 @@ enum SpeedProbe {
                 _ = try await session.data(for: request)
                 let d = start.duration(to: .now)
                 latency.accept(Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18)
+                consecutiveFailures = 0
             } catch {
+                consecutiveFailures += 1
+                if consecutiveFailures >= 3 { break }
                 continue
             }
         }
@@ -245,7 +307,15 @@ enum SpeedProbe {
     /// comme une panne si on ne l'attrapait pas ici. Le tri se fait sur le code,
     /// pas sur un drapeau, parce que la vraie annulation — l'utilisateur qui
     /// ferme le panneau — passe par le même chemin et doit se taire pareil.
-    private static func run(_ request: URLRequest, counter: Counter, kind: Kind) async throws {
+    /// Ce qu'on laisse à la résolution DNS et à la poignée TLS avant de
+    /// renoncer. Trois secondes : le délai avant le premier octet a été mesuré
+    /// jusqu'à 0,9 s sur cette ligne, et au-delà de trois il n'y a plus de
+    /// serveur à mesurer, il y a une panne.
+    private static let connectionGrace: TimeInterval = 3
+
+    private static func run(
+        _ request: URLRequest, counter: Counter, budget: SpeedPlan.Budget, kind: Kind
+    ) async throws {
         let pump = Pump(counter: counter, kind: kind)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15
@@ -271,9 +341,52 @@ enum SpeedProbe {
         defer { session.invalidateAndCancel() }
 
         do {
-            try await pump.run(session: session, request: request)
+            // **Une échéance murale, parce que le budget n'était consulté qu'à
+            // l'arrivée d'octets.**
+            //
+            // `Counter.record` décide d'arrêter, mais il n'est appelé que
+            // depuis un callback de données. À 100 ko/s, ou après un premier
+            // bloc suivi d'un gel de la ligne, le callback suivant peut arriver
+            // bien après les quatre secondes annoncées — et rien d'autre ne
+            // bornait la durée : `timeoutIntervalForRequest` est un délai
+            // d'*inactivité* de 15 s, pas une durée totale, et il se réarme à
+            // chaque paquet. Le bouton promettait une mesure courte et pouvait
+            // attendre indéfiniment sur une ligne qui goutte.
+            //
+            // L'échéance compte à partir du **premier octet**, comme le budget :
+            // partir de la requête ferait payer DNS et TLS sur le temps de
+            // mesure. D'où la petite attente d'établissement, bornée à part.
+            //
+            // L'annulation de groupe est sûre ici, contrairement au cas de
+            // `SpeedLinkProbe` : `Pump.run` est enveloppé dans un
+            // `withTaskCancellationHandler` qui annule la tâche URLSession, ce
+            // qui provoque `didCompleteWithError`, donc la reprise de sa
+            // continuation. Rien ne reste suspendu.
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { try await pump.run(session: session, request: request) }
+                group.addTask {
+                    let giveUp = SuspendingClock.now.advanced(by: .seconds(Self.connectionGrace))
+                    while counter.startedAt == nil {
+                        guard SuspendingClock.now < giveUp else { return }
+                        try await Task.sleep(for: .milliseconds(50), clock: .suspending)
+                    }
+                    guard let origin = counter.startedAt else { return }
+                    try await Task.sleep(
+                        until: origin.advanced(by: .seconds(budget.duration)),
+                        clock: .suspending
+                    )
+                }
+
+                // Le premier des deux tranche : soit le transfert s'est terminé
+                // seul, soit l'échéance est tombée. Les deux sont des fins
+                // normales, et `cancelAll` referme l'autre.
+                try await group.next()
+                group.cancelAll()
+            }
         } catch let error as URLError where error.code == .cancelled {
-            // Budget atteint, ou panneau refermé. Les deux sont des fins.
+            // Budget atteint, échéance murale, ou panneau refermé. Trois fins.
+            return
+        } catch is CancellationError {
             return
         } catch let error as URLError {
             throw Failure.unreachable(error.localizedDescription)
@@ -370,6 +483,16 @@ private final class Pump: NSObject, URLSessionDataDelegate, @unchecked Sendable 
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         finish(with: error)
+    }
+
+    /// URLSession réclame un corps neuf : redirection, réauthentification, ou
+    /// simple réessai. Un `InputStream` déjà consommé ne peut pas être rejoué,
+    /// et sans cette méthode la requête échouerait avec un corps vide — un
+    /// « 0 Mo/s » qui accuserait la ligne pour une mécanique HTTP.
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, needNewBodyStream completionHandler: @escaping (InputStream?) -> Void
+    ) {
+        completionHandler(isUpload ? InputStream(fileAtPath: "/dev/zero") : nil)
     }
 
     /// Reprend la continuation **une seule fois**. Trois chemins y mènent — un

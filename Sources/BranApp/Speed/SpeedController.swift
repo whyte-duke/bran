@@ -144,6 +144,8 @@ final class SpeedController {
     private let defaults = UserDefaults.standard
     private let version: String
     private var run: Task<Void, Never>?
+    /// Qui possède l'affichage en ce moment. Voir `owns(_:)`.
+    private var runID = UUID()
     private var gate = LabelGate()
 
     /// Combien de vues montrent déjà la mesure **dans la fenêtre**.
@@ -195,8 +197,26 @@ final class SpeedController {
     func start() {
         guard canStart else { return }
         run?.cancel()
-        run = Task { [weak self] in await self?.measure() }
+        let id = UUID()
+        runID = id
+        run = Task { [weak self] in await self?.measure(id) }
     }
+
+    /// **L'identité de la mesure qui possède l'affichage.**
+    ///
+    /// Sans elle, `cancel()` libérait le créneau et publiait `.idle` — mais
+    /// l'ancienne tâche restait vivante, et au premier `await` qui rendait la
+    /// main elle exécutait *elle aussi* `return settle(.idle)`, sans jamais
+    /// vérifier qu'elle était encore celle qui compte. Annuler A puis lancer B
+    /// tout de suite : A revenait pendant B, remettait le bouton au repos au
+    /// milieu de la mesure de B, et un troisième clic pouvait alors annuler B
+    /// et lancer C pendant que l'affichage disparaissait.
+    ///
+    /// Chaque publication terminale passe donc par cette identité. Et une
+    /// annulation sans remplaçante remet bien l'interface au repos tout de
+    /// suite : c'est `cancel()` qui le fait, une fois, depuis le seul endroit
+    /// qui sache qu'il n'y a personne derrière.
+    private func owns(_ id: UUID) -> Bool { id == runID }
 
     /// Arrêt à la demande. **Ce qui a déjà été mesuré est jeté**, et c'est
     /// délibéré : un test interrompu au milieu de la rampe rendrait un chiffre
@@ -205,6 +225,9 @@ final class SpeedController {
     func cancel() {
         run?.cancel()
         run = nil
+        // La mesure annulée perd son identité : ce qu'elle publiera en revenant
+        // — dans une seconde ou dans neuf — ne concerne plus personne.
+        runID = UUID()
         settle(.idle)
     }
 
@@ -246,7 +269,7 @@ final class SpeedController {
 
     // MARK: - La mesure
 
-    private func measure() async {
+    private func measure(_ id: UUID) async {
         let userAgent = SpeedPlan.userAgent(version: version)
         var fresh = SpeedReading()
 
@@ -267,7 +290,7 @@ final class SpeedController {
             fresh.link = link.link
             fresh.isExpensive = link.isExpensive
         }
-        guard Task.isCancelled == false else { return settle(.idle) }
+        guard owns(id), Task.isCancelled == false else { return }
 
         // **Latence et descente forment un couple, par source.**
         //
@@ -284,11 +307,16 @@ final class SpeedController {
         var lastFailure: SpeedProbe.Failure?
 
         for candidate in SpeedPlan.downloadSources {
+            // Le repli sur la source suivante repasse ici après un `continue` :
+            // sans ce garde, une mesure abandonnée pouvait republier « sondage »
+            // par-dessus la mesure qui l'a remplacée.
+            guard owns(id), Task.isCancelled == false else { return }
+
             // 1. La latence, sur une ligne encore au repos. Voir l'en-tête pour
             //    ce que la mesurer sous charge donnerait à la place.
             publish(.sounding)
             let latency = await SpeedProbe.latency(from: candidate, userAgent: userAgent)
-            guard Task.isCancelled == false else { return settle(.idle) }
+            guard owns(id), Task.isCancelled == false else { return }
 
             // 2. La descente, depuis la même source.
             publish(.downloading)
@@ -326,7 +354,7 @@ final class SpeedController {
             }
         }
 
-        guard Task.isCancelled == false else { return settle(.idle) }
+        guard owns(id), Task.isCancelled == false else { return }
 
         // Une descente perdue est fatale : c'est le chiffre qu'on est venu
         // chercher, et enchaîner sur la montée ferait attendre quatre secondes
@@ -359,6 +387,17 @@ final class SpeedController {
             // mégaoctet, et une médiane y choisit un multiple au lieu de mesurer.
             fresh.upload = tally.plateauMean
             fresh.spentBytes += tally.totalBytes
+            // **Un transfert réussi qui ne rend aucun chiffre doit le dire.**
+            // `plateauMean` est `nil` quand le transfert s'est arrêté avant le
+            // plancher de 2,25 s — il ne reste alors pas assez de tranches
+            // closes après la rampe. Aucune erreur n'a eu lieu, donc aucun
+            // `uploadMiss` n'était posé, et le panneau affichait « ↑ — » muet
+            // après avoir dépensé des dizaines de mégaoctets. Le corps streamé
+            // rend ce cas très rare ; il reste possible si le serveur coupe.
+            if tally.plateauMean == nil {
+                fresh.uploadMiss = .unreachable
+                FeatureLog.record("débit — montée trop courte pour conclure")
+            }
         } catch {
             follower.cancel()
             fresh.spentBytes += counter.snapshot.totalBytes
@@ -373,7 +412,7 @@ final class SpeedController {
             FeatureLog.record("débit — montée échouée")
         }
 
-        guard Task.isCancelled == false else { return settle(.idle) }
+        guard owns(id), Task.isCancelled == false else { return }
 
         fresh.measuredAt = .now
         commit(fresh)

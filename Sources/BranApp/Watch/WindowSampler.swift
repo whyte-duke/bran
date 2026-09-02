@@ -323,6 +323,7 @@ actor WindowSampler {
         let token = generation
 
         let windows = listedWindows()
+        evictWindowsThatAreGone(keeping: Set(windows.map { $0.identity.key }))
         let chosen = plan.cadence.selection(
             windows.map { candidate($0, uptime: uptime) },
             tick: tick
@@ -337,6 +338,13 @@ actor WindowSampler {
 
             for index in chosen {
                 guard SuspendingClock.now < deadline else { break }
+                // **L'annulation est lue à chaque tour, et c'est la moitié du
+                // disjoncteur.** `SCScreenshotManager.captureImage` n'a aucun
+                // délai d'expiration et peut se figer pour toujours : quand le
+                // contrôleur renonce à un prélèvement au bout de trente
+                // secondes, il annule cette tâche. La capture déjà partie, elle,
+                // ne s'arrête pas — mais les cinq suivantes du même tic, si.
+                guard Task.isCancelled == false else { break }
                 // Une fenêtre que ScreenCaptureKit ne connaît pas est une
                 // fenêtre qui vient de se fermer entre l'énumération et ici.
                 // Elle n'est pas mesurée ce tic, et rien d'autre n'en découle :
@@ -366,6 +374,29 @@ actor WindowSampler {
                 isFresh: entry.lastCapturedTick == tick
             )
         }
+    }
+
+    /// Retire les moyennes des identités que l'énumération ne rend plus.
+    ///
+    /// **Sans ça, `tracked` ne rétrécissait jamais.** La seule purge était le
+    /// `removeAll()` de `forget()`, c'est-à-dire un réveil ou un changement de
+    /// réglages : sur un Mac qui reste allumé, la table n'était donc jamais
+    /// vidée. Or la clé de voie contient le **titre** de la fenêtre — un onglet
+    /// de navigateur, un nom de fichier ouvert — et un titre qui change fabrique
+    /// une identité neuve à chaque fois. Chaque identité morte retient son
+    /// tableau de moyennes de blocs : 240 `Double` pour une fenêtre 3:2 en
+    /// vignette 320 px, soit un peu moins de 2 Ko avec la clé et l'entrée de
+    /// dictionnaire. Mille onglets consultés dans la semaine faisaient donc
+    /// deux mégaoctets que plus rien ne lisait — `sample` ne rend que les
+    /// fenêtres listées, ces entrées n'avaient plus aucun consommateur.
+    ///
+    /// L'ensemble de référence vient de `listedWindows()`, qui part de
+    /// `WindowList.all()` : **une fenêtre minimisée reste donc gardée**. C'est
+    /// voulu — elle reste une voie visible, à l'état inconnu — et c'est la seule
+    /// raison pour laquelle le filtre ne peut pas se baser sur `isOnScreen`.
+    private func evictWindowsThatAreGone(keeping alive: Set<String>) {
+        guard tracked.count > alive.count else { return }
+        tracked = tracked.filter { alive.contains($0.key) }
     }
 
     /// Oublie tout. Appelé au réveil : comparer une vignette d'hier soir à celle
