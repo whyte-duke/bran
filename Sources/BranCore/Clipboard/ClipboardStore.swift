@@ -46,6 +46,17 @@ public struct ClipboardBlobPayload: Sendable, Equatable {
     }
 }
 
+/// Ce nom-là ne désigne pas un fichier de la bibliothèque, et on ne l'écrira pas.
+///
+/// Levé par les deux seules écritures qui composent un nom de contenu — poser
+/// les blobs d'une nouvelle entrée, recopier ceux d'une entrée épinglée. Les
+/// deux appelants savent déjà quoi en faire : ils rendent l'entrée sans ses
+/// contenus, ou refusent l'épinglage, en écrivant le message dans le bandeau.
+struct BlobNameRefused: LocalizedError {
+    let name: String
+    var errorDescription: String? { "nom de contenu refusé (\(name))" }
+}
+
 // MARK: - Le magasin
 
 /// L'historique du presse-papiers sur le disque : un dossier par jour, un
@@ -353,12 +364,13 @@ public final class ClipboardStore {
     /// l'épinglage achète.
     public func blobURL(for ref: ClipboardBlobRef, of entry: ClipboardEntry) -> URL? {
         guard entry.blobsArePurged == false else { return nil }
+        guard let name = Self.containedBlobName(ref) else { return nil }
         if entry.isPinned {
-            return pinnedBlobsFolder.appending(path: ref.fileName)
+            return pinnedBlobsFolder.appending(path: name)
         }
         return dayFolder(entry.dayFolderName())
             .appending(path: Self.blobsFolderName, directoryHint: .isDirectory)
-            .appending(path: ref.fileName)
+            .appending(path: name)
     }
 
     /// Change la politique et applique tout de suite ce qu'elle rend caduc :
@@ -822,8 +834,12 @@ public final class ClipboardStore {
     nonisolated static func allBlobsExist(_ refs: [ClipboardBlobRef], in folder: URL) async -> Bool {
         let manager = FileManager.default
         return refs.allSatisfy { reference in
-            manager.fileExists(
-                atPath: folder.appending(path: reference.fileName).path(percentEncoded: false)
+            // Un nom que nous n'aurions pas pu écrire compte comme absent : la
+            // question posée ici est « l'entrée peut-elle encore promettre ce
+            // contenu ? », et un chemin qui sort du dossier ne se promet pas.
+            guard let name = containedBlobName(reference) else { return false }
+            return manager.fileExists(
+                atPath: folder.appending(path: name).path(percentEncoded: false)
             )
         }
     }
@@ -1411,7 +1427,8 @@ public final class ClipboardStore {
         var refs: [ClipboardBlobRef] = []
         for payload in payloads {
             let ref = payload.ref
-            let url = blobs.appending(path: ref.fileName)
+            guard let name = containedBlobName(ref) else { throw BlobNameRefused(name: ref.fileName) }
+            let url = blobs.appending(path: name)
             if manager.fileExists(atPath: url.path(percentEncoded: false)) == false {
                 try payload.data.write(to: url, options: .atomic)
             }
@@ -1450,10 +1467,15 @@ public final class ClipboardStore {
         let source = dayFolder.appending(path: blobsFolderName, directoryHint: .isDirectory)
 
         for ref in refs {
-            let destination = pinnedBlobs.appending(path: ref.fileName)
+            // Le refus est ici **avant** la lecture, et c'est le point : sans
+            // lui, `source.appending(path:)` composait un nom venu du JSON et
+            // recopiait dans la bibliothèque un fichier pris n'importe où sur le
+            // disque. Épingler est un geste qui écrit ; il refuse en entier.
+            guard let name = containedBlobName(ref) else { throw BlobNameRefused(name: ref.fileName) }
+            let destination = pinnedBlobs.appending(path: name)
             guard manager.fileExists(atPath: destination.path(percentEncoded: false)) == false
             else { continue }
-            let data = try Data(contentsOf: source.appending(path: ref.fileName))
+            let data = try Data(contentsOf: source.appending(path: name))
             try data.write(to: destination, options: .atomic)
         }
     }
@@ -1641,7 +1663,43 @@ public final class ClipboardStore {
         guard parts.count <= 2, parts.count == 1 || parts[1].isEmpty == false else { return false }
         let hash = parts[0]
         guard hash.count == 64 else { return false }
-        return hash.allSatisfy(\.isHexDigit) && hash.allSatisfy { $0.isUppercase == false }
+        guard hash.allSatisfy({ $0.isASCII && $0.isHexDigit && $0.isUppercase == false })
+        else { return false }
+        // L'extension vient de `ClipboardCapture.blobExtensions`, une table
+        // fermée de sept noms courts et minuscules. L'exiger ici est ce qui
+        // interdit à la seconde moitié du nom de porter un chemin : `hash` peut
+        // être irréprochable et `ext` valoir `png/../../secret.png`.
+        guard parts.count == 2 else { return true }
+        return parts[1].count <= 8
+            && parts[1].allSatisfy { $0.isASCII && ($0.isLowercase || $0.isNumber) }
+    }
+
+    /// Le nom de fichier de cette référence, **s'il ne peut désigner qu'un
+    /// enfant direct du dossier des contenus lourds**. `nil` sinon.
+    ///
+    /// C'est la même question que `isSelfWritten`, posée à l'autre bout du même
+    /// problème — et c'est bien le même prédicat, pas une seconde règle qui
+    /// finirait par diverger. Le ramassage s'en servait pour décider quoi
+    /// **supprimer** parmi les fichiers énumérés ; personne ne le posait sur le
+    /// chemin inverse, celui qui prend un champ JSON et en fabrique une URL.
+    ///
+    /// La panne, exactement : un sidecar posé dans `Clipboard/<jour>/` contenant
+    /// `"blobs":[{"hash":"../../../secret","ext":"png","bytes":1}]` décode sans
+    /// broncher — `hash` est une `String`, pas une empreinte —, et
+    /// `blobs/.appending(path:)` rendait alors `…/blobs/../../../secret.png`,
+    /// que le noyau résout hors de la bibliothèque à l'ouverture. Un clic sur
+    /// « copier » chargeait le fichier visé dans le presse-papiers ; l'épinglage
+    /// le lisait et le récrivait ailleurs.
+    ///
+    /// **Rendre `nil` plutôt que lancer**, parce que les appelants du chemin de
+    /// lecture savent déjà dire « il n'y a plus rien à ouvrir » : c'est ce que
+    /// `blobURL` répond pour une entrée purgée, et le bouton se désactive avec
+    /// sa raison au lieu d'échouer au clic. Une référence que nous n'avons pas
+    /// pu écrire est indisponible, pas fatale — l'entrée reste lisible, avec son
+    /// type et sa taille, comme une entrée dont le contenu a été purgé.
+    nonisolated static func containedBlobName(_ ref: ClipboardBlobRef) -> String? {
+        let name = ref.fileName
+        return isSelfWritten(name) ? name : nil
     }
 
     /// Le total des octets occupés par les `blobs/`, tous jours confondus.

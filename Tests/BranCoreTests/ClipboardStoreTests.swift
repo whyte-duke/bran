@@ -1128,4 +1128,108 @@ struct ClipboardStoreTests {
         #expect(store.pinnedBlobBytes == taille)
         #expect(store.blobBytes == taille)
     }
+
+    // MARK: - Un sidecar hostile
+
+    /// **`hash` est un champ JSON, pas une empreinte.** Rien n'oblige un fichier
+    /// posé dans la bibliothèque à contenir les 64 chiffres que le magasin
+    /// écrit ; `blobURL` composait ce champ dans le dossier du jour sans le
+    /// relire, et `../../../secret` en sortait — le panneau lisait alors un
+    /// fichier personnel et le mettait dans le presse-papiers.
+    ///
+    /// Le fichier visé est écrit **hors** de la bibliothèque, exactement là où
+    /// le nom hostile pointe. Le test vérifie d'abord que l'entrée a bien été
+    /// relue : sans cette vérification, un sidecar mal encodé ferait passer le
+    /// test sur une liste vide.
+    @Test("Un contenu dont le nom sort de la bibliothèque ne se résout pas")
+    func nomDeContenuQuiSortDeLaBibliotheque() async throws {
+        let root = try makeRoot()
+        let victime = root.appending(path: "secret.png")
+        try Data("mot de passe".utf8).write(to: victime)
+
+        let hostile = ClipboardEntry(
+            copiedAt: Self.noon,
+            kind: .image,
+            text: "image",
+            blobs: [ClipboardBlobRef(hash: "../../../secret", ext: "png", bytes: 12)]
+        )
+        try await ClipboardStore.writeSidecar(hostile, in: dossierDuJour(root, Self.noon))
+
+        let store = makeStore(at: root)
+        await store.load()
+
+        // D'abord : le scénario a bien été chargé. Un test qui échoue à relire
+        // son entrée vérifierait la sûreté d'une liste vide.
+        let relue = try #require(store.recent.first { $0.id == hostile.id })
+        let reference = try #require(relue.blobs?.first)
+        #expect(reference.hash == "../../../secret")
+
+        #expect(store.blobURL(for: reference, of: relue) == nil)
+        #expect(FileManager.default.fileExists(atPath: victime.path(percentEncoded: false)))
+    }
+
+    /// Un nom peut aussi sortir par son extension : `fileName` colle `hash`,
+    /// un point et `ext`, et c'est la seconde moitié qui portait le chemin.
+    @Test("Une extension qui porte un chemin ne se résout pas non plus")
+    func extensionQuiPorteUnChemin() async throws {
+        let root = try makeRoot()
+        let empreinte = String(repeating: "a1", count: 32)
+        let hostile = ClipboardEntry(
+            copiedAt: Self.noon,
+            kind: .image,
+            text: "image",
+            blobs: [ClipboardBlobRef(hash: empreinte, ext: "png/../../../secret.png", bytes: 12)]
+        )
+        try await ClipboardStore.writeSidecar(hostile, in: dossierDuJour(root, Self.noon))
+
+        let store = makeStore(at: root)
+        await store.load()
+        let relue = try #require(store.recent.first { $0.id == hostile.id })
+        let reference = try #require(relue.blobs?.first)
+
+        #expect(store.blobURL(for: reference, of: relue) == nil)
+    }
+
+    /// L'autre moitié : le refus ne doit pas emporter les noms légitimes.
+    @Test("Un contenu écrit par le magasin se résout toujours")
+    func nomDeContenuLegitimeSeResout() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+
+        let entree = await store.save(text("image"), payloads: [payload("des octets")])
+        let reference = try #require(entree.blobs?.first)
+        let url = try #require(store.blobURL(for: reference, of: entree))
+        #expect(FileManager.default.fileExists(atPath: url.path(percentEncoded: false)))
+    }
+
+    /// L'épinglage est l'autre bout du même champ : il **lit** le fichier visé
+    /// et le **récrit** ailleurs. Un nom qui sort du dossier doit faire échouer
+    /// l'épinglage, pas recopier un fichier personnel dans la bibliothèque.
+    @Test("Épingler refuse un contenu dont le nom sort de la bibliothèque")
+    func epinglerRefuseUnNomQuiSort() async throws {
+        let root = try makeRoot()
+        let victime = root.appending(path: "secret.png")
+        try Data("mot de passe".utf8).write(to: victime)
+
+        let hostile = ClipboardEntry(
+            copiedAt: Self.noon,
+            kind: .image,
+            text: "image",
+            blobs: [ClipboardBlobRef(hash: "../../../secret", ext: "png", bytes: 12)]
+        )
+        try await ClipboardStore.writeSidecar(hostile, in: dossierDuJour(root, Self.noon))
+
+        let store = makeStore(at: root)
+        await store.load()
+        let relue = try #require(store.recent.first { $0.id == hostile.id })
+
+        #expect(await store.pin(relue, at: Self.noon) == nil)
+        #expect(names(in: store.pinnedBlobsFolder).isEmpty)
+    }
+
+    private func dossierDuJour(_ root: URL, _ date: Date) -> URL {
+        root
+            .appending(path: ClipboardStore.folderName, directoryHint: .isDirectory)
+            .appending(path: dayKey(date), directoryHint: .isDirectory)
+    }
 }
