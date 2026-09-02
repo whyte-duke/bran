@@ -16,6 +16,13 @@ public final class AppModel {
     /// n'apporte rien, une réunion ne commence pas à la seconde près.
     private static let pollInterval = Duration.seconds(5)
 
+    /// À quelle fréquence redemander à TCC si l'écran est lisible. Une minute :
+    /// voir `screenTitlesAreReadable`, où le chiffre est justifié par une mesure
+    /// qui contredit l'intuition.
+    private static let screenProbeInterval = Duration.seconds(60)
+    private var screenProbedAt: SuspendingClock.Instant?
+    private var screenIsGranted = true
+
     public let permissions = PermissionsService()
     public let engine: RecordingEngine
     let store = RecordingStore()
@@ -847,7 +854,7 @@ public final class AppModel {
             startManualRecording()
             return
         }
-        Task { await begin(meeting) }
+        enqueueIntent { [weak self] in await self?.begin(meeting) }
     }
 
     /// Enregistrement sans réunion détectée — bran comme simple enregistreur
@@ -861,11 +868,41 @@ public final class AppModel {
             calendarEventID: nil,
             attendees: []
         )
-        Task { await begin(meeting) }
+        enqueueIntent { [weak self] in await self?.begin(meeting) }
+    }
+
+    /// **Les gestes d'enregistrement se suivent, ils ne se croisent pas.**
+    ///
+    /// Chaque clic créait sa propre tâche, et les deux lisaient l'état
+    /// *avant* le premier `await`. Pause puis Arrêter, coup sur coup : les deux
+    /// tâches voyaient `.recording`, les deux fermaient le même `SCStream` —
+    /// dont la fermeture dure des minutes, voir `CaptureSession` — et si
+    /// l'arrêt aboutissait le premier, la pause revenait ensuite remettre en
+    /// `.paused` une réunion déjà conclue. Une double reprise pouvait de même
+    /// ouvrir deux segments concurrents.
+    ///
+    /// La file rend la question sans objet : le second geste ne lit `isPaused`
+    /// et `isRecording` qu'une fois le premier terminé, donc il voit l'état
+    /// réel et non l'état d'il y a trois minutes. `await previous?.value`
+    /// n'attend jamais une tâche annulée ou en échec — ces tâches ne lèvent
+    /// pas — et une file vide ne coûte rien.
+    ///
+    /// Ce que ça ne corrige pas : `RecordingEngine` reste sans états
+    /// transitoires, donc un appelant futur qui n'emprunterait pas cette file
+    /// retrouverait la course. La décision appartient à `BranCore`.
+    private var intents: Task<Void, Never>?
+
+    private func enqueueIntent(_ work: @escaping @MainActor () async -> Void) {
+        let previous = intents
+        intents = Task { @MainActor in
+            await previous?.value
+            await work()
+        }
     }
 
     public func togglePause() {
-        Task {
+        enqueueIntent { [weak self] in
+            guard let self else { return }
             if isPaused {
                 await engine.resume()
                 if let pausedAt { accumulatedPause += Date.now.timeIntervalSince(pausedAt) }
@@ -890,7 +927,14 @@ public final class AppModel {
     /// et un clic de trop sur « arrêter » ne doit pas réveiller la machine.
     public func stopRecording() {
         guard engine.state.meeting != nil else { return }
-        Task { await engine.handle(.stop) }
+        // Même file que la pause : voir `enqueueIntent`. Le garde ci-dessus
+        // reste lu tout de suite — il ne sert qu'à ne pas réveiller la machine
+        // sur un clic de trop — et il est redoublé dans la file, parce que la
+        // session a pu se conclure pendant l'attente.
+        enqueueIntent { [weak self] in
+            guard let self, engine.state.meeting != nil else { return }
+            await engine.handle(.stop)
+        }
     }
 
     /// Referme la session **une fois que la machine a tranché**.
@@ -1191,7 +1235,40 @@ public final class AppModel {
         }
     }
 
+    /// **Sans autorisation d'écran, il n'y a aucun titre à lire — donc rien à
+    /// détecter, et rien à énumérer.**
+    ///
+    /// `kCGWindowName` n'est renseigné qu'avec l'autorisation Enregistrement de
+    /// l'écran : sans elle, `WindowTitleDetector` parcourait douze fois par
+    /// minute toutes les fenêtres du système pour n'en tirer strictement rien.
+    /// Quelqu'un qui refuse l'autorisation et garde bran pour la dictée payait
+    /// cette énumération pendant toute sa session.
+    ///
+    /// **Le verdict est mis en cache, et c'est la mesure qui l'impose.**
+    /// `CGPreflightScreenCaptureAccess()` coûte **5,44 ms** sur ce Mac, contre
+    /// **1,04 ms** pour l'énumération complète des fenêtres — cinq fois plus
+    /// cher que ce qu'il sert à éviter. L'interroger à chaque tic aurait donc
+    /// *aggravé* le défaut au lieu de le corriger. Une fois par minute, il ne
+    /// coûte plus rien et laisse au plus soixante secondes entre la case cochée
+    /// dans les Réglages système et la reprise de la détection — sans
+    /// redémarrage.
+    ///
+    /// `ScreenAccess.verdict` n'est délibérément pas utilisé ici : sa seconde
+    /// sonde est précisément l'énumération qu'on cherche à ne pas faire, et son
+    /// cas `.unconfirmed` — autorisation cochée, aucune fenêtre témoin — doit
+    /// laisser passer. Ne bloquer que ce qui est certain.
+    private func screenTitlesAreReadable() -> Bool {
+        let now = SuspendingClock.now
+        if let probed = screenProbedAt, probed.duration(to: now) < Self.screenProbeInterval {
+            return screenIsGranted
+        }
+        screenProbedAt = now
+        screenIsGranted = ScreenAccess.isDeclaredGranted
+        return screenIsGranted
+    }
+
     private func tick() async {
+        guard screenTitlesAreReadable() else { return }
         let signals = detector.currentSignals()
         let intent = resolver.resolve(windows: signals, at: .now)
 
