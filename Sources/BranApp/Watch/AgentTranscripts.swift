@@ -48,77 +48,65 @@ enum AgentTranscripts {
         // attente à départager. La liste est donc calculée à la première
         // question posée, et pas avant.
         var live: Set<String>?
-        let root = URL.homeDirectory.appending(path: ".claude/projects")
-        let manager = FileManager.default
-        guard let projects = try? manager.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: nil
-        ) else { return [] }
-
         let cutoff = now.addingTimeInterval(-liveness)
         var byLane: [String: LaneObservation] = [:]
         var visited: Set<String> = []
 
-        for project in projects {
-            guard let files = try? manager.contentsOfDirectory(
-                at: project, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
-            ) else { continue }
+        for file in candidates(now: now, cutoff: cutoff) {
+            // Les deux champs sont demandés d'un coup : ils viennent du même
+            // `stat`, et la taille sert à dater le mémo aussi finement que
+            // la date de modification — voir `Version`.
+            let values = try? file.resourceValues(forKeys: [
+                .contentModificationDateKey, .fileSizeKey,
+            ])
+            let modified = values?.contentModificationDate ?? .distantPast
+            guard modified > cutoff else { continue }
 
-            for file in files where file.pathExtension == "jsonl" {
-                // Les deux champs sont demandés d'un coup : ils viennent du même
-                // `stat`, et la taille sert à dater le mémo aussi finement que
-                // la date de modification — voir `Version`.
-                let values = try? file.resourceValues(forKeys: [
-                    .contentModificationDateKey, .fileSizeKey,
-                ])
-                let modified = values?.contentModificationDate ?? .distantPast
-                guard modified > cutoff else { continue }
+            // Pas de taille, pas de mémo : la date seule ne suffit pas à
+            // dater une transcription écrite en rafale, et une lecture de
+            // trop vaut mieux qu'un verdict figé sur un fichier qui a
+            // changé.
+            let version = values?.fileSize.map { Version(modified: modified, size: $0) }
+            visited.insert(file.path)
+            guard let reading = read(file, version: version) else { continue }
 
-                // Pas de taille, pas de mémo : la date seule ne suffit pas à
-                // dater une transcription écrite en rafale, et une lecture de
-                // trop vaut mieux qu'un verdict figé sur un fichier qui a
-                // changé.
-                let version = values?.fileSize.map { Version(modified: modified, size: $0) }
-                visited.insert(file.path)
-                guard let reading = read(file, version: version) else { continue }
-
-                let gated: TranscriptVerdict.Reading
-                if reading.state == .waiting {
-                    let running = live ?? RunningAgents.workingDirectories()
-                    live = running
-                    gated = TranscriptVerdict.gated(reading, liveWorkingDirectories: running)
-                } else {
-                    gated = reading
-                }
-                guard let directory = gated.workingDirectory else { continue }
-
-                let identity = LaneIdentity.claudeCode(
-                    sessionID: gated.sessionID ?? "",
-                    workingDirectory: directory,
-                    branch: gated.branch ?? ""
-                )
-
-                // Plusieurs transcriptions par dossier, c'est la norme : chaque
-                // `--resume` en ouvre une, et deux fenêtres peuvent travailler
-                // sur le même dépôt. La clé de voie étant le dossier, il faut
-                // en élire une.
-                //
-                // **Ce n'était pas une élection, c'était un écrasement.** Le
-                // commentaire d'origine affirmait garder « la plus avancée »
-                // parce que les fichiers sont parcourus « dans l'ordre du
-                // système de fichiers » — mais `contentsOfDirectory` ne promet
-                // aucun ordre, et surtout pas celui des dates de modification.
-                // La gagnante était donc tirée au sort à chaque tic : une
-                // session qui travaille et une session qui attend dans le même
-                // dossier faisaient basculer l'état de la voie d'un tic à
-                // l'autre, avec l'alerte et le panneau qui vont avec.
-                //
-                // La règle est maintenant écrite, et elle répond à la question
-                // que l'utilisateur se pose vraiment — « ce dossier a-t-il
-                // besoin de moi » : si **quelque chose y tourne**, la voie
-                // travaille ; sinon c'est l'attente la plus récente qui parle.
-                let candidate = observation(for: gated, identity: identity, now: now)
-                byLane[identity.key] = elect(candidate, over: byLane[identity.key])
+            let gated: TranscriptVerdict.Reading
+            if reading.state == .waiting {
+                let running = live ?? RunningAgents.workingDirectories()
+                live = running
+                gated = TranscriptVerdict.gated(reading, liveWorkingDirectories: running)
+            } else {
+                gated = reading
             }
+            guard let directory = gated.workingDirectory else { continue }
+
+            let identity = LaneIdentity.claudeCode(
+                sessionID: gated.sessionID ?? "",
+                workingDirectory: directory,
+                branch: gated.branch ?? ""
+            )
+
+            // Plusieurs transcriptions par dossier, c'est la norme : chaque
+            // `--resume` en ouvre une, et deux fenêtres peuvent travailler
+            // sur le même dépôt. La clé de voie étant le dossier, il faut
+            // en élire une.
+            //
+            // **Ce n'était pas une élection, c'était un écrasement.** Le
+            // commentaire d'origine affirmait garder « la plus avancée »
+            // parce que les fichiers sont parcourus « dans l'ordre du
+            // système de fichiers » — mais `contentsOfDirectory` ne promet
+            // aucun ordre, et surtout pas celui des dates de modification.
+            // La gagnante était donc tirée au sort à chaque tic : une
+            // session qui travaille et une session qui attend dans le même
+            // dossier faisaient basculer l'état de la voie d'un tic à
+            // l'autre, avec l'alerte et le panneau qui vont avec.
+            //
+            // La règle est maintenant écrite, et elle répond à la question
+            // que l'utilisateur se pose vraiment — « ce dossier a-t-il
+            // besoin de moi » : si **quelque chose y tourne**, la voie
+            // travaille ; sinon c'est l'attente la plus récente qui parle.
+            let candidate = observation(for: gated, identity: identity, now: now)
+            byLane[identity.key] = elect(candidate, over: byLane[identity.key])
         }
 
         // Le mémo ne garde que les fichiers encore vivants. Ceux qui sont
@@ -130,6 +118,86 @@ enum AgentTranscripts {
         }
 
         return Array(byLane.values)
+    }
+
+    // MARK: - Quels fichiers regarder, et à quelle cadence
+
+    /// Toutes les trente secondes, on rebalaye les dossiers. Entre deux, on ne
+    /// regarde que les fichiers qui étaient récents au dernier balayage.
+    ///
+    /// **Mesuré sur cette machine** (`~/.claude/projects`, 22 dossiers,
+    /// 51 transcriptions, cache chaud) : le balayage complet coûte **1,19 ms**,
+    /// la relecture des seuls candidats **0,01 ms**, soit **1 %**. À quatre
+    /// secondes de tic, le veilleur faisait 765 `stat` par minute et 25,8 s
+    /// d'accès disque par jour pour un dossier où huit fichiers seulement
+    /// datent de moins de six heures.
+    ///
+    /// Et ce coût **grandit avec l'historique, pas avec l'activité** : le
+    /// dossier ne se vide jamais tout seul, si bien qu'après deux ans il
+    /// contiendrait des milliers d'entrées à énumérer quinze fois par minute
+    /// pour n'en retenir qu'une poignée. C'est exactement le mauvais sens.
+    private static let rescanInterval: TimeInterval = 30
+
+    /// **Trente secondes, et le chiffre est contraint par le produit.** Une
+    /// session d'agent créée maintenant n'entre dans la liste qu'au prochain
+    /// balayage. Le seuil le plus court du résolveur — « la voie attend » —
+    /// vaut trois minutes par défaut : un retard de découverte de trente
+    /// secondes reste six fois sous ce seuil, donc invisible dans l'alerte. Le
+    /// pousser à trois minutes, lui, ferait rater le début d'une attente.
+    private struct Index {
+        var scannedAt: Date
+        /// Les transcriptions qui étaient sous le seuil de vivacité au dernier
+        /// balayage. Bornée par l'activité des six dernières heures, pas par
+        /// la taille de l'historique.
+        var recent: [URL]
+    }
+
+    private static let index = Mutex<Index?>(nil)
+
+    /// Les fichiers à interroger ce tic.
+    ///
+    /// Un fichier qui vieillit au-delà du seuil pendant l'intervalle reste dans
+    /// la liste jusqu'au balayage suivant : ce n'est pas un défaut, l'appelant
+    /// revérifie sa date et l'écarte. L'inverse — l'oublier trop tôt — ferait
+    /// disparaître une voie encore vivante.
+    private static func candidates(now: Date, cutoff: Date) -> [URL] {
+        if let known = index.withLock({ $0 }),
+           now.timeIntervalSince(known.scannedAt) < rescanInterval,
+           now >= known.scannedAt {
+            return known.recent
+        }
+
+        let root = URL.homeDirectory.appending(path: ".claude/projects")
+        let manager = FileManager.default
+        guard let projects = try? manager.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil
+        ) else {
+            index.withLock { $0 = Index(scannedAt: now, recent: []) }
+            return []
+        }
+
+        var recent: [URL] = []
+        for project in projects {
+            guard let files = try? manager.contentsOfDirectory(
+                at: project, includingPropertiesForKeys: [.contentModificationDateKey]
+            ) else { continue }
+
+            for file in files where file.pathExtension == "jsonl" {
+                let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                if modified > cutoff { recent.append(file) }
+            }
+        }
+
+        index.withLock { $0 = Index(scannedAt: now, recent: recent) }
+        return recent
+    }
+
+    /// Force un balayage au prochain appel. Le veilleur s'en sert au réveil :
+    /// une nuit de veille a pu voir naître et mourir des sessions, et la liste
+    /// d'hier soir ne décrit plus rien.
+    static func forgetIndex() {
+        index.withLock { $0 = nil }
     }
 
     /// Départage deux transcriptions du même dossier. **Déterministe**, et

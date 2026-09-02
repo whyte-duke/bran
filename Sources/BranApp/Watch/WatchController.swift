@@ -104,6 +104,15 @@ final class WatchController {
     /// Depuis quand un prélèvement est en cours. Sert de garde-fou : voir
     /// `requestSample`.
     private var samplingSince: Duration?
+    /// La tâche du prélèvement en cours, **retenue pour pouvoir l'annuler**.
+    /// Voir `requestSample` : ne pas la retenir était le défaut.
+    private var sampleTask: Task<Void, Never>?
+    /// Combien de prélèvements ont dépassé leur échéance sans jamais revenir.
+    /// Redescend quand l'un d'eux se dénoue. Voir `requestSample`.
+    private var abandonedSamples = 0
+    /// Au-delà, on cesse de prélever. Deux, et le choix est justifié dans
+    /// `requestSample`.
+    private static let maximumAbandonedSamples = 2
     /// Jeton de génération, patron de `SnapshotController.currentToken` : un
     /// prélèvement lancé avant un réveil n'a plus le droit de publier.
     private var generation = UUID()
@@ -136,6 +145,15 @@ final class WatchController {
         guard enabled else {
             loop?.cancel()
             loop = nil
+            // Le prélèvement en vol part avec la boucle : éteindre le veilleur
+            // et laisser une capture d'écran courir derrière serait exactement
+            // ce que l'interrupteur promet d'arrêter.
+            sampleTask?.cancel()
+            sampleTask = nil
+            samplingSince = nil
+            isSampling = false
+            abandonedSamples = 0
+            generation = UUID()
             pause = .disabled
             // Les intervalles ouverts se ferment : les laisser courir écrirait
             // demain une attente de douze heures qui n'a jamais eu lieu.
@@ -453,21 +471,57 @@ final class WatchController {
             }
     }
 
-    /// Lance un prélèvement, au plus un à la fois.
+    /// Lance un prélèvement, au plus un à la fois — **et au plus deux oubliés
+    /// vivants en même temps**.
     ///
     /// `SCScreenshotManager.captureImage` n'a **aucun délai d'expiration** et
-    /// peut se figer indéfiniment. Deux garde-fous, tous deux déjà présents
-    /// ailleurs dans le dépôt : l'échéance de `CaptureSignals.waitForFinish` —
-    /// ici, au bout de trente secondes on repart avec un nouveau jeton — et le
-    /// jeton de génération de `SnapshotController`, qui fait qu'un prélèvement
-    /// ressuscité ne publie rien.
+    /// peut se figer indéfiniment. Trois garde-fous : l'échéance de trente
+    /// secondes, le jeton de génération de `SnapshotController` — qui fait qu'un
+    /// prélèvement ressuscité ne publie rien — et le compteur d'abandons
+    /// ci-dessous.
+    ///
+    /// **Ce que le compteur répare.** La version précédente, à l'échéance,
+    /// invalidait le jeton et remettait `samplingSince` à `nil` : elle
+    /// *oubliait* la tâche sans jamais l'arrêter. Le tic suivant en lançait donc
+    /// une autre, et la suivante encore. Si ScreenCaptureKit cesse de répondre —
+    /// `replayd` bloqué, ce qui arrive après un changement d'écran ou une session
+    /// de partage qui tourne mal — bran empilait **une tâche et une requête de
+    /// capture toutes les trente-quatre secondes, sans plafond, jusqu'au
+    /// redémarrage** : 105 tâches bloquées en une heure, 2 500 en une journée,
+    /// chacune tenant sa connexion XPC et son `SCContentFilter`.
+    ///
+    /// Maintenant la tâche est retenue, annulée à l'échéance — ce qui suffit à
+    /// arrêter les captures *suivantes* du même tic, voir `WindowSampler.sample`
+    /// — puis comptée comme abandonnée tant qu'elle n'est pas revenue. Au
+    /// troisième abandon simultané, on cesse de prélever.
+    ///
+    /// **Pourquoi deux et pas zéro.** Un disjoncteur qui s'ouvre au premier
+    /// abandon ne se refermerait jamais si la tâche bloquée ne rend jamais la
+    /// main : les pixels seraient perdus jusqu'au redémarrage pour une panne qui
+    /// dure peut-être trente secondes. Deux abandons laissent passer deux pannes
+    /// transitoires successives ; la troisième est un `replayd` mort, et là il
+    /// n'y a plus rien à espérer d'une quatrième tentative. Le compteur redescend
+    /// tout seul quand une tâche oubliée finit par revenir.
     private func requestSample(uptime: Duration, certainKeys: Set<String>) {
         if let since = samplingSince {
             guard WatchClock.seconds(from: since, to: uptime) > 30 else { return }
             screenProblem = "La capture d'écran ne répond plus : les voies observées à l'image passent à l'état inconnu."
             generation = UUID()
             samplingSince = nil
+            isSampling = false
+            // Annuler d'abord, oublier ensuite : `sampler.forget()` prend le
+            // tour de l'acteur derrière la capture bloquée, il ne débloque rien
+            // par lui-même.
+            sampleTask?.cancel()
+            sampleTask = nil
+            abandonedSamples += 1
+            FeatureLog.record("veille — prélèvement abandonné après 30 s (\(abandonedSamples) en cours)")
             Task { [sampler] in await sampler.forget() }
+            return
+        }
+
+        guard abandonedSamples < Self.maximumAbandonedSamples else {
+            screenProblem = "La capture d'écran ne répond plus depuis plusieurs minutes : bran a cessé d'observer les fenêtres pour ne pas empiler les requêtes. Les sessions d'agent, elles, continuent de l'être."
             return
         }
 
@@ -484,11 +538,17 @@ final class WatchController {
         isSampling = true
         let token = generation
 
-        Task { [weak self, sampler] in
+        sampleTask = Task { [weak self, sampler] in
             let measurements = await sampler.sample(uptime: uptime, plan: plan)
             guard let self else { return }
             await MainActor.run {
-                guard token == self.generation else { return }
+                // Une tâche abandonnée qui finit par revenir referme sa part du
+                // disjoncteur. C'est la seule reprise automatique possible : rien
+                // d'autre ne sait qu'un `captureImage` figé s'est enfin dénoué.
+                guard token == self.generation else {
+                    if self.abandonedSamples > 0 { self.abandonedSamples -= 1 }
+                    return
+                }
                 self.pixels = Dictionary(
                     measurements.map { ($0.identity.key, $0) },
                     uniquingKeysWith: { first, _ in first }
@@ -503,6 +563,7 @@ final class WatchController {
                 self.pixelsAt = self.uptime
                 self.samplingSince = nil
                 self.isSampling = false
+                self.sampleTask = nil
             }
         }
     }
@@ -647,9 +708,19 @@ final class WatchController {
         focus.forget()
         pixels.removeAll()
         pixelsAt = .zero
+        // La liste des transcriptions candidates est datée : après une veille,
+        // elle décrit un état d'il y a huit heures. Voir `AgentTranscripts.candidates`.
+        AgentTranscripts.forgetIndex()
         generation = UUID()
         samplingSince = nil
         isSampling = false
+        // Un réveil ou un changement de réglages annule le prélèvement en cours
+        // au lieu de l'oublier : sans ça, une nuit de veille se traduisait par
+        // une tâche de capture orpheline de plus au matin. Le compteur
+        // d'abandons repart de zéro — c'est un état neuf, pas une panne.
+        sampleTask?.cancel()
+        sampleTask = nil
+        abandonedSamples = 0
         Task { [sampler] in await sampler.forget() }
     }
 }
