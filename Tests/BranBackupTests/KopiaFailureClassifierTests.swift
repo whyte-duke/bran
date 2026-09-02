@@ -379,6 +379,47 @@ struct KopiaFailureClassifierTests {
         #expect(masked.contains("eyJhbGciOiJIUzI1NiJ9.longtoken.value") == false)
     }
 
+    /// **Le jeton à deux mots, qui passait entier.** Le motif de masquage
+    /// s'arrêtait au premier espace : sur `Authorization: Bearer <jeton>`,
+    /// seul le mot `Bearer` était remplacé et le jeton continuait sa route
+    /// dans `rawOutput`, dans le journal, et dans le presse-papiers du bouton
+    /// « copier le diagnostic ».
+    @Test("Un jeton Bearer, qui vient après un espace, est masqué lui aussi")
+    func bearerTokenAfterASpaceIsMasked() {
+        let raw = "PUT failed: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.charge.utile"
+        let masked = KopiaFailureClassifier.maskSecrets(in: raw)
+        #expect(masked.contains("eyJhbGciOiJIUzI1NiJ9.charge.utile") == false)
+        #expect(masked.contains("Bearer") == false)
+        // Le nom de l'en-tête reste lisible : c'est lui qui dit de quelle
+        // requête on parle.
+        #expect(masked.contains("Authorization"))
+    }
+
+    /// La même fuite, dans sa forme S3 : une signature AWS SigV4 est faite de
+    /// quatre composants séparés par des espaces et des virgules. Le motif
+    /// étroit n'en masquait que le nom de l'algorithme.
+    @Test("Une signature AWS à plusieurs composants est masquée en entier")
+    func awsSignatureIsFullyMasked() {
+        let raw = "Authorization=AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260902/us-east-1/s3/aws4_request, "
+            + "SignedHeaders=host;x-amz-date, Signature=b4f2c1d0e9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2"
+        let masked = KopiaFailureClassifier.maskSecrets(in: raw)
+        #expect(masked.contains("b4f2c1d0e9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2") == false)
+        #expect(masked.contains("SignedHeaders") == false)
+        #expect(masked.contains("AWS4-HMAC-SHA256") == false)
+    }
+
+    /// La contrepartie assumée : le masquage s'arrête à la fin de ligne, il
+    /// n'avale pas le reste du diagnostic. C'est cette borne qui rend le
+    /// compromis acceptable — un stderr de kopia fait des dizaines de lignes,
+    /// une seule est sacrifiée.
+    @Test("Le masquage d'un en-tête Authorization s'arrête à la fin de sa ligne")
+    func authorizationMaskingStopsAtEndOfLine() {
+        let raw = "Authorization: Bearer secretvaluehere\nerror: AccessDenied status code: 403"
+        let masked = KopiaFailureClassifier.maskSecrets(in: raw)
+        #expect(masked.contains("secretvaluehere") == false)
+        #expect(masked.contains("AccessDenied status code: 403"))
+    }
+
     @Test("Le mot « password » employé seul dans une phrase, sans valeur derrière, n'est pas mutilé")
     func bareWordPasswordSurvives() {
         // C'est le texte réel du dépôt : si le masquage était trop large, ce

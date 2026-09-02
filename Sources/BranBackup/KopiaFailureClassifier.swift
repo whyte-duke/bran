@@ -135,33 +135,71 @@ public enum KopiaFailureClassifier {
     /// diagnostic ») : c'est ici, une fois, qu'on ferme la fuite plutôt que
     /// de compter sur l'outil externe.
     ///
-    /// Volontairement étroit : seul le jeton qui suit *immédiatement* le nom
-    /// et un séparateur (`:` ou `=`) est masqué. Un mot comme « password »
-    /// employé seul dans une phrase — `invalid repository password` — n'a pas
-    /// de séparateur derrière lui et traverse intact, ce qui est le
-    /// diagnostic qu'on veut garder lisible.
+    /// Volontairement étroit pour les valeurs JSON et les variables
+    /// d'environnement : seul le jeton qui suit *immédiatement* le nom et un
+    /// séparateur (`:` ou `=`) est masqué. Un mot comme « password » employé
+    /// seul dans une phrase — `invalid repository password` — n'a pas de
+    /// séparateur derrière lui et traverse intact, ce qui est le diagnostic
+    /// qu'on veut garder lisible.
+    ///
+    /// **`Authorization` fait exception, et c'est un défaut qui a fui.** Le
+    /// motif étroit s'arrête au premier espace, or la valeur d'un en-tête
+    /// `Authorization` en contient presque toujours un :
+    ///
+    ///     Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.charge.utile
+    ///       → seul « Bearer » était remplacé, le jeton continuait dans
+    ///         `rawOutput`, dans le journal, et dans le bouton
+    ///         « copier le diagnostic ».
+    ///
+    ///     Authorization: AWS4-HMAC-SHA256 Credential=AKIA…/20260902/…,
+    ///       SignedHeaders=…, Signature=b4f2…
+    ///       → seul le nom de l'algorithme était remplacé ; la signature
+    ///         complète passait.
+    ///
+    /// La valeur d'un en-tête HTTP se termine à la fin de ligne, jamais à un
+    /// espace : c'est donc jusqu'à la fin de ligne qu'on masque. On y perd du
+    /// diagnostic HTTP — une phrase qui suivrait sur la même ligne disparaît
+    /// aussi — et c'est le bon sens du compromis : un jeton lisible dans un
+    /// diagnostic collé dans un ticket coûte plus cher qu'une phrase perdue.
     public static func maskSecrets(in text: String) -> String {
-        let range = NSRange(text.startIndex..., in: text)
         var result = text
-        // En ordre inverse : remplacer une occurrence plus loin dans le texte
-        // ne décale pas les indices de celles qui restent à traiter avant
-        // elle.
-        for match in secretPattern.matches(in: text, range: range).reversed() {
-            guard match.numberOfRanges > 3,
-                  let valueRange = Range(match.range(at: 3), in: result)
-            else { continue }
-            result.replaceSubrange(valueRange, with: "********")
+        for pattern in [authorizationPattern, secretPattern] {
+            let range = NSRange(result.startIndex..., in: result)
+            let matches = pattern.matches(in: result, range: range)
+            // En ordre inverse : remplacer une occurrence plus loin dans le
+            // texte ne décale pas les indices de celles qui restent à traiter
+            // avant elle.
+            for match in matches.reversed() {
+                guard match.numberOfRanges > 3,
+                      let valueRange = Range(match.range(at: 3), in: result)
+                else { continue }
+                result.replaceSubrange(valueRange, with: "********")
+            }
         }
         return result
     }
 
-    // `NSRegularExpression` n'est pas `Sendable` dans l'overlay Foundation,
-    // mais elle est immuable une fois compilée et son appariement ne mute
-    // aucun état interne partagé — c'est le cas d'usage que
-    // `nonisolated(unsafe)` couvre légitimement, plutôt que de reconstruire
-    // le motif à chaque appel de `maskSecrets`.
-    private nonisolated(unsafe) static let secretPattern: NSRegularExpression = {
-        let names = "secretAccessKey|password|KOPIA_PASSWORD|Authorization"
+    // Les deux motifs sont compilés une fois pour toutes plutôt qu'à chaque
+    // appel de `maskSecrets`. `NSRegularExpression` est déclarée `Sendable`
+    // par l'overlay Foundation actuel, donc un `static let` suffit :
+    // `nonisolated(unsafe)` était ici, et le compilateur le signale
+    // maintenant comme une affirmation inutile sur le type.
+    /// `Authorization` d'abord et à part : sa valeur va jusqu'à la fin de
+    /// ligne. Groupe 3, comme dans `secretPattern`, pour que la boucle de
+    /// remplacement soit la même.
+    ///
+    /// `[^\r\n]` et non `.` : `NSRegularExpression` sans
+    /// `.dotMatchesLineSeparators` s'arrête déjà au saut de ligne, mais
+    /// l'écrire explicitement retire la dépendance à cette option et couvre
+    /// le `\r` d'une trame HTTP, qui est le format d'origine de cet en-tête.
+    private static let authorizationPattern: NSRegularExpression = {
+        let pattern = "(?i)(Authorization)(\"?\\s*[:=]\\s*\"?)([^\\r\\n]+)"
+        // swiftlint:disable:next force_try
+        return try! NSRegularExpression(pattern: pattern)
+    }()
+
+    private static let secretPattern: NSRegularExpression = {
+        let names = "secretAccessKey|password|KOPIA_PASSWORD"
         // Groupe 3 : la valeur, un seul jeton sans espace ni guillemet — ce
         // que le briefing décrit comme « une chaîne longue sans espace après
         // » le nom. On ne borne pas la longueur haute : mieux vaut sur-masquer
