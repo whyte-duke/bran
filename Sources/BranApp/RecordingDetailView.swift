@@ -226,7 +226,7 @@ struct RecordingDetailView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button("Ouvrir les réglages…") { model.showsSettings = true }
+            Button("Ouvrir les réglages…") { model.showSettings(on: .connections) }
         }
         .branWell()
     }

@@ -158,32 +158,75 @@ struct ClipboardPane: View {
     /// exprès, c'est là qu'on la cherche du regard — et poser ses filtres à
     /// trente centimètres de là, en haut de la fenêtre, obligerait à faire
     /// l'aller-retour pour comprendre pourquoi la liste est courte.
+    ///
+    /// **Trois dispositions, parce qu'une seule imposait sa largeur à la
+    /// fenêtre.** Quatre contrôles nommés, un résumé et un bouton dans un unique
+    /// `HStack` — dont trois `.fixedSize()`, qui interdisent explicitement toute
+    /// compression — additionnent plus de largeur que la fenêtre n'en a à 320
+    /// points. Un `HStack` qui ne peut pas se comprimer ne se rogne pas : il
+    /// **remonte** sa largeur idéale comme plancher horizontal, et c'est toute
+    /// la fenêtre qui refuse alors de se réduire.
+    ///
+    /// Les `.fixedSize()` restent : ils sont ce qui permet à `ViewThatFits` de
+    /// mesurer honnêtement chaque candidat, au lieu de lui répondre « je tiens
+    /// partout » puis de tronquer les libellés.
+    ///
+    /// Ce que la variante compacte concède : les filtres ne se nomment plus
+    /// qu'au survol et à VoiceOver — chaque menu porte déjà son `.help` et son
+    /// `.accessibilityLabel`, qui ne dépendent pas du libellé affiché.
     private func toolbar(_ result: ClipboardBrowseResult) -> some View {
-        HStack(spacing: Space.small) {
-            sortMenu
-            kindsMenu
-            appsMenu(result.apps)
-            pinnedToggle
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: Space.small) {
+                filters(result.apps)
+                Spacer(minLength: Space.small)
+                summaryLine(result)
+            }
 
-            Spacer(minLength: Space.small)
+            VStack(alignment: .leading, spacing: Space.small) {
+                HStack(spacing: Space.small) {
+                    filters(result.apps)
+                    Spacer(minLength: 0)
+                }
+                HStack(spacing: Space.small) { summaryLine(result) }
+            }
 
-            // Le résumé porte sur ce que le filtre a retenu, jamais sur
-            // l'historique entier : un total que la liste juste en dessous
-            // contredit est pire que pas de total.
-            Text(result.summary.description)
-                .font(Type.meta)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .accessibilityLabel("Sélection : \(result.summary.description)")
-
-            if filter.narrowsBeyondQuery {
-                Button("Tout afficher", action: clearNarrowing)
-                    .help("Décocher tous les filtres, sans effacer la recherche")
+            VStack(alignment: .leading, spacing: Space.small) {
+                HStack(spacing: Space.small) {
+                    filters(result.apps)
+                    Spacer(minLength: 0)
+                }
+                .labelStyle(.iconOnly)
+                HStack(spacing: Space.small) { summaryLine(result) }
             }
         }
         .controlSize(.small)
         .padding(.horizontal, Space.gutter)
         .padding(.vertical, Space.small)
+    }
+
+    @ViewBuilder
+    private func filters(_ apps: [ClipboardApp]) -> some View {
+        sortMenu
+        kindsMenu
+        appsMenu(apps)
+        pinnedToggle
+    }
+
+    @ViewBuilder
+    private func summaryLine(_ result: ClipboardBrowseResult) -> some View {
+        // Le résumé porte sur ce que le filtre a retenu, jamais sur
+        // l'historique entier : un total que la liste juste en dessous
+        // contredit est pire que pas de total.
+        Text(result.summary.description)
+            .font(Type.meta)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .accessibilityLabel("Sélection : \(result.summary.description)")
+
+        if filter.narrowsBeyondQuery {
+            Button("Tout afficher", action: clearNarrowing)
+                .help("Décocher tous les filtres, sans effacer la recherche")
+        }
     }
 
     private var sortMenu: some View {
@@ -333,7 +376,7 @@ struct ClipboardPane: View {
                     symbol: "pause.circle",
                     tint: Palette.attention
                 ) {
-                    Button("Réglages") { model.showsSettings = true }
+                    Button("Réglages") { model.showSettings(on: .clipboard) }
                         .controlSize(.small)
                 }
             }
@@ -369,16 +412,19 @@ struct ClipboardPane: View {
             // Premier lancement, ou historique entièrement vidé. La phrase nomme
             // le raccourci : un état vide qui ne dit pas comment revenir est un
             // cul-de-sac.
+            // Voir `DictationPane.content` : hors du `ScrollView`, donc plancher
+            // vertical de la fenêtre.
             ContentUnavailableView {
                 Label("Presse-papiers vide", systemImage: "clipboard")
             } description: {
                 Text(emptyHint)
             } actions: {
                 if model.clipboardSettings.capturesCopies == false {
-                    Button("Activer la capture des copies") { model.showsSettings = true }
+                    Button("Activer la capture des copies") { model.showSettings(on: .clipboard) }
                         .buttonStyle(.borderedProminent)
                 }
             }
+            .branWidthFloor()
         } else if result.isEmpty {
             // **Une branche distincte de la précédente.** Elles se ressemblent à
             // l'écran et ne veulent pas dire la même chose : ici il y a un
@@ -395,8 +441,10 @@ struct ClipboardPane: View {
                     Button("Tout afficher", action: clearNarrowing)
                         .buttonStyle(.borderedProminent)
                 }
+                .branWidthFloor()
             } else {
                 ContentUnavailableView.search(text: query)
+                    .branWidthFloor()
             }
         } else {
             list(result)
@@ -634,6 +682,9 @@ private struct ClipboardLibraryRow: View {
     /// Voir `DictationCard` : un booléen seul laisse la première copie éteindre
     /// le retour de la seconde.
     @State private var copyTicket = 0
+    /// Voir `DictationCard` : la suppression partait sans question, et une
+    /// entrée du presse-papiers n'a aucun autre exemplaire ailleurs.
+    @State private var isConfirmingDeletion = false
 
     private var row: ClipboardFilter.RowText { ClipboardFilter.rowText(for: entry) }
 
@@ -652,10 +703,18 @@ private struct ClipboardLibraryRow: View {
             actions
         }
         .padding(.horizontal, Space.inset)
-        // La hauteur fixe est la décision structurante de la ligne, et son
-        // chiffre se défend dans `Design.swift`. Elle vaut aussi pour les lignes
-        // sans texte : une image et un paragraphe doivent occuper la même place.
-        .frame(height: Size.clipboardRow)
+        // **La vignette débordait de sa ligne de trois points en haut comme en
+        // bas.** `Size.clipboardThumbnail` vaut 40 depuis qu'une vignette de 28
+        // ne permettait plus de distinguer deux captures d'écran ; la ligne,
+        // elle, est restée à `Size.clipboardRow`, soit 34. Avec `Space.hair`
+        // entre deux lignes, une image se posait visuellement sur ses voisines.
+        //
+        // `Size.clipboardMediaRow` — 52 — existait déjà pour exactement ce cas,
+        // et n'était utilisée que par le panneau flottant. La règle est donc
+        // reprise telle quelle de `ClipboardPanelView` : deux hauteurs, une par
+        // sorte de contenu. Ce que ça concède est ce que dit `Design.swift` :
+        // moins de lignes média visibles à la fois.
+        .frame(height: showsThumbnail ? Size.clipboardMediaRow : Size.clipboardRow)
         .background(
             Palette.row(hover: isHovering, selected: false),
             in: .rect(cornerRadius: Radius.field)
@@ -669,7 +728,7 @@ private struct ClipboardLibraryRow: View {
         .accessibilityAction(named: entry.isPinned ? "Désépingler" : "Épingler") { onTogglePin() }
         .accessibilityAction(named: "Remettre au presse-papiers") { copyNow() }
         .accessibilityAction(named: "Afficher dans le Finder") { onReveal() }
-        .accessibilityAction(named: "Supprimer") { onDelete() }
+        .accessibilityAction(named: "Supprimer", confirmDeletion)
         .task(id: entry.id) { await loadThumbnail() }
         .task(id: copyTicket) {
             guard copyTicket > 0 else { return }
@@ -677,9 +736,34 @@ private struct ClipboardLibraryRow: View {
             guard Task.isCancelled == false else { return }
             justCopied = false
         }
+        .confirmationDialog(
+            "Supprimer cette entrée du presse-papiers ?",
+            isPresented: $isConfirmingDeletion,
+            titleVisibility: .visible
+        ) {
+            Button("Supprimer", role: .destructive, action: onDelete)
+            Button("Annuler", role: .cancel) {}
+        } message: {
+            Text(
+                entry.isComplete
+                    ? "L'entrée et son contenu sont effacés définitivement. Ils ne passent pas par la Corbeille."
+                    : "L'entrée est effacée définitivement. Elle ne passe pas par la Corbeille."
+            )
+        }
     }
 
     // MARK: La vignette
+
+    /// Cette ligne réserve-t-elle la colonne de gauche ?
+    ///
+    /// **Même règle que `ClipboardPanelView`, et pour la même raison** : un
+    /// symbole devant chaque ligne de texte — le cas de très loin le plus
+    /// fréquent — répète ce que la ligne dit déjà en toutes lettres, et prend la
+    /// largeur qui manque au titre. Ici elle règle en plus la hauteur de la
+    /// ligne, donc le débordement de la vignette.
+    private var showsThumbnail: Bool {
+        entry.kind == .image || entry.kind == .file
+    }
 
     @ViewBuilder
     private var leading: some View {
@@ -690,22 +774,24 @@ private struct ClipboardLibraryRow: View {
         // au-dessus d'un contenu qui n'existe plus. Ce n'est pas une perte, mais
         // c'est une promesse visuelle fausse — et cette ligne montre par
         // ailleurs, en toutes lettres, la date à laquelle le contenu s'en va.
-        if let thumbnail, ThumbnailPlan.hasThumbnail(entry) {
-            thumbnail
-                .resizable()
-                // Rempli puis rogné, jamais déformé : un carré au rapport de
-                // l'image désalignerait les colonnes de texte d'une ligne à
-                // l'autre, ce qui rend une liste illisible en diagonale.
-                .scaledToFill()
-                .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
-                .clipShape(.rect(cornerRadius: Radius.control))
-                .accessibilityHidden(true)
-        } else {
-            Image(systemName: ClipboardPanelVocabulary.symbolName(entry))
-                .font(Type.cardBody)
-                .foregroundStyle(.secondary)
-                .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
-                .accessibilityHidden(true)
+        if showsThumbnail {
+            if let thumbnail, ThumbnailPlan.hasThumbnail(entry) {
+                thumbnail
+                    .resizable()
+                    // Rempli puis rogné, jamais déformé : un carré au rapport de
+                    // l'image désalignerait les colonnes de texte d'une ligne à
+                    // l'autre, ce qui rend une liste illisible en diagonale.
+                    .scaledToFill()
+                    .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
+                    .clipShape(.rect(cornerRadius: Radius.control))
+                    .accessibilityHidden(true)
+            } else {
+                Image(systemName: ClipboardPanelVocabulary.symbolName(entry))
+                    .font(Type.cardBody)
+                    .foregroundStyle(.secondary)
+                    .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
+                    .accessibilityHidden(true)
+            }
         }
     }
 
@@ -862,9 +948,9 @@ private struct ClipboardLibraryRow: View {
                     ? "Désépingler : l'entrée redevient soumise à la rétention"
                     : "Épingler : garder cette entrée et son contenu quelle que soit la rétention",
                 tint: entry.isPinned ? .accentColor : nil,
+                isRevealed: isHovering || entry.isPinned,
                 action: onTogglePin
             )
-            .opacity(isHovering || entry.isPinned ? 1 : 0)
 
             CardAction(
                 symbol: justCopied ? "checkmark" : "doc.on.doc",
@@ -875,14 +961,20 @@ private struct ClipboardLibraryRow: View {
             .disabled(entry.canPaste == false)
 
             Group {
-                CardAction(symbol: "folder", help: revealHelp, action: onReveal)
-                    .disabled(canReveal == false)
+                CardAction(
+                    symbol: "folder", help: revealHelp, isRevealed: isHovering, action: onReveal
+                )
+                .disabled(canReveal == false)
 
-                CardAction(symbol: "trash", help: "Supprimer", tint: Palette.broken, action: onDelete)
+                CardAction(
+                    symbol: "trash",
+                    help: "Supprimer",
+                    tint: Palette.broken,
+                    isRevealed: isHovering,
+                    action: confirmDeletion
+                )
             }
-            .opacity(isHovering ? 1 : 0)
         }
-        .branAnimation(Motion.hover, value: isHovering)
     }
 
     private var revealHelp: String {
@@ -902,7 +994,11 @@ private struct ClipboardLibraryRow: View {
         Button("Afficher dans le Finder", action: onReveal)
             .disabled(canReveal == false)
         Divider()
-        Button("Supprimer", role: .destructive, action: onDelete)
+        Button("Supprimer", role: .destructive, action: confirmDeletion)
+    }
+
+    private func confirmDeletion() {
+        isConfirmingDeletion = true
     }
 
     private func copyNow() {

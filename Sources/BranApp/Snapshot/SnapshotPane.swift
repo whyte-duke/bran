@@ -122,18 +122,22 @@ struct SnapshotPane: View {
     @ViewBuilder
     private var content: some View {
         if controller.store.entries.isEmpty {
+            // Voir `DictationPane.content` : hors du `ScrollView`, donc plancher
+            // vertical de la fenêtre.
             ContentUnavailableView {
                 Label("Aucune capture", systemImage: "text.viewfinder")
             } description: {
                 Text(emptyHint)
             } actions: {
                 if controller.settings.isEnabled == false {
-                    Button("Activer la capture de texte") { model.showsSettings = true }
+                    Button("Activer la capture de texte") { model.showSettings(on: .snapshot) }
                         .buttonStyle(.borderedProminent)
                 }
             }
+            .branWidthFloor()
         } else if visible.isEmpty {
             ContentUnavailableView.search(text: query)
+                .branWidthFloor()
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Space.stack) {
@@ -148,12 +152,14 @@ struct SnapshotPane: View {
                                 .font(.subheadline.weight(.medium))
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.top, 4)
+                                .padding(.top, Space.tight)
                         }
                     }
                 }
-                .padding(.horizontal, 26)
-                .padding(.vertical, 18)
+                // Voir `DictationPane.content` : la même liste, les mêmes trois
+                // nombres en clair, et la même gouttière commune retrouvée.
+                .padding(.horizontal, Space.gutter)
+                .padding(.vertical, Space.stack)
             }
             .branAnimation(Motion.enter, value: controller.store.entries.count)
         }
@@ -205,6 +211,9 @@ private struct SnapshotCard: View {
     /// Voir `DictationCard` : un booléen seul laisse la première copie éteindre
     /// le retour de la seconde.
     @State private var copyTicket = 0
+    /// Voir `DictationCard` : la même suppression sans question ni retour, sur
+    /// une cible de 24 × 22 points voisine de « Relire ».
+    @State private var isConfirmingDeletion = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -256,6 +265,27 @@ private struct SnapshotCard: View {
             guard Task.isCancelled == false else { return }
             justCopied = false
         }
+        .confirmationDialog(
+            "Supprimer cette capture ?",
+            isPresented: $isConfirmingDeletion,
+            titleVisibility: .visible
+        ) {
+            Button("Supprimer", role: .destructive) {
+                Task { await controller.store.delete(entry) }
+            }
+            Button("Annuler", role: .cancel) {}
+        } message: {
+            Text(deletionWarning)
+        }
+    }
+
+    /// Ce que la suppression emporte, nommé. L'image a pu déjà partir à la
+    /// rétention : le dire évite de faire hésiter sur une perte qui n'aura pas
+    /// lieu.
+    private var deletionWarning: String {
+        entry.canRetry
+            ? "Le texte et l'image conservée sont effacés définitivement. Ils ne passent pas par la Corbeille."
+            : "Le texte est effacé définitivement. Il ne passe pas par la Corbeille — l'image, elle, a déjà été purgée."
     }
 
     private var isRereading: Bool { controller.isRereading(entry.id) }
@@ -382,21 +412,36 @@ private struct SnapshotCard: View {
                     symbol: otherLayout == .monospaced ? "chevron.left.forwardslash.chevron.right" : "text.alignleft",
                     help: rereadHelp,
                     tint: isRereading ? .accentColor : nil,
-                    isSpinning: isRereading
+                    isSpinning: isRereading,
+                    isRevealed: showsSecondaryActions
                 ) {
                     controller.reread(entry, layout: otherLayout)
                 }
                 .disabled(entry.canRetry == false || isRereading)
 
-                CardAction(symbol: "folder", help: "Afficher l'image dans le Finder", action: reveal)
-                    .disabled(entry.canRetry == false)
+                CardAction(
+                    symbol: "folder",
+                    help: "Afficher l'image dans le Finder",
+                    isRevealed: showsSecondaryActions,
+                    action: reveal
+                )
+                .disabled(entry.canRetry == false)
 
-                CardAction(symbol: "trash", help: "Supprimer", tint: .red, action: delete)
+                CardAction(
+                    symbol: "trash",
+                    help: "Supprimer",
+                    tint: .red,
+                    isRevealed: showsSecondaryActions,
+                    action: delete
+                )
             }
-            .opacity(isHovering || isRereading ? 1 : 0)
         }
-        .branAnimation(Motion.hover, value: isHovering || isRereading)
     }
+
+    /// L'estompage a quitté le `Group` pour `CardAction` : posé ici, il
+    /// éteignait aussi le bouton qui portait le focus clavier. Voir
+    /// `CardAction.isRevealed`.
+    private var showsSecondaryActions: Bool { isHovering || isRereading }
 
     /// Les mêmes actions, nommées, au clic droit — plus celles qui n'ont pas
     /// mérité un bouton.
@@ -430,7 +475,7 @@ private struct SnapshotCard: View {
     }
 
     private func delete() {
-        Task { await controller.store.delete(entry) }
+        isConfirmingDeletion = true
     }
 
     private var otherLayout: LayoutMode {

@@ -135,18 +135,24 @@ struct DictationPane: View {
     @ViewBuilder
     private var content: some View {
         if controller.store.entries.isEmpty {
+            // Les états vides vivent **hors** du `ScrollView` de la section :
+            // leur hauteur idéale est donc le plancher vertical de la fenêtre,
+            // et un `ContentUnavailableView` la porte à 2 134 points à largeur
+            // quasi nulle. Voir `View.branWidthFloor()`.
             ContentUnavailableView {
                 Label("Aucune dictée", systemImage: "waveform")
             } description: {
                 Text(emptyHint)
             } actions: {
                 if controller.settings.isEnabled == false {
-                    Button("Activer la dictée") { model.showsSettings = true }
+                    Button("Activer la dictée") { model.showSettings(on: .dictation) }
                         .buttonStyle(.borderedProminent)
                 }
             }
+            .branWidthFloor()
         } else if visible.isEmpty {
             ContentUnavailableView.search(text: query)
+                .branWidthFloor()
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Space.stack) {
@@ -161,12 +167,18 @@ struct DictationPane: View {
                                 .font(.subheadline.weight(.medium))
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.top, 4)
+                                .padding(.top, Space.tight)
                         }
                     }
                 }
-                .padding(.horizontal, 26)
-                .padding(.vertical, 18)
+                // **La gouttière commune, et pas 26 points.** `Design.swift`
+                // pose la règle — une vue ne contient plus de nombre — et ces
+                // trois-là y avaient échappé, dans les deux seules listes qui ne
+                // l'appliquaient pas. Le bord gauche du contenu sautait de deux
+                // points en passant de Réunions à Dictées, alors que l'en-tête,
+                // lui, restait aligné.
+                .padding(.horizontal, Space.gutter)
+                .padding(.vertical, Space.stack)
             }
             .branAnimation(Motion.enter, value: controller.store.entries.count)
         }
@@ -204,13 +216,13 @@ struct NoticeRow<Action: View>: View {
 
     /// La largeur en dessous de laquelle on cesse de recomposer le texte.
     ///
-    /// Choisie sur la largeur minimale utilisable de la fenêtre : la colonne
-    /// de gauche en réclame 200, et la section la plus contrainte — le cadran
-    /// de « Débit » — en veut environ 290 de plus. En dessous de cet ordre de
-    /// grandeur, la fenêtre ne montre plus rien d'utile ; il n'y a donc aucune
-    /// disposition à préserver, seulement un plancher à ne pas laisser
-    /// exploser.
-    fileprivate static var textFloorWidth: CGFloat { 320 }
+    /// Le chiffre et son raisonnement ont déménagé dans `Size.windowTextFloor` :
+    /// **le défaut n'était propre ni aux bandeaux ni à `fixedSize`**, et cinq
+    /// autres vues portent maintenant le même plancher. Voir `PaneHeader`, qui
+    /// avait exactement le même sur un `Text` nu, et où la mesure a préféré deux
+    /// bornes de lignes — un titre et un sous-titre ne se lisent pas comme un
+    /// avertissement.
+    fileprivate static var textFloorWidth: CGFloat { Size.windowTextFloor }
 
     let text: String
     let symbol: String
@@ -367,6 +379,13 @@ private struct DictationCard: View {
     /// au bout du temps qu'il lui restait. Le jeton relance `.task(id:)`, qui
     /// annule le minuteur précédent.
     @State private var copyTicket = 0
+    /// **La suppression était immédiate et définitive.** Un clic sur l'icône au
+    /// survol effaçait le texte *et* l'audio, sans question, sans annulation, et
+    /// sans passer par la Corbeille — alors que « Réunions » demandait déjà
+    /// confirmation pour la même famille de geste. La cible fait 24 × 22 points
+    /// et vit à deux points de « Réappliquer le dictionnaire » ; se tromper de
+    /// bouton coûtait une dictée.
+    @State private var isConfirmingDeletion = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -418,6 +437,27 @@ private struct DictationCard: View {
             guard Task.isCancelled == false else { return }
             justCopied = false
         }
+        .confirmationDialog(
+            "Supprimer cette dictée ?",
+            isPresented: $isConfirmingDeletion,
+            titleVisibility: .visible
+        ) {
+            Button("Supprimer", role: .destructive) {
+                Task { await controller.store.delete(entry) }
+            }
+            Button("Annuler", role: .cancel) {}
+        } message: {
+            Text(deletionWarning)
+        }
+    }
+
+    /// Ce que la suppression emporte, nommé — le texte, et l'audio quand il est
+    /// encore là. Une purge de rétention a pu déjà emmener le second : le dire
+    /// évite de faire hésiter sur une perte qui n'aura pas lieu.
+    private var deletionWarning: String {
+        entry.canRetry
+            ? "Le texte et l'audio conservé sont effacés définitivement. Ils ne passent pas par la Corbeille."
+            : "Le texte est effacé définitivement. Il ne passe pas par la Corbeille — l'audio, lui, a déjà été purgé."
     }
 
     // MARK: -
@@ -520,6 +560,10 @@ private struct DictationCard: View {
     /// ni pour VoiceOver. Relancer une transcription — la raison d'être de la
     /// carte — était impossible sans souris. Le menu contextuel les redonne une
     /// seconde fois, avec des libellés en toutes lettres.
+    ///
+    /// **Et l'estompage est passé dans `CardAction`.** Posé ici sur le `Group`,
+    /// il éteignait aussi le contrôle qui portait le focus clavier : voir
+    /// `CardAction.isRevealed`, qui dit la panne exacte.
     private var actions: some View {
         HStack(spacing: Space.hair) {
             CardAction(
@@ -535,28 +579,44 @@ private struct DictationCard: View {
                     symbol: "arrow.clockwise",
                     help: retryHelp,
                     tint: isRetrying ? .accentColor : nil,
-                    isSpinning: isRetrying
+                    isSpinning: isRetrying,
+                    isRevealed: showsSecondaryActions
                 ) {
                     controller.retry(entry)
                 }
                 .disabled(entry.canRetry == false || isRetrying)
 
-                CardAction(symbol: "folder", help: "Afficher l'audio dans le Finder", action: reveal)
-                    .disabled(entry.canRetry == false)
+                CardAction(
+                    symbol: "folder",
+                    help: "Afficher l'audio dans le Finder",
+                    isRevealed: showsSecondaryActions,
+                    action: reveal
+                )
+                .disabled(entry.canRetry == false)
 
-                CardAction(symbol: "character.book.closed", help: "Réappliquer le dictionnaire de corrections") {
+                CardAction(
+                    symbol: "character.book.closed",
+                    help: "Réappliquer le dictionnaire de corrections",
+                    isRevealed: showsSecondaryActions
+                ) {
                     controller.reapplyVocabulary(to: entry)
                 }
 
-                CardAction(symbol: "trash", help: "Supprimer", tint: .red, action: delete)
+                CardAction(
+                    symbol: "trash",
+                    help: "Supprimer",
+                    tint: .red,
+                    isRevealed: showsSecondaryActions,
+                    action: delete
+                )
             }
-            // La flèche reste visible pendant la relance, même si le curseur est
-            // parti ailleurs : c'est le seul repère qui dit quelle carte
-            // travaille quand on en a relancé plusieurs.
-            .opacity(isHovering || isRetrying ? 1 : 0)
         }
-        .branAnimation(Motion.hover, value: isHovering || isRetrying)
     }
+
+    /// La flèche reste visible pendant la relance, même si le curseur est parti
+    /// ailleurs : c'est le seul repère qui dit quelle carte travaille quand on
+    /// en a relancé plusieurs.
+    private var showsSecondaryActions: Bool { isHovering || isRetrying }
 
     /// Les mêmes actions, nommées, au clic droit.
     ///
@@ -592,7 +652,7 @@ private struct DictationCard: View {
     }
 
     private func delete() {
-        Task { await controller.store.delete(entry) }
+        isConfirmingDeletion = true
     }
 
     private var retryHelp: String {
@@ -610,12 +670,32 @@ struct CardAction: View {
     /// Fait tourner l'icône en continu. Une flèche de rechargement qui tourne
     /// dit « c'est en cours » sans avoir à écrire un mot.
     var isSpinning = false
+    /// La carte montre-t-elle ses actions en ce moment ?
+    ///
+    /// **C'est l'estompage, et il est ici plutôt que chez l'appelant.** Les
+    /// cartes l'écrivaient toutes ainsi : `Group { … }.opacity(isHovering ? 1 :
+    /// 0)`. Or le focus clavier ne change pas `isHovering` — rien ne le change
+    /// que la souris. Avec « Accès clavier complet », Tab posait donc le focus
+    /// sur « Supprimer », sans anneau de focus visible puisque l'anneau est
+    /// peint sur un contrôle à opacité nulle, et la barre d'espace supprimait
+    /// une dictée que personne n'avait vu sélectionner.
+    ///
+    /// Le remède ne peut pas vivre chez l'appelant : lui ne sait pas lequel de
+    /// ses trois boutons a le focus. Le bouton, si — d'où le `@FocusState`
+    /// ci-dessous, qui rend la règle littérale : **jamais d'opacité nulle sur le
+    /// contrôle focalisé.**
+    var isRevealed = true
     let action: () -> Void
 
     @State private var isHovering = false
     @State private var angle: Double = 0
+    @FocusState private var isFocused: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Le bouton est-il peint ? Visible s'il est révélé par la carte, **ou**
+    /// s'il porte le focus.
+    private var isVisible: Bool { isRevealed || isFocused }
 
     var body: some View {
         Button(action: action) {
@@ -643,6 +723,9 @@ struct CardAction: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(tint ?? .secondary)
+        .focused($isFocused)
+        .opacity(isVisible ? 1 : 0)
+        .branAnimation(Motion.hover, value: isVisible)
         .onHover { isHovering = $0 }
         .help(help)
         .accessibilityLabel(help)
@@ -732,7 +815,15 @@ struct TextWidthFloor: Layout {
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         guard let child = subviews.first else { return .zero }
         let asked = proposal.width ?? floorWidth
-        let laidOut = child.sizeThatFits(ProposedViewSize(width: max(asked, floorWidth), height: nil))
+        // **La hauteur proposée est transmise telle quelle**, et pas remplacée
+        // par `nil`. Les bandeaux ne s'en apercevaient pas — un texte en
+        // `fixedSize(vertical:)` rend sa hauteur idéale quoi qu'on lui propose —
+        // mais un état vide, lui, veut occuper toute la place qu'on lui donne :
+        // avec `nil`, il se tassait en haut de la section au lieu d'y être
+        // centré.
+        let laidOut = child.sizeThatFits(
+            ProposedViewSize(width: max(asked, floorWidth), height: proposal.height)
+        )
         return CGSize(width: asked, height: laidOut.height)
     }
 
