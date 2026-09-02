@@ -267,6 +267,23 @@ struct PermissionsView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
+
+                    // **483 Mo sans porte de sortie.**
+                    //
+                    // Le téléchargement partait au premier clic et ne pouvait
+                    // plus s'arrêter : ni bouton, ni raccourci, ni fermeture de
+                    // la fenêtre. Sur un partage de connexion, sur une ligne
+                    // lente, ou simplement quand on s'est trompé de bouton,
+                    // la seule sortie était de quitter l'application — ce qui
+                    // laisse le téléchargement à moitié fait sur le disque.
+                    //
+                    // `cancelLoad()` remet l'état sur `.installed` ou `.absent`
+                    // selon ce qui est déjà là, donc le bouton « Télécharger »
+                    // revient tout seul et le geste est reprenable.
+                    Button("Annuler") { model.dictation.host.cancelLoad() }
+                        .buttonStyle(.plain)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             case .loading:
                 ProgressView().controlSize(.small)
