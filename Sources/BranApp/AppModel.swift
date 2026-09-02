@@ -328,6 +328,18 @@ public final class AppModel {
         }
         notifications.configure()
 
+        // **Sparkle ne relance pas bran pendant qu'un fichier s'écrit.**
+        //
+        // `showsSessionBar` et surtout pas `hasOpenSession` : celui-ci est déjà
+        // faux pendant la fusion, la compression et l'extraction de l'audio,
+        // c'est-à-dire pendant la fenêtre où l'on a le plus à perdre.
+        // ScreenCaptureKit écrit 93 % du fichier après `stopCapture()`, et cette
+        // finalisation a duré douze minutes sur une réunion de trente-six. Le
+        // dépôt s'est déjà fait prendre deux fois par cette nuance — la barre de
+        // session, puis `tidyRecordingFolders` —, ce qui suffit à en faire une
+        // règle plutôt qu'un détail.
+        updates.hasSomethingToLose = { [weak self] in self?.showsSessionBar ?? false }
+
         // CR-4 : « une réunion est en cours **ou détectée** ». Le prédicat est
         // volontairement plus large qu'un enregistrement — ce dont il protège,
         // c'est un partage d'écran, et on peut partager son écran sans que bran
@@ -1420,9 +1432,15 @@ public final class AppModel {
         // Rattachement certain par le code Meet : aucune ambiguïté à lever.
         if let bookingID = recording.metadata.bookingID,
            let booking = directory.bookings.first(where: { $0.booking_id == bookingID }) {
+            // **L'intention change ce qui est admissible, donc elle se
+            // déclare.** Sans elle, un enregistrement déjà lié à un rendez-vous
+            // clos ou déjà transcrit était refusé ici même, alors que
+            // l'auto-envoi est désactivé et que le geste attendu est justement
+            // d'ouvrir la feuille pour laisser l'humain trancher.
             let eligibility = UploadEligibility.evaluate(
                 booking: booking,
-                isConfigured: uploads.configuration.isConfigured
+                isConfigured: uploads.configuration.isConfigured,
+                intent: uploads.configuration.autoUpload ? .automatic : .manual
             )
 
             guard eligibility.canSend else {
@@ -1489,7 +1507,10 @@ public final class AppModel {
 
     func confirmUpload(_ recording: Recording, booking: CRMBooking, complement: String?) {
         pendingUpload = nil
-        uploads.send(recording, to: booking, complement: complement)
+        // Un clic dans la feuille est un geste explicite : sans `.manual`, une
+        // retranscription volontaire était refusée au dernier verrou alors que
+        // la feuille venait de l'annoncer comme permise.
+        uploads.send(recording, to: booking, complement: complement, intent: .manual)
     }
 
     func searchableBookings(forceRefresh: Bool = false) async -> UploadService.SearchResults {
