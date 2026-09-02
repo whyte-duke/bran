@@ -172,4 +172,48 @@ struct PresenceTests {
         #expect((try? decoder.decode(WatchEvent.self, from: presenceData)) == nil)
         #expect((try? decoder.decode(PresenceEvent.self, from: laneData)) == nil)
     }
+
+    // MARK: - Une ligne hostile dans le journal
+
+    /// **Mesuré** : `{"d":1e308}` se décode sans un mot, et `Int(1e308)` tue le
+    /// processus — code de sortie 133. Le panneau du veilleur convertit `d` en
+    /// entier pour l'afficher, donc une seule ligne suffisait à rendre le
+    /// panneau impossible à ouvrir, tous les jours, jusqu'à ce que le journal
+    /// soit corrigé à la main.
+    ///
+    /// Le journal sait déjà compter une ligne illisible : c'est là que celle-ci
+    /// doit aller.
+    @Test("Une durée impossible rend la ligne illisible plutôt que fatale")
+    func dureeImpossibleDansLeJournal() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+
+        for duree in ["1e308", "-1", "1e30"] {
+            let voie = """
+            {"v":1,"lane":"win:x","name":"x","p":1,"state":"waiting","from":0,"to":1,\
+            "d":\(duree),"src":"certain","why":"x"}
+            """
+            let presence = """
+            {"k":"p","v":1,"presence":"idle","from":0,"to":1,"d":\(duree)}
+            """
+            #expect((try? decoder.decode(WatchEvent.self, from: Data(voie.utf8))) == nil)
+            #expect((try? decoder.decode(PresenceEvent.self, from: Data(presence.utf8))) == nil)
+        }
+    }
+
+    /// L'autre moitié : le plafond ne doit pas emporter une absence réelle. Un
+    /// Mac refermé trois semaines produit une ligne de présence de trois
+    /// semaines, et elle est exacte — voir `PresenceEvent.d`, qui compte en
+    /// temps mural précisément pour ça.
+    @Test("Une absence de trois semaines reste une ligne lisible")
+    func absenceDeTroisSemainesResteLisible() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let troisSemaines = 21 * 86_400
+        let presence = """
+        {"k":"p","v":1,"presence":"away","from":0,"to":\(troisSemaines),"d":\(troisSemaines)}
+        """
+        let relue = try decoder.decode(PresenceEvent.self, from: Data(presence.utf8))
+        #expect(relue.d == TimeInterval(troisSemaines))
+    }
 }

@@ -108,6 +108,63 @@ struct TranscriptEntryTests {
     func wordCountIgnoresWhitespace() {
         #expect(TranscriptEntry(createdAt: .now, duration: 1, text: "  un   deux \n trois ").wordCount == 3)
     }
+
+    /// **Mesuré** : `{"duration":1e308}` se décode sans un mot, et
+    /// `Int(1e308.rounded())` tue le processus — « Double value cannot be
+    /// converted to Int because the result would be greater than Int.max »,
+    /// code de sortie 133. La ligne étant dessinée à chaque affichage de la
+    /// liste, la dictée devenait impossible à ouvrir.
+    @Test("Un sidecar dont la durée est impossible est refusé, pas affiché")
+    func refuseUneDureeImpossible() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+
+        for duree in ["1e308", "-1", "1e30"] {
+            let sidecar = """
+            {
+              "id": "9F2B4C1E-0000-4000-8000-000000000001",
+              "createdAt": 771000000,
+              "duration": \(duree),
+              "text": "bonjour"
+            }
+            """
+            #expect(throws: (any Error).self) {
+                try decoder.decode(TranscriptEntry.self, from: Data(sidecar.utf8))
+            }
+        }
+    }
+
+    /// L'autre moitié : `duration` reste un `var`, donc un appelant en mémoire
+    /// peut encore y poser n'importe quoi — une division par une durée nulle,
+    /// par exemple. L'affichage ne doit jamais être ce qui arrête bran.
+    @Test("Une durée impossible en mémoire s'affiche au lieu de tout arrêter")
+    func afficheAuLieuDArreter() {
+        var entree = TranscriptEntry(createdAt: .now, duration: 1, text: "a")
+        entree.duration = .infinity
+        #expect(entree.durationDescription.isEmpty == false)
+        entree.duration = .nan
+        #expect(entree.durationDescription.isEmpty == false)
+        entree.duration = -5
+        #expect(entree.durationDescription.isEmpty == false)
+    }
+
+    /// Le plafond ne doit pas emporter une dictée réelle : la plus longue
+    /// mesurée tient en quelques minutes, et une heure passe très largement.
+    @Test("Une dictée d'une heure reste lisible")
+    func uneHeureResteLisible() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let sidecar = """
+        {
+          "id": "9F2B4C1E-0000-4000-8000-000000000001",
+          "createdAt": 771000000,
+          "duration": 3600,
+          "text": "bonjour"
+        }
+        """
+        let entree = try decoder.decode(TranscriptEntry.self, from: Data(sidecar.utf8))
+        #expect(entree.duration == 3600)
+    }
 }
 
 @Suite("Langue")
