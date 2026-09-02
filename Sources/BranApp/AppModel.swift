@@ -710,6 +710,32 @@ public final class AppModel {
     /// six états.
     public var hasOpenSession: Bool { engine.state.isActive }
 
+    /// Non `nil` quand quitter maintenant coûterait un fichier — et dit lequel.
+    ///
+    /// **Le chiffre qui rend ce garde-fou nécessaire** : ScreenCaptureKit écrit
+    /// 93 % du fichier **après** `stopCapture()`, et cette finalisation a duré
+    /// douze minutes sur une réunion de trente-six. Quitter dans cette
+    /// fenêtre-là ne perd pas quelques secondes de fin, il perd la réunion — le
+    /// `.mp4` reste au tiers de sa taille et ne s'ouvre pas.
+    ///
+    /// **La question est « y a-t-il un fichier en train de s'écrire », pas
+    /// « enregistre-t-on »**, et c'est ce qui fait qu'elle ne peut pas être
+    /// `isRecording`. Trois moments coûtent un fichier, et deux d'entre eux ne
+    /// ressemblent pas du tout à un enregistrement pour qui regarde l'écran :
+    /// la session ouverte — départ, capture, pause, finalisation, que
+    /// `hasOpenSession` couvre toutes les quatre —, et la chaîne de fin, où la
+    /// fusion et la compression peuvent tourner une demi-heure après que la
+    /// barre a disparu.
+    ///
+    /// La phrase rendue est celle que `SessionProgress` écrit déjà pour la
+    /// barre : elle nomme l'étape, elle est en français, et la reprendre ici
+    /// évite qu'une alerte de fermeture et la barre de progression décrivent le
+    /// même travail avec deux vocabulaires différents.
+    public var quitWouldLose: String? {
+        if let step = currentStep { return step.title }
+        return hasOpenSession ? "Enregistrement en cours…" : nil
+    }
+
     // MARK: - Post-traitement
 
     /// Où en est la chaîne de fin de session, par enregistrement. Transitoire :
