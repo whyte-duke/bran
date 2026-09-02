@@ -22,6 +22,19 @@ final class MeetingDirectory {
     private let configuration: CRMConfiguration
     private var refreshTask: Task<Void, Never>?
 
+    /// Le numéro du rafraîchissement en cours.
+    ///
+    /// **Deux rafraîchissements peuvent revenir dans l'ordre inverse**, et rien
+    /// ne le rattrapait : la veille de fond lance A, l'ouverture de la fenêtre
+    /// lance B, B répond d'abord et affiche les rendez-vous à jour, puis A
+    /// répond et les remplace par sa réponse plus ancienne. L'écran montre alors
+    /// un rendez-vous supprimé depuis, ou perd celui qui vient d'être créé, et
+    /// aucun geste ne le corrige avant les cinq minutes suivantes.
+    ///
+    /// Un entier suffit : tout ce qui n'est pas le dernier départ n'a plus le
+    /// droit de publier.
+    private var refreshGeneration = 0
+
     /// Les RDV changent au rythme des réservations cal.com, pas à la seconde.
     private static let refreshInterval = Duration.seconds(300)
 
@@ -53,8 +66,14 @@ final class MeetingDirectory {
     /// sens sûr : un statut inconnu, ajouté demain côté CRM, doit apparaître
     /// plutôt que disparaître. Un rendez-vous qu'on montre à tort se corrige d'un
     /// coup d'œil ; un rendez-vous manquant ne se remarque qu'après coup.
+    ///
+    /// **La liste n'est plus ici.** Elle vit dans `MeetingUploadPolicy`, avec
+    /// celle qui décide des envois, parce que les deux avaient divergé : ce
+    /// filtre savait écarter un rendez-vous annulé, l'envoi automatique non — et
+    /// l'audio d'un client partait vers un rendez-vous que cet écran-là refusait
+    /// d'afficher.
     private static func isActive(_ status: String) -> Bool {
-        ["cancelled", "rescheduled", "completed", "no_show"].contains(status) == false
+        MeetingUploadPolicy.isDisplayable(status)
     }
 
     var next: CRMBooking? { upcoming.first }
@@ -129,13 +148,17 @@ final class MeetingDirectory {
             return
         }
 
+        refreshGeneration += 1
+        let generation = refreshGeneration
         isRefreshing = true
-        defer { isRefreshing = false }
+        // Un départ plus récent est seul maître de l'indicateur : sinon la
+        // réponse d'A éteint le tourniquet que B vient d'allumer.
+        defer { if generation == refreshGeneration { isRefreshing = false } }
 
         do {
             // Quatre heures en arrière : un RDV commencé il y a trois heures et
             // qui dure encore doit rester rapprochable.
-            bookings = try await client.targets(
+            let received = try await client.targets(
                 from: Date.now.addingTimeInterval(-4 * 3600),
                 // **Trente jours, et sept était trop peu.** Le 14 août 2026, la
                 // base contenait dix-huit rendez-vous à venir, tous rattachés et
@@ -150,6 +173,8 @@ final class MeetingDirectory {
                 // complet à un trimestre tronqué.
                 to: Date.now.addingTimeInterval(30 * 24 * 3600)
             )
+            guard generation == refreshGeneration else { return }
+            bookings = received
             lastRefresh = .now
             problem = nil
             // Le dernier maillon qui manquait au diagnostic : ce que le CRM
@@ -159,6 +184,7 @@ final class MeetingDirectory {
             // rendez-vous jamais reçu.
             FeatureLog.record("CRM — \(bookings.count) rendez-vous reçus, \(upcoming.count) à venir")
         } catch {
+            guard generation == refreshGeneration else { return }
             problem = error.localizedDescription
             FeatureLog.record("✗ CRM — interrogation refusée : \(error.localizedDescription)")
         }

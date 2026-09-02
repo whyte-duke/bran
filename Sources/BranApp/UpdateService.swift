@@ -1,3 +1,4 @@
+import Foundation
 import Observation
 import Sparkle
 
@@ -43,6 +44,45 @@ final class UpdateService {
     @ObservationIgnored
     private let controller: SPUStandardUpdaterController
 
+    /// Le garde. Retenu ici parce que Sparkle ne tient son delegate que
+    /// faiblement : sans cette référence, il disparaîtrait aussitôt construit et
+    /// le verrou ci-dessous n'existerait plus qu'en intention.
+    @ObservationIgnored
+    private let guardian = SessionGuard()
+
+    /// **L'accroche : « bran a-t-il quelque chose à perdre en ce moment ? ».**
+    ///
+    /// Vrai pendant la capture *et* pendant la finalisation. La finalisation
+    /// compte au moins autant que la capture, et c'est mesuré sur ce projet :
+    /// ScreenCaptureKit écrit **93 % du fichier après `stopCapture()`**, et
+    /// cette écriture a duré **douze minutes sur une réunion de trente-six**.
+    /// Une relance dans cette fenêtre-là ne coûte pas quelques secondes de
+    /// vidéo, elle coûte la réunion entière — et l'`Info.plist` publie
+    /// `SUAutomaticallyUpdate` à `true`, donc l'installation se fait sans rien
+    /// demander à personne.
+    ///
+    /// C'est une fermeture et pas une dépendance : `UpdateService` n'a pas à
+    /// savoir ce qu'est une réunion, et le moteur n'a pas à savoir qu'un
+    /// vérificateur de mises à jour existe. C'est la même mécanique que le
+    /// veilleur de sessions et que le dossier de destination de la dictée.
+    ///
+    /// **Ce qu'il faut y brancher est `AppModel.showsSessionBar`, et surtout
+    /// pas `hasOpenSession`.** Ce dernier devient faux à l'instant où la machine
+    /// repasse au repos, c'est-à-dire juste avant que la fusion, la compression
+    /// et l'extraction de l'audio commencent — plusieurs dizaines de minutes de
+    /// travail réel sur une réunion de trente-six. Le dépôt s'est déjà fait
+    /// prendre deux fois par cette nuance : la barre de session, puis le
+    /// rangement des anciens dossiers, qui déplaçait des fichiers sous une
+    /// compression en cours.
+    ///
+    /// Tant que personne ne la branche, elle répond `false` : le comportement
+    /// est alors exactement celui d'avant, sans verrou.
+    @ObservationIgnored
+    var hasSomethingToLose: @MainActor () -> Bool {
+        get { guardian.hasSomethingToLose }
+        set { guardian.hasSomethingToLose = newValue }
+    }
+
     /// **Sans `@ObservationIgnored`, ce champ ferait redessiner l'interface à
     /// chaque battement de la minuterie de Sparkle.** Rien de ce qu'il contient
     /// n'est affiché : ce qui se voit, c'est la fenêtre que Sparkle présente
@@ -50,7 +90,7 @@ final class UpdateService {
     init() {
         controller = SPUStandardUpdaterController(
             startingUpdater: true,
-            updaterDelegate: nil,
+            updaterDelegate: guardian,
             userDriverDelegate: nil
         )
     }
@@ -84,5 +124,90 @@ final class UpdateService {
     /// vient justement vérifier laquelle il a.
     var installedVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
+}
+
+/// **Aucune mise à jour ne s'installe pendant qu'une réunion est en jeu.**
+///
+/// Ce que Sparkle faisait sans ce garde : `SUAutomaticallyUpdate` à `true` et
+/// une vérification par heure, sans delegate, donc sans la moindre idée de ce
+/// que fait le reste de l'application. Une mise à jour qui finit de s'installer
+/// pendant une réunion propose la relance ; la relance tue le processus ; et
+/// si elle tombe pendant la finalisation, elle emporte les 93 % du fichier que
+/// ScreenCaptureKit écrit *après* `stopCapture()` — douze minutes de rédaction
+/// sur une réunion de trente-six, mesurées sur ce projet.
+///
+/// Trois portes, parce qu'une seule ne suffit pas : la vérification de fond
+/// peut avoir commencé **avant** que l'enregistrement démarre, et la relance
+/// peut être proposée bien après le téléchargement.
+///
+/// 1. On ne **cherche** pas de mise à jour en tâche de fond pendant une
+///    session. La vérification demandée à la main, elle, reste permise : elle
+///    répond à une question que quelqu'un vient de poser, et elle n'installe
+///    rien toute seule.
+/// 2. On ne **poursuit** pas une mise à jour de fond trouvée entre-temps.
+/// 3. On ne **relance** pas : la relance est repoussée jusqu'au retour au
+///    repos, et elle a lieu toute seule à ce moment-là.
+///
+/// Ce que ça concède : une session laissée ouverte indéfiniment repousse une
+/// mise à jour indéfiniment. C'est le bon sens de l'échange — une mise à jour
+/// en retard se rattrape, un enregistrement détruit ne se rattrape pas — mais
+/// la relance en attente n'est visible nulle part, et c'est le point à
+/// surveiller.
+@MainActor
+private final class SessionGuard: NSObject, SPUUpdaterDelegate {
+
+    /// Branché par `AppModel`. Voir `UpdateService.hasSomethingToLose`.
+    var hasSomethingToLose: @MainActor () -> Bool = { false }
+
+    /// À quelle cadence on regarde si la session est finie, une fois la relance
+    /// repoussée. Cinq secondes : la finalisation se compte en minutes, et
+    /// quelques secondes de retard sur une relance n'ont jamais gêné personne.
+    private static let idleCheckInterval = Duration.seconds(5)
+
+    func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        guard updateCheck == .updatesInBackground, hasSomethingToLose() else { return }
+        throw Refusal.sessionInProgress
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        shouldProceedWithUpdate updateItem: SUAppcastItem,
+        updateCheck: SPUUpdateCheck
+    ) throws {
+        guard updateCheck == .updatesInBackground, hasSomethingToLose() else { return }
+        throw Refusal.sessionInProgress
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        shouldPostponeRelaunchForUpdate item: SUAppcastItem,
+        untilInvoking installHandler: @escaping () -> Void
+    ) -> Bool {
+        guard hasSomethingToLose() else { return false }
+
+        FeatureLog.record(
+            "Mise à jour prête, relance repoussée : un enregistrement est en cours ou en finalisation."
+        )
+        Task { @MainActor in
+            while hasSomethingToLose() {
+                try? await Task.sleep(for: Self.idleCheckInterval)
+            }
+            FeatureLog.record("Session terminée — relance pour la mise à jour.")
+            installHandler()
+        }
+        return true
+    }
+
+    /// L'erreur que Sparkle attend pour dire non. Son texte n'est jamais
+    /// affiché à l'utilisateur — Sparkle abandonne silencieusement une
+    /// vérification de fond refusée — mais il part dans son journal, où il vaut
+    /// mieux qu'il soit lisible.
+    private enum Refusal: LocalizedError {
+        case sessionInProgress
+
+        var errorDescription: String? {
+            "Un enregistrement est en cours ou en cours de finalisation : mise à jour repoussée."
+        }
     }
 }

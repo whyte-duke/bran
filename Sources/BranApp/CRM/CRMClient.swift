@@ -1,3 +1,4 @@
+import BranCore
 import Foundation
 
 /// Les six appels du contrat CRM, et rien d'autre.
@@ -39,11 +40,52 @@ actor CRMClient {
         return decoder
     }()
 
-    init(endpoint: URL, token: String, session: URLSession = .shared) {
+    init(endpoint: URL, token: String, session: URLSession? = nil) {
         self.endpoint = endpoint
         self.token = token
-        self.session = session
+        self.session = session ?? Self.controlSession
     }
+
+    /// **Les appels de commande ne doivent pas pouvoir geler l'interface.**
+    ///
+    /// Aucune session CRM ne fixait `timeoutIntervalForResource` : seul
+    /// `URLRequest.timeoutInterval` était réglé, et il ne borne que le silence
+    /// entre deux octets. Un serveur qui répond une ligne toutes les vingt-cinq
+    /// secondes tenait donc la requête indéfiniment, et l'écran des rendez-vous
+    /// restait sur son tourniquet sans jamais rien dire. Ces deux valeurs bornent
+    /// le tout : 15 s sans un octet, 30 s en tout.
+    ///
+    /// `waitsForConnectivity` reste faux ici : quand la ligne est coupée, un
+    /// panneau qui dit « CRM injoignable » vaut mieux qu'un panneau qui attend.
+    /// L'envoi des octets, lui, fait le choix inverse — voir `upload`.
+    ///
+    /// **Une seule session pour toute l'application**, et pas une par client :
+    /// une `URLSession` construite avec un delegate se retient elle-même
+    /// jusqu'à `invalidate`, et un client CRM est fabriqué à chaque
+    /// rafraîchissement des rendez-vous — toutes les cinq minutes. Une session
+    /// par client aurait fait fuir une session toutes les cinq minutes, plus ses
+    /// connexions.
+    private static let controlSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration, delegate: OriginGuard.shared, delegateQueue: nil)
+    }()
+
+    /// Le plafond d'une réponse de commande, en octets.
+    ///
+    /// `session.data(for:)` accumule tout le corps avant que qui que ce soit
+    /// puisse regarder le code HTTP : le délai borne le temps, pas le volume.
+    /// Une réponse `200` annonçant `content-length: 2147483648` avec deux
+    /// gigaoctets de caractères dans un champ `label` était donc accumulée
+    /// jusqu'à épuisement de la mémoire, sur une ligne rapide en quelques
+    /// dizaines de secondes.
+    ///
+    /// 4 Mio laisse deux ordres de grandeur de marge : la réponse la plus
+    /// lourde du contrat est `targets`, plafonnée à 100 rendez-vous, soit une
+    /// cinquantaine de kilooctets.
+    private static let maximumResponseBytes = 4 << 20
 
     // MARK: - 5.1 · À quel RDV rattacher
 
@@ -79,18 +121,36 @@ actor CRMClient {
     /// Pas d'en-tête d'authentification : le jeton est dans l'URL, valable 2 h,
     /// pour un seul chemin. Le même `PUT` est rejouable tant qu'elle n'a pas
     /// expiré.
+    /// **L'adresse de dépôt est vérifiée ici aussi**, et pas seulement chez
+    /// l'appelant. Ce n'est pas la même décision écrite deux fois — les deux
+    /// appellent `CRMOriginPolicy` — c'est la même décision posée aux deux
+    /// endroits d'où l'audio peut sortir. Le jour où un second appelant
+    /// apparaîtra, il ne pourra pas passer à côté.
     nonisolated func upload(
         file: URL,
         to uploadURL: URL,
         mimeType: String,
         onProgress: @escaping @Sendable (Double) -> Void
     ) async throws {
+        // `endpoint` est un `let` de type `Sendable` : il se lit depuis ce
+        // contexte non isolé sans passer par l'acteur.
+        guard case .approved = CRMOriginPolicy.uploadDestination(
+            uploadURL.absoluteString,
+            crmHost: endpoint.host()
+        ) else {
+            throw Failure(statusCode: 0, message: "Adresse de dépôt refusée : \(uploadURL.absoluteString)")
+        }
+
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "PUT"
         request.setValue(mimeType, forHTTPHeaderField: "content-type")
 
         let delegate = UploadProgressDelegate(onProgress: onProgress)
-        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        let session = URLSession(
+            configuration: Self.uploadConfiguration(for: file),
+            delegate: delegate,
+            delegateQueue: nil
+        )
         defer { session.finishTasksAndInvalidate() }
 
         let (data, response) = try await session.upload(for: request, fromFile: file)
@@ -101,9 +161,39 @@ actor CRMClient {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw Failure(
                 statusCode: http.statusCode,
-                message: "Envoi refusé par le stockage (\(http.statusCode)). \(body.prefix(200))"
+                message: (300..<400).contains(http.statusCode)
+                    ? "Le stockage a renvoyé une redirection vers un autre hôte : envoi interrompu."
+                    : "Envoi refusé par le stockage (\(http.statusCode)). \(body.prefix(200))"
             )
         }
+    }
+
+    /// Le délai total d'un envoi, dérivé du poids du fichier.
+    ///
+    /// Une borne fixe ne peut pas marcher : trop courte, elle refuse un closing
+    /// de 50 Mo sur une ligne lente ; trop longue, elle laisse l'écran sur
+    /// « Envoi 40 % » pendant une heure alors que le Wi-Fi est tombé. Elle est
+    /// donc calculée à partir d'un plancher de débit délibérément pessimiste —
+    /// 20 ko/s, soit 160 kbit/s — parce que la ligne mesurée sur cette machine
+    /// varie du simple au double en une heure et qu'un plancher optimiste
+    /// couperait un envoi qui avançait.
+    ///
+    /// Dix minutes au minimum, deux heures au plus : un fichier de 50 Mo obtient
+    /// 42 minutes, ce qu'aucun envoi normal n'approche (mesuré : quelques
+    /// dizaines de secondes).
+    ///
+    /// `waitsForConnectivity` est vrai ici, à l'inverse des appels de commande :
+    /// une bascule Wi-Fi au milieu d'un envoi doit être attendue, pas comptée
+    /// comme un échec — la borne totale ci-dessus reste le garde-fou.
+    private nonisolated static func uploadConfiguration(for file: URL) -> URLSessionConfiguration {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: file.path(percentEncoded: false))
+        let bytes = (attributes?[.size] as? Int) ?? 0
+
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = min(max(600, Double(bytes) / 20_000), 7200)
+        configuration.waitsForConnectivity = true
+        return configuration
     }
 
     // MARK: - 5.4 · Lancer le traitement
@@ -139,7 +229,10 @@ actor CRMClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue(token, forHTTPHeaderField: "x-castral-recorder-token")
-        request.timeoutInterval = 30
+        // La même valeur que `timeoutIntervalForRequest` de la session, écrite
+        // ici parce que `URLRequest.timeoutInterval` a le dernier mot : la
+        // laisser à 30 aurait annulé en silence la borne de 15 s.
+        request.timeoutInterval = 15
         return request
     }
 
@@ -152,10 +245,52 @@ actor CRMClient {
         }
     }
 
+    /// **`bytes(for:)` et pas `data(for:)`, et c'est mesuré.**
+    ///
+    /// Le plafond de `maximumResponseBytes` ne peut pas être posé par un
+    /// delegate : vérifié le 02/09/2026 contre un serveur local, ni un delegate
+    /// de session ni un delegate de tâche ne reçoit
+    /// `urlSession(_:dataTask:didReceive:)` quand on appelle `data(for:)` — les
+    /// méthodes de commodité asynchrones accumulent le corps avec leur propre
+    /// delegate interne. Huit mégaoctets arrivaient intégralement, delegate
+    /// jamais appelé. Les rappels de **tâche**, eux, sont bien reçus : c'est ce
+    /// qui rend `OriginGuard` possible.
+    ///
+    /// `bytes(for:)` rend l'en-tête avant le corps, donc l'annonce se refuse
+    /// sans rien lire, et l'accumulation octet par octet permet de couper un
+    /// serveur qui ment sur `content-length`. Le coût mesuré au même endroit :
+    /// 11,28 Mo/s, soit 4 ms pour une réponse `targets` de 50 ko et 0,37 s pour
+    /// atteindre le plafond de 4 Mio.
     private func sendRaw(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await session.data(for: request)
+        let (stream, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw Failure(statusCode: 0, message: "Réponse inattendue du CRM.")
+        }
+
+        guard http.expectedContentLength <= Int64(Self.maximumResponseBytes) else {
+            throw Failure(
+                statusCode: http.statusCode,
+                message: "Réponse du CRM démesurée : \(http.expectedContentLength) octets annoncés."
+            )
+        }
+
+        var data = Data()
+        data.reserveCapacity(min(Self.maximumResponseBytes, max(0, Int(http.expectedContentLength))))
+        for try await byte in stream {
+            data.append(byte)
+            guard data.count <= Self.maximumResponseBytes else {
+                throw Failure(
+                    statusCode: http.statusCode,
+                    message: "Réponse du CRM démesurée : plus de \(Self.maximumResponseBytes) octets reçus."
+                )
+            }
+        }
+
+        guard (300..<400).contains(http.statusCode) == false else {
+            throw Failure(
+                statusCode: http.statusCode,
+                message: "Le CRM a renvoyé une redirection vers un autre hôte : requête abandonnée."
+            )
         }
 
         guard (200..<300).contains(http.statusCode) else {
@@ -170,12 +305,68 @@ actor CRMClient {
     }
 }
 
+/// **Aucune redirection ne change d'hôte.**
+///
+/// Sans ce garde, tout le contrôle d'origine se contourne d'un `302` : l'hôte
+/// approuvé répond « c'est ailleurs », et `URLSession` obéit sans rien demander.
+/// Deux fuites, pas une seule — les octets de la réunion pour l'envoi, et le
+/// jeton du Trousseau pour les appels de commande, car `URLSession` ne retire
+/// que l'en-tête `Authorization` sur une redirection inter-origine, jamais un
+/// en-tête maison comme `x-castral-recorder-token`.
+///
+/// Mesuré le 02/09/2026 contre un serveur local : rendre `nil` au
+/// `completionHandler` ne suit pas la redirection et livre le `302` tel quel à
+/// l'appelant, corps vide. C'est `sendRaw` qui le transforme ensuite en erreur
+/// lisible — un `3xx` n'est jamais un succès ici.
+///
+/// Sans état : la comparaison porte sur la requête d'origine de la tâche, donc
+/// une seule instance sert toutes les sessions.
+private final class OriginGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static let shared = OriginGuard()
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let origin = task.originalRequest?.url,
+              let destination = request.url,
+              CRMOriginPolicy.allowsRedirection(from: origin, to: destination)
+        else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
+
 /// `URLSession.upload(for:fromFile:)` ne rend la progression que par delegate.
 private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let onProgress: @Sendable (Double) -> Void
 
     init(onProgress: @escaping @Sendable (Double) -> Void) {
         self.onProgress = onProgress
+    }
+
+    /// Le même garde que `OriginGuard`, parce que cette session a déjà un
+    /// delegate à elle : un `URLSessionTask` n'en consulte qu'un.
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let origin = task.originalRequest?.url,
+              let destination = request.url,
+              CRMOriginPolicy.allowsRedirection(from: origin, to: destination)
+        else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 
     func urlSession(

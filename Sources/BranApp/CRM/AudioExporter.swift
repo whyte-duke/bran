@@ -287,8 +287,19 @@ enum AudioExporter {
         // il ne disparaît que remplacé : `replaceItemAt` échange les deux d'un
         // bloc, et si l'échange échoue on ne perd ni l'un ni l'autre.
         //
-        // Le repli sur `moveItem` couvre le cas où il n'y avait rien à remplacer
-        // — première extraction — que `replaceItemAt` refuse.
+        // **Le repli sur `moveItem` reste, sa justification était fausse.**
+        // Ce commentaire affirmait que `replaceItemAt` refuse une destination
+        // absente — première extraction. Mesuré le 02/09/2026 sur macOS 26.5
+        // (build 25F71) : elle réussit, que le fichier temporaire soit dans le
+        // même dossier que la cible ou ailleurs. Le repli est donc inutile
+        // plutôt que nécessaire ; il est conservé parce qu'il est exact et
+        // qu'un `moveItem` sur une destination libre est un rename, c'est-à-dire
+        // moins de travail que le va-et-vient de `replaceItemAt`.
+        //
+        // La phrase corrigée ici plutôt que supprimée : cinq rapports d'audit
+        // sur douze l'ont recopiée telle quelle pour classer, ailleurs dans le
+        // dépôt, un défaut critique qui n'existe pas. Un commentaire faux dans
+        // ce dépôt-ci ne reste pas dans son fichier.
         do {
             if FileManager.default.fileExists(atPath: destination.path(percentEncoded: false)) {
                 _ = try FileManager.default.replaceItemAt(destination, withItemAt: scratch)
