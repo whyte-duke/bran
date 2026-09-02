@@ -177,3 +177,57 @@ struct ClipboardBlobEscapeTests {
         ) == nil)
     }
 }
+
+/// **Ce que ce fichier protège** : que la purge n'emporte pas les fichiers de
+/// quelqu'un d'autre.
+///
+/// La bibliothèque est un dossier ordinaire — le README invite explicitement à
+/// l'ouvrir, le déplacer, le copier, et les réglages laissent le poser où l'on
+/// veut. La purge d'un jour entièrement expiré supprimait ce dossier d'un
+/// `removeItem` récursif : un `notes.txt` qu'on y avait glissé disparaissait
+/// avec, définitivement, sans avoir jamais été montré nulle part.
+@Suite("La purge d'un jour ne supprime que ce que bran a écrit")
+struct ClipboardDayFolderPurgeTests {
+
+    @Test("Un fichier étranger survit à la purge du jour, et le dossier avec lui")
+    func aForeignFileSurvivesTheDayPurge() async throws {
+        let racine = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "bran-purge-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: racine) }
+        let jour = racine.appending(path: "2026-01-01", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: jour, withIntermediateDirectories: true)
+
+        // Ce que bran écrit.
+        try Data("{}".utf8).write(to: jour.appending(path: "\(UUID().uuidString).json"))
+        try Data("".utf8).write(to: jour.appending(path: ClipboardStore.indexFileName))
+        // Ce que quelqu'un d'autre a mis là.
+        let etranger = jour.appending(path: "notes.txt")
+        try Data("à ne pas perdre".utf8).write(to: etranger)
+
+        try await ClipboardStore.removeDayFolder(jour)
+
+        #expect(
+            FileManager.default.fileExists(atPath: etranger.path(percentEncoded: false)),
+            "un fichier qui n'est pas à bran a été supprimé"
+        )
+        #expect(
+            FileManager.default.fileExists(atPath: jour.path(percentEncoded: false)),
+            "le dossier a été retiré alors qu'il n'était pas vide"
+        )
+    }
+
+    @Test("Un jour qui ne contient que nos fichiers s'en va entièrement")
+    func aDayWithOnlyOurFilesIsRemovedEntirely() async throws {
+        let racine = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "bran-purge-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: racine) }
+        let jour = racine.appending(path: "2026-01-01", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: jour, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: jour.appending(path: "\(UUID().uuidString).json"))
+        try Data("".utf8).write(to: jour.appending(path: ClipboardStore.indexFileName))
+
+        try await ClipboardStore.removeDayFolder(jour)
+
+        #expect(FileManager.default.fileExists(atPath: jour.path(percentEncoded: false)) == false)
+    }
+}

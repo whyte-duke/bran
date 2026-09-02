@@ -48,6 +48,11 @@ final class NotificationService: NSObject {
     @ObservationIgnored
     private let center = UNUserNotificationCenter.current()
 
+    /// Ce que `withdrawProposals()` a le droit de retirer. Voir sa
+    /// documentation : retirer « tout » emportait les alertes de sauvegarde.
+    @ObservationIgnored
+    private var proposalIDs: Set<String> = []
+
     func configure() {
         center.delegate = self
 
@@ -138,16 +143,32 @@ final class NotificationService: NSObject {
         content.sound = .default
 
         // Pas de déclencheur : la notification part immédiatement.
+        let identifier = UUID().uuidString
+        proposalIDs.insert(identifier)
         let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
+            identifier: identifier,
             content: content,
             trigger: nil
         )
         try? await center.add(request)
     }
 
+    /// **Retire les propositions de réunion, et elles seules.**
+    ///
+    /// C'était `removeAllDeliveredNotifications()`, qui emporte tout ce que bran
+    /// a livré — y compris l'alerte « Sauvegarde en retard », qui vient d'un
+    /// tout autre mécanisme et qui est le seul signal disant qu'un Mac n'est
+    /// plus protégé. Fermer une fenêtre Meet effaçait donc l'avertissement
+    /// qu'on avait le plus besoin de lire, sans que personne ne fasse le lien.
+    ///
+    /// Les identifiants des propositions sont désormais retenus : on ne retire
+    /// que ceux-là, livrés comme en attente.
     func withdrawProposals() {
-        center.removeAllDeliveredNotifications()
+        guard proposalIDs.isEmpty == false else { return }
+        let ids = Array(proposalIDs)
+        proposalIDs.removeAll()
+        center.removeDeliveredNotifications(withIdentifiers: ids)
+        center.removePendingNotificationRequests(withIdentifiers: ids)
     }
 }
 

@@ -40,6 +40,8 @@ final class ClipboardSettings {
         static let trigger = "bran.clipboard.trigger"
         static let capturesCopies = "bran.clipboard.capturesCopies"
         static let blobDays = "bran.clipboard.blobDays"
+        static let textDays = "bran.clipboard.textDays"
+        static let textDaysChosen = "bran.clipboard.textDaysChosen"
         static let honoursPrivacyMarkers = "bran.clipboard.honoursPrivacyMarkers"
     }
 
@@ -96,6 +98,35 @@ final class ClipboardSettings {
     /// une phrase entière pour le dire — voir `ClipboardRetention.textLabel`.
     var blobDays: Int { didSet { defaults.set(blobDays, forKey: Key.blobDays) } }
 
+    /// Combien de jours le **texte** est conservé. `nil` — « indéfiniment » —
+    /// est un choix, pas une absence de choix.
+    ///
+    /// **Le défaut est `nil`, et pas les 365 jours du moteur.** Le moteur en a
+    /// un parce qu'un historique de presse-papiers qui garde tout pour toujours
+    /// finit par contenir un mot de passe copié depuis un terminal. Mais ce
+    /// défaut-là ne peut pas s'appliquer à quelqu'un qui a déjà une
+    /// bibliothèque : bran promettait « Texte conservé indéfiniment » à
+    /// l'écran, et le moteur aurait effacé un an d'historique au premier
+    /// passage de rétention, sans rien demander et sans rien dire.
+    ///
+    /// Effacer les données de quelqu'un derrière son dos est pire que les
+    /// garder. La durée finie est donc offerte, jamais imposée — avec, à côté,
+    /// le bouton qui efface tout de suite.
+    ///
+    /// Deux clés plutôt qu'une : `textDays` ne sait pas distinguer « jamais
+    /// choisi » de « choisi indéfiniment », les deux valant `nil`. C'est
+    /// `textDaysChosen` qui porte la différence, pour que le jour où le défaut
+    /// changerait, il ne renverse pas un choix explicite.
+    var textDays: Int? {
+        didSet {
+            defaults.set(textDaysChosen, forKey: Key.textDaysChosen)
+            if let textDays { defaults.set(textDays, forKey: Key.textDays) }
+            else { defaults.removeObject(forKey: Key.textDays) }
+        }
+    }
+
+    private var textDaysChosen = true
+
     /// Rejeter ce qu'une application marque comme confidentiel.
     ///
     /// **Vrai par défaut, et cette valeur a été discutée.** Le propriétaire a
@@ -139,6 +170,12 @@ final class ClipboardSettings {
         blobDays = defaults.object(forKey: Key.blobDays) as? Int
             ?? ClipboardRetention.default.blobDays
         honoursPrivacyMarkers = defaults.object(forKey: Key.honoursPrivacyMarkers) as? Bool ?? true
+        textDaysChosen = defaults.object(forKey: Key.textDaysChosen) as? Bool ?? false
+        textDays = textDaysChosen ? defaults.object(forKey: Key.textDays) as? Int : nil
+        // Écrit après la lecture : `didSet` ne se déclenche pas pendant
+        // l'initialisation, donc la valeur relue n'est pas réécrite par
+        // inadvertance et « jamais choisi » le reste jusqu'au premier geste.
+        textDaysChosen = defaults.object(forKey: Key.textDaysChosen) as? Bool ?? false
     }
 
     // MARK: - Ce que les autres attendent
@@ -148,9 +185,17 @@ final class ClipboardSettings {
     /// Construite à la demande plutôt que stockée : `ClipboardRetention` est une
     /// valeur, et deux copies d'une même valeur — celle des réglages et celle du
     /// magasin — sont deux choses qui peuvent diverger. Ici il n'y en a qu'une
-    /// seule vérité, `blobDays`, et tout le reste en découle. Même forme que
+    /// seule vérité par réglage, et tout le reste en découle. Même forme que
     /// `SnapshotSettings.retention` et `WatchSettings.retention`.
-    var retention: ClipboardRetention { .days(blobDays) }
+    ///
+    /// **`textDays` est passé explicitement, et c'est le point.** `.days(_:)`
+    /// ne règle que les contenus lourds et laisse le texte au défaut du moteur,
+    /// qui vaut un an. L'écran, lui, annonçait « Texte conservé indéfiniment ».
+    /// Les deux se sont croisés sans se voir : la promesse d'un côté, la purge
+    /// de l'autre.
+    var retention: ClipboardRetention {
+        ClipboardRetention(blobDays: blobDays, textDays: textDays)
+    }
 
     /// La matrice des types, telle que `ClipboardMachine` la veut.
     ///

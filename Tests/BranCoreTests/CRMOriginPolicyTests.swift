@@ -154,3 +154,50 @@ struct CRMOriginPolicyTests {
         }
     }
 }
+
+/// **Ce que ce fichier protège** : que l'audio d'un client ne parte pas chez
+/// quelqu'un d'autre parce qu'il partage un hébergeur avec nous.
+///
+/// La règle portait sur le **domaine** `supabase.co`, au motif qu'une
+/// migration de projet y resterait. C'est vrai, et ça ne suffit pas :
+/// `supabase.co` est mutualisé. N'importe qui ouvre un compte et obtient
+/// `<le sien>.supabase.co`, qui passait la garde exactement comme le nôtre —
+/// donc le contrôle d'origine ne protégeait pas du cas qu'il vise.
+@Suite("Un projet Supabase tiers n'est pas notre stockage")
+struct CRMOriginPolicyStorageHostTests {
+
+    @Test("Le projet Castral est accepté")
+    func theCastralProjectIsApproved() {
+        let verdict = CRMOriginPolicy.uploadDestination(
+            "https://nifvrjlcurdqzdwvwfxh.supabase.co/storage/v1/object/upload/x?token=abc",
+            crmHost: "crm.castral.fr"
+        )
+        #expect(verdict.url != nil)
+    }
+
+    @Test("Un autre projet du même hébergeur est refusé")
+    func anotherProjectOnTheSameHostIsRefused() {
+        let verdict = CRMOriginPolicy.uploadDestination(
+            "https://attaquant.supabase.co/storage/v1/object/upload/x?token=abc",
+            crmHost: "crm.castral.fr"
+        )
+        #expect(verdict.refusal == .unapprovedHost("attaquant.supabase.co"))
+    }
+
+    @Test("Le domaine nu de l'hébergeur est refusé aussi")
+    func theBareHostingDomainIsRefused() {
+        #expect(
+            CRMOriginPolicy.uploadDestination("https://supabase.co/x", crmHost: nil).refusal
+                == .unapprovedHost("supabase.co")
+        )
+    }
+
+    @Test("Un hôte qui imite le nôtre par suffixe est refusé")
+    func aLookalikeSuffixIsRefused() {
+        #expect(
+            CRMOriginPolicy.uploadDestination(
+                "https://nifvrjlcurdqzdwvwfxh.supabase.co.attaquant.fr/x", crmHost: nil
+            ).refusal == .unapprovedHost("nifvrjlcurdqzdwvwfxh.supabase.co.attaquant.fr")
+        )
+    }
+}

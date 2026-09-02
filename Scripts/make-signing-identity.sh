@@ -50,6 +50,33 @@ case "$MODE" in
       echo "✗ l'identité « $NAME » n'existe pas — rien à exporter."
       exit 1
     fi
+    # **`-t identities` exporte TOUTES les identités du trousseau.**
+    #
+    # Le contrôle ci-dessus vérifie seulement que `bran-dev` existe ; il ne
+    # restreint rien. Le fichier présenté comme « la signature de bran »
+    # contenait donc aussi les clés privées Developer ID, VPN, client, et tout
+    # ce que le trousseau Connexion abrite — remis à qui reçoit le fichier.
+    #
+    # On compte d'abord : plusieurs identités dans le trousseau et l'export
+    # global est refusé, plutôt que de livrer en silence des secrets qui n'ont
+    # rien à faire là. Le cas d'une machine de développement qui ne porte que
+    # `bran-dev` reste servi sans détour.
+    COUNT=$(security find-identity -v -p codesigning | grep -c '^ *[0-9]*)')
+    if [[ "$COUNT" != "1" ]]; then
+      echo "✗ ce trousseau porte $COUNT identités de signature."
+      echo
+      security find-identity -v -p codesigning | sed 's/^/    /'
+      echo
+      echo "  « security export » ne sait pas n'en extraire qu'une : il les"
+      echo "  écrirait toutes dans le fichier, clés privées comprises — y"
+      echo "  compris un Developer ID ou une clé cliente qui n'ont rien à"
+      echo "  faire dans un export nommé « la signature de bran »."
+      echo
+      echo "  Exportez « $NAME » depuis Trousseaux d'accès : sélectionnez son"
+      echo "  certificat ET sa clé, clic droit, « Exporter 2 éléments… »."
+      exit 1
+    fi
+
     echo "→ export de « $NAME » vers $DEST"
     echo "  macOS va demander votre mot de passe de session, puis un mot de"
     echo "  passe pour protéger le fichier. Notez-le : sans lui, l'import est"

@@ -37,13 +37,31 @@ public enum CRMOriginPolicy {
     /// plafonne à 4,5 Mo de corps, un closing pèse dix fois plus — ils vont
     /// directement à Supabase, sur une URL signée valable deux heures.
     ///
-    /// Le projet Castral est `nifvrjlcurdqzdwvwfxh`, région eu-west-3, dont
-    /// l'hôte est `nifvrjlcurdqzdwvwfxh.supabase.co` (relevé le 02/09/2026).
-    /// La règle porte sur le domaine et non sur cette référence précise : une
-    /// migration de projet resterait dans le même domaine, et écrire la
-    /// référence ici obligerait à republier l'application pour un changement
-    /// qui ne regarde que le serveur.
-    public static let approvedStorageDomains = ["supabase.co", "supabase.in"]
+    /// **L'hôte complet, pas le domaine — et la nuance vaut l'audio d'un
+    /// client.**
+    ///
+    /// La règle portait sur `supabase.co` et `supabase.in`, au motif qu'une
+    /// migration de projet resterait dans le même domaine et qu'écrire la
+    /// référence ici obligerait à republier l'application. L'argument est vrai
+    /// et il ne suffit pas : `supabase.co` est un domaine **mutualisé**.
+    /// N'importe qui ouvre un compte et obtient `<le sien>.supabase.co`, qui
+    /// passait alors la garde exactement comme le nôtre.
+    ///
+    /// Le contrôle d'origine ne protégeait donc de rien contre le cas qu'il
+    /// vise : une réponse CRM erronée ou falsifiée désignant un projet
+    /// Supabase tiers, qui recevait l'enregistrement complet d'une réunion.
+    ///
+    /// Une liste d'hôtes complets, plutôt qu'un seul, laisse la migration
+    /// possible : on y ajoute le nouveau projet, on publie, on retire l'ancien
+    /// quand plus personne ne l'utilise. C'est une republication, et c'est le
+    /// prix de la garantie — republier est justement ce que bran sait faire en
+    /// une commande, et l'équipe reçoit la version dans l'heure.
+    ///
+    /// Le projet Castral est `nifvrjlcurdqzdwvwfxh`, région eu-west-3 (relevé
+    /// le 02/09/2026).
+    public static let approvedStorageHosts = [
+        "nifvrjlcurdqzdwvwfxh.supabase.co",
+    ]
 
     /// Pourquoi une adresse est refusée. Le message est écrit pour être affiché
     /// tel quel : c'est le seul endroit où l'utilisateur apprendra que bran a
@@ -115,7 +133,7 @@ public enum CRMOriginPolicy {
 
         if let refusal = commonRefusal(url) { return .refused(refusal) }
 
-        let approved = approvedStorageDomains.contains { isWithin($0, host: host) }
+        let approved = approvedStorageHosts.contains { isSameHost($0, host) }
             || crmHost.map { isSameHost(host, $0) } == true
         guard approved else { return .refused(.unapprovedHost(host)) }
         return .approved(url)

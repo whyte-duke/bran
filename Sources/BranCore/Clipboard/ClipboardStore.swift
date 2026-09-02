@@ -1769,11 +1769,49 @@ public final class ClipboardStore {
     /// partir d'un nom que `ClipboardRetention.day(from:)` a reconnu comme une
     /// date, ce qui est la même porte que celle qui protège `Pinned` et
     /// `.DS_Store` de la purge.
+    /// **Ne supprime que ce que bran a écrit, puis le dossier s'il est vide.**
+    ///
+    /// C'était un `removeItem` sur le dossier entier, choisi pour le cas
+    /// majoritaire — rien d'épinglé, rien d'illisible — parce qu'il emporte
+    /// l'index et le `blobs/` d'un coup. Le raccourci est correct tant qu'on
+    /// suppose que ce dossier n'appartient qu'à bran.
+    ///
+    /// Il n'appartient pas qu'à bran. La bibliothèque est un dossier ordinaire,
+    /// que le README invite explicitement à ouvrir, déplacer et copier ; les
+    /// réglages laissent la poser où l'on veut, y compris à côté d'autres
+    /// fichiers. Un `notes.txt`, une capture d'écran ou un JSON qu'on y avait
+    /// glissé disparaissait avec la purge, définitivement, sans avoir jamais
+    /// été montré nulle part dans l'interface.
+    ///
+    /// Le `rmdir` final ne réussit que sur un dossier vide, et son échec n'en
+    /// est pas un : il signifie exactement « il restait quelque chose qui n'est
+    /// pas à nous », et c'est le comportement voulu.
     nonisolated static func removeDayFolder(_ dayFolder: URL) async throws {
-        guard FileManager.default.fileExists(
-            atPath: dayFolder.path(percentEncoded: false)
-        ) else { return }
-        try FileManager.default.removeItem(at: dayFolder)
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: dayFolder.path(percentEncoded: false)) else { return }
+
+        try await removeBlobsFolder(in: dayFolder)
+
+        let contenus = (try? manager.contentsOfDirectory(
+            at: dayFolder, includingPropertiesForKeys: nil, options: []
+        )) ?? []
+        for url in contenus {
+            let nom = url.lastPathComponent
+            // Les seuls fichiers que ce magasin écrit dans un dossier-jour :
+            // ses sidecars, et son index. Tout le reste reste sur place.
+            guard nom == indexFileName || nom.hasSuffix(".json") else { continue }
+            try manager.removeItem(at: url)
+        }
+
+        // **`rmdir` et surtout pas `removeItem`.** `FileManager.removeItem`
+        // supprime récursivement : l'utiliser ici rétablirait exactement le
+        // défaut qu'on vient de corriger, le dossier partant avec tout ce
+        // qu'il contient encore. `rmdir(2)` échoue avec `ENOTEMPTY` sur un
+        // dossier non vide, et cet échec est le comportement voulu : il dit
+        // qu'il restait quelque chose qui n'est pas à nous.
+        _ = dayFolder.withUnsafeFileSystemRepresentation { chemin in
+            chemin.map { rmdir($0) }
+        }
     }
 
     /// Supprime le `blobs/` d'un jour, avec tout ce qu'il contient. C'est le

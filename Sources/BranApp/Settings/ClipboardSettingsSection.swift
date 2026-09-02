@@ -46,13 +46,30 @@ struct ClipboardSettingsSection: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // **Le délai ne gouverne que les contenus lourds**, et la ligne qui
-            // l'annonce le dit avant qu'on ne lise le nombre. Le texte, lui, n'a
-            // aucun réglage parce qu'il n'a aucune échéance — c'est la promesse
-            // de la fonctionnalité, pas une valeur par défaut.
-            LabeledContent("Texte copié") {
-                Text(ClipboardRetention.textLabel)
-                    .foregroundStyle(.secondary)
+            // **Le libellé était une constante, et il mentait.**
+            //
+            // `ClipboardRetention.textLabel` vaut « Texte conservé
+            // indéfiniment », écrit en dur. Le moteur, lui, a reçu une durée par
+            // défaut d'un an : l'écran promettait donc de tout garder pendant
+            // que la purge se préparait à effacer. Deux relectures externes
+            // indépendantes ont trouvé le même écart, et c'est bien une perte de
+            // données silencieuse.
+            //
+            // Il affiche maintenant ce que la politique dit réellement, et le
+            // choix est offert plutôt qu'imposé — avec « indéfiniment » comme
+            // défaut, parce qu'effacer un an d'historique derrière le dos de
+            // quelqu'un est pire que le garder.
+            Picker("Texte copié", selection: Binding(
+                get: { settings.textDays },
+                set: {
+                    settings.textDays = $0
+                    model.clipboard.applySettings()
+                }
+            )) {
+                ForEach(ClipboardRetention.offeredTextDays, id: \.self) { days in
+                    Text(ClipboardRetention(blobDays: settings.blobDays, textDays: days).textDaysLabel)
+                        .tag(days)
+                }
             }
 
             Picker("Conserver les contenus lourds", selection: Binding(
