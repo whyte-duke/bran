@@ -406,12 +406,25 @@ public enum ChainProbes {
     // MARK: - Maillon 5 : le seau
 
     /// **La sonde qui s'écrit le plus facilement à l'envers.** Un `GET`
-    /// anonyme sur le seau doit rendre **403** — c'est le succès : l'API S3
-    /// répond, le seau existe, la lecture anonyme est refusée comme elle
-    /// doit. `404` dit « seau absent », `200` dit « seau public » (une faute
-    /// de configuration, pas une preuve de santé), et une erreur de transport
-    /// dit qu'on n'a jamais atteint S3 — quatre situations, quatre messages,
-    /// aucun des trois autres ne doit se lire comme un succès.
+    /// anonyme sur le seau doit rendre **403** : l'API S3 répond et refuse la
+    /// lecture anonyme comme elle doit. `404` dit « seau absent », `200` dit
+    /// « seau public » (une faute de configuration, pas une preuve de santé),
+    /// et une erreur de transport dit qu'on n'a jamais atteint S3 — quatre
+    /// situations, quatre messages, aucun des trois autres ne doit se lire
+    /// comme un succès.
+    ///
+    /// **Ce que le 403 ne prouve pas, et que ce fichier affirmait à tort.**
+    /// Le message disait « le seau existe ». C'est faux : le comportement
+    /// documenté de S3 est de rendre `403 AccessDenied` à un client anonyme
+    /// aussi bien pour un seau existant que pour un seau qui n'existe pas —
+    /// précisément pour qu'un anonyme ne puisse pas énumérer les seaux d'un
+    /// serveur en lisant ses codes de retour. Un nom de seau mal orthographié
+    /// dans la configuration donnait donc un maillon 5 **vert** portant la
+    /// phrase « le seau existe », alors que le maillon 6 échouerait juste
+    /// après — et c'est le message vert, plus haut dans la liste, que l'œil
+    /// lit en premier. Ce maillon mesure la **joignabilité de l'API S3** ; la
+    /// question de l'existence appartient au maillon 6, qui ouvre vraiment le
+    /// dépôt avec des identifiants.
     public static func bucketReachable(
         endpoint: String,
         bucket: String,
@@ -439,9 +452,12 @@ public enum ChainProbes {
                 let state: LinkState = latency > slowThreshold ? .degraded : .up
                 return makeResult(
                     .bucketReachable, state,
-                    "Le seau « \(bucket) » répond 403 à une lecture anonyme : c'est "
-                        + "le succès attendu — l'API S3 répond, le seau existe, et "
-                        + "il refuse la lecture anonyme comme il doit.",
+                    "L'API S3 de \(endpoint) répond et refuse la lecture anonyme (403), "
+                        + "comme elle doit. **Ce code ne prouve pas que le seau "
+                        + "« \(bucket) » existe** : S3 rend le même 403 pour un seau "
+                        + "absent, afin de ne pas révéler à un anonyme quels seaux "
+                        + "sont là. C'est le maillon 6 — l'ouverture du dépôt — qui "
+                        + "tranche cette question-là.",
                     raw: bodyText(body), latency: latency
                 )
             case 404:
@@ -570,6 +586,11 @@ private func runTailscaleStatus(timeout: TimeInterval) async -> TailscaleFetch {
         return .timedOut
     case .launchFailed(let reason):
         return .launchFailed(reason)
+    case .overflowed(let bytes):
+        // Un préfixe n'est pas un document : on refuse de le décoder plutôt
+        // que d'en tirer un état de tailnet à moitié lu.
+        return .unreadableJSON(raw: "« tailscale status --json » a dépassé \(bytes) octets ; "
+            + "bran a cessé de l'accumuler et refuse de décoder une sortie tronquée.")
     case .finished(let exitCode, let stdout, let stderr):
         guard stdout.isEmpty == false else {
             let stderrText = String(data: stderr, encoding: .utf8) ?? "<sortie d'erreur illisible>"
@@ -805,9 +826,21 @@ private func cleartextGET(_ url: URL, timeout: TimeInterval) async -> HTTPOutcom
         // qu'elle capture l'est déjà — le gardien est verrouillé, la connexion
         // et l'élément de travail sont sûrs à annuler depuis n'importe quel
         // fil.
+        let recurse = SendableBox<@Sendable (Data) -> Void>()
+
         let finish: @Sendable (HTTPOutcome) -> Void = { outcome in
             timeoutWork.cancel()
             connection.stateUpdateHandler = nil
+            // **Le cycle de rétention, coupé ici.** `receiveStatusLine` capture
+            // `recurse`, et `recurse.value` porte `receiveStatusLine` : chacun
+            // retient l'autre, et rien ne dénoue ça tout seul — c'est le même
+            // piège que la fermeture d'état de `NWConnection`, documenté juste
+            // au-dessus, sur un autre objet. La sonde HTTP en clair tourne à
+            // deux maillons toutes les 45 s (30 s pendant un run) : 2 × 80
+            // fuites par heure, chacune retenant sa fermeture, son tampon
+            // accumulé et sa connexion. Invisible sur un lancement de test,
+            // mesurable après une nuit de surveillance.
+            recurse.value = nil
             guardian.resume(outcome)
             connection.cancel()
         }
@@ -835,7 +868,6 @@ private func cleartextGET(_ url: URL, timeout: TimeInterval) async -> HTTPOutcom
         // pas se nommer elle-même au moment où on l'écrit. Elle n'est assignée
         // qu'une fois, avant le premier `receive`, et lue depuis les rappels
         // — jamais mutée en concurrence.
-        let recurse = SendableBox<@Sendable (Data) -> Void>()
         let receiveStatusLine: @Sendable (Data) -> Void = { accumulated in
             connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, isComplete, receiveError in
                 if let receiveError {
@@ -851,13 +883,34 @@ private func cleartextGET(_ url: URL, timeout: TimeInterval) async -> HTTPOutcom
                     // d'être de l'UTF-8 valide, et ce n'est pas lui qu'on
                     // juge ici.
                     guard let statusLine = String(data: buffer[buffer.startIndex..<crlf.lowerBound], encoding: .utf8),
-                          let code = statusLine.split(separator: " ").dropFirst().first,
-                          let status = Int(code)
+                          let status = parseHTTPStatusLine(statusLine)
                     else {
-                        finish(.transportError("réponse sans ligne de statut lisible"))
+                        finish(.transportError("réponse sans ligne de statut HTTP lisible"))
                         return
                     }
                     finish(.response(status: status, body: buffer))
+                    return
+                }
+
+                // **Un plafond sur la ligne de statut, et il en fallait un.**
+                //
+                // Sans `\r\n`, cette boucle accumule tout ce qui arrive, sans
+                // fin. N'importe quoi qui écoute sur le port S3 et déverse des
+                // octets sans jamais envoyer de retour à la ligne — un serveur
+                // mal configuré, un service qui n'est pas HTTP, quelqu'un qui
+                // vise ce Mac — faisait grossir ce tampon jusqu'à la mémoire
+                // disponible. Le délai finissait par trancher, mais bien après
+                // les dégâts : à 100 Mo/s sur un lien local, cinq secondes de
+                // délai valent un demi-gigaoctet.
+                //
+                // 8 Kio est très large pour une ligne de statut, dont la forme
+                // réelle est « HTTP/1.1 403 Forbidden » — 22 octets. C'est
+                // aussi la limite que retiennent les serveurs HTTP courants
+                // pour une ligne de requête.
+                guard buffer.count <= maxStatusLineBytes else {
+                    finish(.transportError(
+                        "aucune fin de ligne de statut après \(maxStatusLineBytes) octets — "
+                            + "ce n'est probablement pas un serveur HTTP"))
                     return
                 }
 
@@ -891,6 +944,50 @@ private func cleartextGET(_ url: URL, timeout: TimeInterval) async -> HTTPOutcom
     }
 }
 
+/// Ce qu'une ligne de statut HTTP a le droit d'atteindre avant qu'on décrète
+/// que le correspondant ne parle pas HTTP. Voir l'usage pour la panne.
+private let maxStatusLineBytes = 8 * 1024
+
+/// Lit le code d'une ligne de statut HTTP, et **refuse tout ce qui n'en est
+/// pas une**.
+///
+/// ## La panne, telle qu'elle se produit
+///
+/// L'ancien découpage était `statusLine.split(separator: " ").dropFirst()
+/// .first` puis `Int(...)`. Il ne regardait ni le premier mot, ni la forme du
+/// second. N'importe quoi qui écoute sur le port S3 et répond
+///
+/// ```
+///   GARBAGE 403 peu importe la suite\r\n
+/// ```
+///
+/// donnait donc `403`, c'est-à-dire, pour ``ChainProbes/bucketReachable``, le
+/// code que cette sonde traite comme sain. Un service qui n'a rien à voir
+/// avec MinIO — ou un correspondant hostile sur le tailnet — pouvait ainsi
+/// rendre le maillon 5 vert. Même famille exactement que le défaut que la
+/// boucle d'accumulation ferme un peu plus haut (« HTTP/1.1 40 » livré en deux
+/// segments) : un nombre plausible tiré d'octets qui ne veulent pas dire ça.
+///
+/// ## Ce qu'on exige, et pourquoi juste ça
+///
+/// 1. La ligne commence par `HTTP/` — la seule chose que RFC 9112 garantisse
+///    de la version, sans figer le numéro (`HTTP/1.0`, `HTTP/1.1`).
+/// 2. Le code est **exactement trois chiffres**, entre 100 et 599. Trois
+///    chiffres est la forme normative ; la borne écarte un `999` inventé
+///    autant qu'un `40` tronqué.
+/// 3. Le reste de la ligne — la phrase explicative — n'est pas examiné : elle
+///    est facultative depuis HTTP/1.1 et ne dit rien qu'on utilise.
+func parseHTTPStatusLine(_ line: String) -> Int? {
+    guard line.hasPrefix("HTTP/") else { return nil }
+    let fields = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+    guard fields.count >= 2 else { return nil }
+    let code = fields[1]
+    guard code.count == 3, code.allSatisfy(\.isASCII), code.allSatisfy(\.isNumber),
+          let status = Int(code), (100...599).contains(status)
+    else { return nil }
+    return status
+}
+
 private func tlsGET(_ url: URL, timeout: TimeInterval) async -> HTTPOutcome {
     let session = ephemeralSession(timeout: timeout)
     defer { session.invalidateAndCancel() }
@@ -914,9 +1011,18 @@ private func tlsGET(_ url: URL, timeout: TimeInterval) async -> HTTPOutcome {
 
 // MARK: - Un processus qui ne peut pas bloquer l'application
 
+/// Le sursis laissé à un processus après SIGTERM avant le SIGKILL — même
+/// valeur et même raison que `KopiaDriver.terminateGracefully`, en plus court
+/// parce que les commandes lancées ici ne durent normalement qu'une fraction
+/// de seconde.
+private let processKillGracePeriod: TimeInterval = 2
+
 enum ProcessRunOutcome: Sendable {
     case timedOut
     case launchFailed(String)
+    /// La sortie a dépassé ``DataAccumulator/limit`` : ce qui a été reçu est
+    /// un préfixe, jamais un document à décoder.
+    case overflowed(bytes: Int)
     case finished(exitCode: Int32, stdout: Data, stderr: Data)
 }
 
@@ -982,7 +1088,32 @@ func runProcess(
         // couvrir, et l'écrire à la main vaut mieux que de recopier l'objet
         // dans une boîte qui n'apporterait aucune sûreté de plus.
         nonisolated(unsafe) let timeoutWork = DispatchWorkItem {
-            if process.isRunning { process.terminate() }
+            // **`terminate()` seul ne suffit pas, et le laisser seul fuyait.**
+            //
+            // `Process.terminate()` envoie SIGTERM — un signal qu'un processus
+            // a parfaitement le droit d'intercepter et d'ignorer. Quand c'est
+            // le cas, `terminationHandler` n'est jamais appelé : les deux
+            // `readabilityHandler` restent posés, les descripteurs des deux
+            // tubes restent ouverts, et le processus enfant continue de tourner
+            // — pour toujours, puisque plus rien ne le surveille. Ces sondes
+            // partent toutes les 45 s ; une fuite par sonde bloquée devient
+            // 80 processus et 320 descripteurs par heure, jusqu'à la limite
+            // par processus.
+            //
+            // On coupe donc les deux gestionnaires ici — la seule chose qu'on
+            // ne fait pas, c'est fermer les descripteurs, que
+            // `terminationHandler` peut encore vouloir lire s'il finit par se
+            // déclencher — et on arme un SIGKILL après un délai de grâce.
+            // Contrairement à `KopiaDriver`, il n'y a ici aucun état local à
+            // refermer proprement : `tailscale status` ne fait que lire.
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            if process.isRunning {
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + processKillGracePeriod) {
+                    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                }
+            }
             guardian.resume(.timedOut)
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
@@ -1014,6 +1145,11 @@ func runProcess(
             stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
             stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
 
+            guard !stdoutBuffer.didOverflow, !stderrBuffer.didOverflow else {
+                guardian.resume(.overflowed(bytes: DataAccumulator.limit))
+                return
+            }
+
             guardian.resume(.finished(
                 exitCode: finished.terminationStatus,
                 stdout: stdoutBuffer.snapshot(),
@@ -1037,14 +1173,39 @@ func runProcess(
 /// lit `snapshot()`. `@unchecked Sendable` justifié comme dans
 /// `SpeedProbe.Counter` : la seule voie d'accès à `data` passe par le verrou,
 /// rien ne le laisse fuir sans lui.
+/// **Plafonné**, et le plafond n'est pas décoratif : la sortie de ces
+/// processus est décodée en JSON, donc elle doit rester entière ou ne rien
+/// valoir. Un `tailscale status --json` sain mesure 13 436 octets sur ce Mac
+/// (relevé le 02/09/2026) ; 16 Mio laissent la place à un tailnet mille fois
+/// plus grand. Au-delà, on cesse d'accumuler et on le dit
+/// (``didOverflow``) — jamais un JSON tronqué qu'un décodeur pourrait
+/// accepter à moitié, jamais une sonde qui ferait grossir bran sans fin parce
+/// qu'un processus déverse des octets.
 final class DataAccumulator: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
+    private var overflowed = false
+
+    /// 16 Mio : mille fois la plus grosse sortie mesurée en fonctionnement.
+    static let limit = 16 * 1024 * 1024
 
     func append(_ chunk: Data) {
         lock.lock()
+        defer { lock.unlock() }
+        guard !overflowed else { return }
+        guard data.count + chunk.count <= Self.limit else {
+            overflowed = true
+            return
+        }
         data.append(chunk)
-        lock.unlock()
+    }
+
+    /// Vrai quand le plafond a été franchi : les octets rendus par
+    /// ``snapshot()`` sont alors un préfixe, pas un document.
+    var didOverflow: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return overflowed
     }
 
     func snapshot() -> Data {

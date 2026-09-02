@@ -196,6 +196,13 @@ public enum KopiaRestoreFailure: Error, Sendable, CustomStringConvertible {
     /// geste à faire est d'attendre.
     case repositoryBusy
 
+    /// Le verrou de simultanéité n'a pas pu être **tenté** — pas « quelqu'un
+    /// d'autre l'a », mais « on n'a pas pu poser la question » : droits
+    /// retirés sur le dossier du journal, disque plein, volume en lecture
+    /// seule. Distinct de ``repositoryBusy`` parce que le geste à faire n'est
+    /// pas le même : attendre ne répare rien ici.
+    case lockUnavailable(operation: String, errno: Int32)
+
     case binary(KopiaBinaryFailure)
     case launchFailed(underlying: String)
     case alreadyRunning
@@ -216,6 +223,10 @@ public enum KopiaRestoreFailure: Error, Sendable, CustomStringConvertible {
         case .repositoryBusy:
             "Le dépôt est occupé par une sauvegarde en cours. La restauration "
                 + "démarrera dès qu'elle sera terminée ou annulée."
+        case .lockUnavailable(let operation, let code):
+            "Le verrou de simultanéité n'a pas pu être posé (\(operation), errno \(code)) : "
+                + "ce n'est pas une sauvegarde concurrente, c'est le dossier du journal qui est "
+                + "inaccessible."
         case .destinationInvalid(let problems):
             "Destination refusée : " + problems.map(\.description).joined(separator: " ")
         case .decodingFailed(let failure, _): failure.description
@@ -239,6 +250,13 @@ public enum KopiaRestoreFailure: Error, Sendable, CustomStringConvertible {
                 summary: "Le dépôt est occupé par une sauvegarde en cours.",
                 suggestedAction: "Attendre la fin de la sauvegarde, ou l'annuler, puis relancer la restauration.",
                 rawOutput: "")
+        case .lockUnavailable(let operation, let code):
+            BackupFailure(
+                kind: .storage,
+                summary: description,
+                suggestedAction: "Vérifier les droits et la place disponible sur "
+                    + "« ~/Library/Application Support/bran/backup ».",
+                rawOutput: "\(operation) : errno \(code)")
         case .restore(let failure):
             failure
         case .binary(let failure):
@@ -326,6 +344,16 @@ public actor KopiaRestoreDriver {
             wasCancelled: result.wasCancelled, signal: result.signal
         ) {
             throw KopiaRestoreFailure.restore(failure)
+        }
+        guard !result.stdoutOverflowed else {
+            throw KopiaRestoreFailure.restore(BackupFailure(
+                kind: .unparseable,
+                summary: "Le listing de « \(objectID) » dépasse "
+                    + "\(BoundedOutputBuffer.defaultStdoutLimit / (1024 * 1024)) Mo : bran a cessé de "
+                    + "l'accumuler et refuse de décoder un document tronqué.",
+                suggestedAction: "Descendre dans un sous-dossier plutôt que de lister celui-ci en entier.",
+                rawOutput: KopiaFailureClassifier.maskSecrets(in: result.stderr)
+            ))
         }
         guard !result.stdout.isEmpty else {
             throw KopiaRestoreFailure.restore(BackupFailure(
@@ -435,7 +463,35 @@ public actor KopiaRestoreDriver {
         onProgress: @escaping @Sendable (RestoreProgress) -> Void
     ) async throws -> RestoreSummary {
         let facts = RestoreDestinationInspector.inspect(destination)
-        let problems = RestoreCatalog.validateDestination(facts, requiredBytes: requiredBytes, overwrite: overwrite)
+        var problems = RestoreCatalog.validateDestination(facts, requiredBytes: requiredBytes, overwrite: overwrite)
+
+        // **Un contenu inconnu n'est pas un dossier vide.**
+        //
+        // `RestoreCatalog.validateDestination` ne pose `.notEmpty` que sur
+        // `facts.isEmpty == false` : un dossier dont `contentsOfDirectory` a
+        // échoué porte `isEmpty == nil` et **passe la garde**. Le cas est réel
+        // — un dossier exécutable mais non listable (bit `x` sans bit `r`, ACL
+        // inhabituelle sur un volume externe) est exactement celui que
+        // `RestoreDestinationFacts.isEmpty` documente comme rendant `nil`.
+        // kopia partait alors sur une destination dont personne ne savait ce
+        // qu'elle contenait, avec `--no-overwrite-*` : au mieux il échoue à
+        // mi-parcours en laissant une restauration incomplète mêlée à des
+        // fichiers préexistants, au pire on a demandé « écraser » et il
+        // écrase ce qu'on n'a pas pu voir.
+        //
+        // Corrigé ici plutôt que dans `validateDestination` : cette fonction
+        // vit dans `BranBackup`, hors du périmètre de cette correction. La
+        // vraie place du garde-fou est là-bas (`facts.isEmpty != true` au lieu
+        // de `facts.isEmpty == false`) — voir le rapport.
+        //
+        // Seulement en mode « ne rien écraser » : c'est le mode dont toute la
+        // prémisse est « ce dossier est vide ». En mode « écraser », un
+        // contenu inconnu ne change rien à ce que l'appelant a déjà accepté.
+        if overwrite == .refuseIfNotEmpty, facts.exists, facts.isDirectory, facts.isEmpty == nil,
+           problems.contains(.notEmpty(policy: overwrite)) == false {
+            problems.append(.notEmpty(policy: overwrite))
+        }
+
         guard problems.isEmpty else {
             throw KopiaRestoreFailure.destinationInvalid(problems)
         }
@@ -456,8 +512,22 @@ public actor KopiaRestoreDriver {
         // `flock` et non un témoin : le noyau le rend à la mort du processus,
         // quelle qu'en soit la cause. Une restauration interrompue par une
         // panne de courant ne laisse pas le dépôt verrouillé pour toujours.
-        guard let lock = BackupRunLock.acquire() else {
+        //
+        // **Trois issues, pas deux.** `BackupRunLock.acquire()` distingue
+        // désormais « quelqu'un d'autre l'a » d'« on n'a pas pu essayer » :
+        // droits retirés sur le dossier du journal, disque plein, volume
+        // remonté en lecture seule. Les confondre annonçait « une sauvegarde
+        // est en cours, attendez » sur une panne de disque qui ne se
+        // résoudrait jamais toute seule — un message qui invite à patienter
+        // devant un mur.
+        let lock: BackupRunLock.Held
+        switch BackupRunLock.acquire() {
+        case .acquired(let held):
+            lock = held
+        case .heldByAnotherProcess:
             throw KopiaRestoreFailure.repositoryBusy
+        case .failed(let operation, let code):
+            throw KopiaRestoreFailure.lockUnavailable(operation: operation, errno: code)
         }
         defer { lock.release() }
 
@@ -583,6 +653,9 @@ public actor KopiaRestoreDriver {
         var wasCancelled: Bool
         var signal: Int32?
         var stallDetected: Bool
+        /// Vrai quand stdout a dépassé le plafond de `BoundedOutputBuffer` :
+        /// le listing rendu est un préfixe, jamais un document à décoder.
+        var stdoutOverflowed: Bool
     }
 
     /// Reconstruit, pour `show` et `restore`, exactement la discipline
@@ -708,7 +781,8 @@ public actor KopiaRestoreDriver {
             stderr: collector.stderrText,
             wasCancelled: wasCancelled,
             signal: signal,
-            stallDetected: wasStalled
+            stallDetected: wasStalled,
+            stdoutOverflowed: collector.stdoutOverflowed
         )
     }
 }
@@ -729,10 +803,21 @@ private final class RestoreProcessBox: @unchecked Sendable {
     init(_ process: Process) { self.process = process }
 }
 
+/// **Les deux tampons sont plafonnés**, même raison et même chiffre que
+/// `KopiaDriver.OutputCollector` — voir `BoundedOutputBuffer`. Une
+/// restauration de plusieurs centaines de gigaoctets publie autant de lignes
+/// de progression qu'une sauvegarde, et n'a pas plus le droit qu'elle de les
+/// garder toutes en mémoire.
+///
+/// La queue compte double ici : c'est dans les dernières lignes de stderr que
+/// vit « Restored N files… », la **seule** preuve qu'une restauration est
+/// allée à son terme (voir `finalSummary(fromStderr:)`). Une troncature
+/// aveugle qui garderait la tête ferait échouer toutes les restaurations
+/// longues en `completionNotConfirmed`, sur des fichiers pourtant complets.
 private final class RestoreOutputCollector: @unchecked Sendable {
     private let lock = NSLock()
-    private var stdout = Data()
-    private var stderr = Data()
+    private let stdout = BoundedOutputBuffer.stdout()
+    private let stderr = BoundedOutputBuffer.stderr()
     private var progressReader = RestoreProgressReader()
     private var lastProgress = Date()
     private let onProgress: (@Sendable (RestoreProgress) -> Void)?
@@ -742,15 +827,11 @@ private final class RestoreOutputCollector: @unchecked Sendable {
     }
 
     func appendStdout(_ data: Data) {
-        lock.lock()
         stdout.append(data)
-        lock.unlock()
     }
 
     func appendStderr(_ data: Data) {
-        lock.lock()
         stderr.append(data)
-        lock.unlock()
 
         guard let onProgress else { return }
         // Décodage indulgent pour cette lecture en direct seulement, même
@@ -771,14 +852,15 @@ private final class RestoreOutputCollector: @unchecked Sendable {
     }
 
     var stdoutData: Data {
-        lock.lock(); defer { lock.unlock() }
-        return stdout
+        stdout.snapshot()
+    }
+
+    var stdoutOverflowed: Bool {
+        stdout.didOverflow
     }
 
     var stderrText: String {
-        lock.lock(); defer { lock.unlock() }
-        return String(data: stderr, encoding: .utf8)
-            ?? "<stderr non-UTF8, \(stderr.count) octets>"
+        stderr.text()
     }
 
     var lastProgressAt: Date {

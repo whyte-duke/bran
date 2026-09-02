@@ -62,7 +62,16 @@ struct BackupSettingsSection: View {
                 .frame(minHeight: BackupSettingsMetric.ignoreEditorHeight)
                 .branWell()
                 .accessibilityLabel("Règles d'exclusion")
-            Text("Une règle par ligne, syntaxe .gitignore de Kopia — par exemple « *.tmp » ou « node_modules/ ». Vide, rien n'est exclu.")
+            // **Ce texte dit maintenant où ces règles vont, parce qu'elles y
+            // vont enfin.** Elles étaient saisies, persistées, et jamais
+            // transmises à kopia : `snapshot create` n'a aucun drapeau
+            // d'exclusion, tout passe par la politique du dépôt, et personne
+            // ne l'écrivait — un dossier explicitement exclu partait quand
+            // même. `KopiaDriver.applyIgnoreRules` est appelé avant chaque
+            // sauvegarde, et remet à zéro la liste du dépôt avant d'y écrire
+            // celle-ci : ce qui est affiché ici est exactement ce qui
+            // s'applique.
+            Text("Une règle par ligne, syntaxe .gitignore de Kopia — par exemple « *.tmp » ou « node_modules/ ». Vide, rien n'est exclu. Ces règles sont écrites dans la politique du dépôt avant chaque sauvegarde : ce que vous voyez ici est exactement ce que kopia applique, et retirer une ligne la retire aussi du dépôt.")
                 .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -205,7 +214,29 @@ struct BackupSettingsSection: View {
                 in: 5...300,
                 step: 5
             )
-            Text("Généreux, contrairement au précédent : ouvrir le dépôt Kopia depuis loin — l'Indonésie, un tailnet chargé — peut légitimement prendre plusieurs dizaines de secondes sans que rien ne soit cassé.")
+            // **Ce curseur agit, désormais.** Il n'était lu nulle part : la
+            // seule occurrence de `repositoryTimeout` hors des réglages était
+            // un commentaire, et `repositoryStatus()` partait sans aucun
+            // délai. Il borne maintenant toutes les commandes kopia qui n'ont
+            // pas de progression à publier — l'ouverture du dépôt, la relecture
+            // des snapshots, l'écriture des règles d'exclusion — c'est-à-dire
+            // exactement celles que le détecteur de blocage ne protège pas.
+            Text("Généreux, contrairement au précédent : ouvrir le dépôt Kopia depuis loin — l'Indonésie, un tailnet chargé — peut légitimement prendre plusieurs dizaines de secondes sans que rien ne soit cassé. Au-delà, la commande est arrêtée plutôt que laissée suspendue : un dépôt qui ne répond plus figeait la fenêtre et gardait le verrou qui empêche toutes les sauvegardes suivantes.")
+                .font(Type.meta)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        Section("Sauvegarde planifiée") {
+            // **L'état réel du job launchd, montré.** `BackupController` le
+            // relit toutes les dix minutes auprès de `launchctl print` et
+            // rangeait le verdict dans une propriété qu'aucune vue ne lisait :
+            // l'écran disait « activée » pendant que rien n'était chargé, et le
+            // seul témoin était Console.app. C'est la panne fondatrice du
+            // projet une case plus loin — une planification qui existe sur le
+            // papier et que rien n'exécute.
+            LaunchAgentStatusRow(status: backup.launchAgentStatus)
+            Text("La sauvegarde est exécutée par un job launchd, qui appelle bran une fois par heure que la fenêtre soit ouverte ou non. Sans lui, rien ne part jamais tout seul — quelle que soit la fréquence réglée plus haut.")
                 .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -438,6 +469,56 @@ private struct SecretRenewalRow: View {
         }
         problem = nil
         isEditing = false
+    }
+}
+
+// MARK: - L'état du job launchd
+
+/// Ce que `launchd` sait vraiment du job, en une ligne — jamais ce que
+/// l'écriture du plist a supposé.
+private struct LaunchAgentStatusRow: View {
+    let status: LaunchAgentStatus
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Space.small) {
+            Image(systemName: symbol).foregroundStyle(tint)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: Space.small)
+        }
+        .font(Type.cardBody)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var symbol: String {
+        switch status {
+        case .running: "checkmark.circle.fill"
+        case .notApplicable: "pause.circle.fill"
+        case .installFailed, .notLoaded: "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch status {
+        case .running: Palette.done
+        case .notApplicable: Palette.asleep
+        case .notLoaded: Palette.attention
+        case .installFailed: Palette.broken
+        }
+    }
+
+    private var text: String {
+        switch status {
+        case .running:
+            "Le job est chargé : launchd le confirme."
+        case .notApplicable:
+            "Aucun job installé — la sauvegarde est désactivée."
+        case .notLoaded:
+            "Le fichier du job est écrit, mais launchd ne le voit pas chargé : aucune sauvegarde ne "
+                + "partira d'elle-même. Désactivez puis réactivez la sauvegarde pour le réinstaller."
+        case .installFailed(let reason):
+            "Le job n'a pas pu être installé — rien ne partira tout seul. \(reason)"
+        }
     }
 }
 

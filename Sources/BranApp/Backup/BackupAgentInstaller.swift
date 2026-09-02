@@ -99,7 +99,34 @@ enum BackupAgentInstaller {
     /// voir `SchedulePolicy` pour le pourquoi de ce report de confiance.
     private static let pollIntervalSeconds = 3600
 
-    static func install() throws {
+    /// Ce qu'une installation a réellement fait.
+    ///
+    /// **La distinction n'est pas cosmétique : elle est la correction.**
+    /// `reload()` fait `launchctl bootout` puis `bootstrap`. `bootout` ne
+    /// décharge pas seulement la définition du job — il **tue le processus que
+    /// launchd avait démarré**, c'est-à-dire, en pleine première sauvegarde,
+    /// le `bran --backup-run` en cours et le `kopia snapshot create` qu'il
+    /// tient. Or `syncLaunchAgent()` appelle `install()` au démarrage de
+    /// l'application **et à chaque écriture de la configuration**, laquelle a
+    /// lieu à chaque frappe dans un champ de réglages. Ouvrir bran, ou taper
+    /// un caractère dans « Seau », coupait donc une sauvegarde headless en
+    /// cours — sur un transfert de trente heures, la reprise reste bon marché
+    /// grâce à la déduplication, mais une frappe par seconde signifie une
+    /// coupure par seconde, et le transfert n'avance plus du tout.
+    ///
+    /// D'où `alreadyCurrent` : quand le plist sur disque est **exactement**
+    /// celui qu'on écrirait et que `launchctl print` voit le job chargé, il
+    /// n'y a rien à faire, et surtout rien à décharger.
+    enum InstallOutcome: Sendable, Equatable {
+        /// Le plist était déjà le bon et le job est chargé : rien n'a été
+        /// touché, aucune sauvegarde en cours n'a été interrompue.
+        case alreadyCurrent
+        /// Le plist a été (ré)écrit et le job rechargé.
+        case installed
+    }
+
+    @discardableResult
+    static func install() throws -> InstallOutcome {
         guard let executable = Bundle.main.executableURL else {
             throw Failure.noExecutableURL
         }
@@ -153,8 +180,28 @@ enum BackupAgentInstaller {
             "StandardErrorPath": logDirectory.appending(path: "launchd.err.log").path(percentEncoded: false),
         ]
 
-        try write(plist)
+        let data: Data
+        do {
+            data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        } catch {
+            throw Failure.cannotSerialize(String(describing: error))
+        }
+
+        // La comparaison porte sur les **octets sérialisés**, pas sur le
+        // dictionnaire : c'est ce que `launchd` lit, et c'est le seul niveau
+        // où « identique » veut dire quelque chose. `PropertyListSerialization`
+        // en XML ordonne les clés de façon stable pour un même dictionnaire,
+        // donc deux appels successifs sur une configuration inchangée
+        // produisent le même fichier octet pour octet — vérifié en écrivant
+        // deux fois de suite.
+        let existing = try? Data(contentsOf: plistURL)
+        if existing == data, verifyInstalled().isLoaded {
+            return .alreadyCurrent
+        }
+
+        try write(data)
         try reload()
+        return .installed
     }
 
     /// Décharge le job et retire son plist. Idempotent : appelable sur un
@@ -199,19 +246,12 @@ enum BackupAgentInstaller {
 
     // MARK: - Le plist
 
-    private static func write(_ plist: [String: Any]) throws {
+    private static func write(_ data: Data) throws {
         let directory = plistURL.deletingLastPathComponent()
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
             throw Failure.cannotCreateDirectory(String(describing: error))
-        }
-
-        let data: Data
-        do {
-            data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
-        } catch {
-            throw Failure.cannotSerialize(String(describing: error))
         }
 
         do {
