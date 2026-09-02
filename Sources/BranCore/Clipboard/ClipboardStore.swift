@@ -969,7 +969,8 @@ public final class ClipboardStore {
         let names = await Self.dayFolderNames(in: base)
         let today = ClipboardRetention.dayKey(for: now)
         let doomed = retention.dayFoldersToPurge(from: names, today: today)
-        guard doomed.isEmpty == false else { return 0 }
+        let obsolete = retention.dayFoldersToDelete(from: names, today: today)
+        guard doomed.isEmpty == false || obsolete.isEmpty == false else { return 0 }
 
         var marked = 0
         for day in doomed {
@@ -1037,8 +1038,92 @@ public final class ClipboardStore {
             }
         }
 
+        await erase(days: obsolete, in: base)
+
         await refreshBlobBytes(in: base, days: names)
         return marked
+    }
+
+    /// Efface tout de suite tout ce qui n'est pas épinglé, sans attendre aucune
+    /// échéance.
+    ///
+    /// **Le geste qui manquait, et pourquoi il manquait à ce point.** Un
+    /// presse-papiers ne contient pas que des adresses et des bouts de code : il
+    /// contient des jetons d'API, des mots de passe collés depuis un
+    /// gestionnaire, des clés privées. Le marqueur `ConcealedType` qui devrait
+    /// les tenir hors de l'historique n'est qu'une convention, que le Terminal
+    /// n'applique pas. Quand quelqu'un s'aperçoit qu'un secret est parti dans
+    /// l'historique, la seule réponse acceptable est « maintenant », pas « dans
+    /// 365 jours » — et jusqu'ici la seule réponse possible était d'aller
+    /// supprimer des dossiers dans le Finder.
+    ///
+    /// Les entrées épinglées survivent : l'épingle est une décision explicite,
+    /// et c'est justement ce qui rend cette purge utilisable sans hésiter.
+    ///
+    /// - Returns: le nombre d'entrées effacées.
+    @discardableResult
+    public func eraseUnpinned() async -> Int {
+        await serialized {
+            let base = self.folder
+            let erased = await self.erase(days: await Self.dayFolderNames(in: base), in: base)
+            await self.refreshBlobBytes(in: base, days: await Self.dayFolderNames(in: base))
+            return erased
+        }
+    }
+
+    /// Efface le texte de ces jours-là, **en épargnant ce qu'on a promis de
+    /// garder et ce qu'on n'a pas su lire.**
+    ///
+    /// Trois refus, et chacun a sa raison :
+    ///
+    /// - un dossier **illisible** ne conclut rien. C'est la leçon de
+    ///   `listing(of:)` : « je n'ai pas pu voir la liste » et « la liste est
+    ///   vide » sont deux phrases différentes, et seule la seconde autorise une
+    ///   suppression ;
+    /// - une entrée **épinglée** reste, avec son sidecar. Supprimer le dossier
+    ///   emporterait son texte en laissant son contenu lourd dans
+    ///   `Pinned/blobs/` — une entrée effacée **et** un fichier orphelin ;
+    /// - un sidecar **illisible** interdit de supprimer le dossier en entier.
+    ///   Un `.json` abîmé est peut-être récupérable à la main, et c'est déjà ce
+    ///   que `SidecarFault` dit du même cas ailleurs. Les entrées lisibles
+    ///   partent une par une, le fichier abîmé reste.
+    ///
+    /// Le `rm` du dossier entier n'a donc lieu que dans le cas majoritaire —
+    /// tout est lisible, rien n'est épinglé — et c'est celui qui compte, parce
+    /// que c'est le seul qui emporte aussi l'index et le `blobs/` d'un coup.
+    @discardableResult
+    private func erase(days: [String], in base: URL) async -> Int {
+        var erased = 0
+
+        for day in days {
+            let target = base.appending(path: day, directoryHint: .isDirectory)
+            let read = await Self.readSidecars(in: target)
+            guard read.unreadable == false else { continue }
+
+            let kept = read.entries.filter(\.isPinned)
+            let removable = read.entries.filter { $0.isPinned == false }
+            guard removable.isEmpty == false else { continue }
+
+            do {
+                if kept.isEmpty, read.faults == 0 {
+                    try await Self.removeDayFolder(target)
+                } else {
+                    await Self.invalidateIndex(in: target)
+                    for entry in removable { try await Self.removeSidecar(entry, in: target) }
+                    try await Self.rewriteIndex(Self.ordered(kept), in: target)
+                }
+                let gone = Set(removable.map(\.id))
+                recent.removeAll { gone.contains($0.id) }
+                erased += removable.count
+            } catch {
+                writeFailure = "Historique du \(day) non effacé : \(error.localizedDescription)"
+            }
+        }
+
+        if erased > 0 {
+            clipboardLog.notice("\(erased, privacy: .public) entrée(s) effacée(s) par la rétention du texte")
+        }
+        return erased
     }
 
     /// Recompte les deux chiffres des réglages, jours et épinglés.
@@ -1675,9 +1760,26 @@ public final class ClipboardStore {
         try payload.write(to: dayFolder.appending(path: indexFileName), options: .atomic)
     }
 
+    /// Supprime un dossier-jour entier — sidecars, index et `blobs/`.
+    ///
+    /// **Le seul `rm -rf` du magasin qui emporte du texte**, et son appelant est
+    /// unique : `erase(days:in:)`, qui ne l'appelle que lorsqu'il a lu tous les
+    /// sidecars du dossier, qu'aucun n'est épinglé et qu'aucun n'a résisté à la
+    /// lecture. Le chemin, lui, ne vient jamais d'un fichier : il est composé à
+    /// partir d'un nom que `ClipboardRetention.day(from:)` a reconnu comme une
+    /// date, ce qui est la même porte que celle qui protège `Pinned` et
+    /// `.DS_Store` de la purge.
+    nonisolated static func removeDayFolder(_ dayFolder: URL) async throws {
+        guard FileManager.default.fileExists(
+            atPath: dayFolder.path(percentEncoded: false)
+        ) else { return }
+        try FileManager.default.removeItem(at: dayFolder)
+    }
+
     /// Supprime le `blobs/` d'un jour, avec tout ce qu'il contient. C'est le
-    /// `rm -rf` de la purge, et il est cadré au sous-dossier : l'`index.jsonl` et
-    /// les sidecars du jour restent, parce que le texte n'est jamais purgé.
+    /// `rm -rf` de la purge des contenus lourds, et il est cadré au
+    /// sous-dossier : l'`index.jsonl` et les sidecars du jour restent, parce que
+    /// le texte a sa propre échéance — voir `ClipboardRetention.textDays`.
     nonisolated static func removeBlobsFolder(in dayFolder: URL) async throws {
         let url = dayFolder.appending(path: blobsFolderName, directoryHint: .isDirectory)
         guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return }

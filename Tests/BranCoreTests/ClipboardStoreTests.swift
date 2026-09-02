@@ -1227,6 +1227,94 @@ struct ClipboardStoreTests {
         #expect(names(in: store.pinnedBlobsFolder).isEmpty)
     }
 
+    // MARK: - La fin du texte
+
+    /// Le pendant sur disque de `ClipboardRetentionTests` : le dossier-jour
+    /// entier s'en va, index et contenus compris, et l'entrée quitte l'écran en
+    /// même temps que le fichier.
+    @Test("Un jour plus vieux que la rétention du texte disparaît en entier")
+    func jourTropVieuxDisparait() async throws {
+        let root = try makeRoot()
+        let politique = ClipboardRetention(blobDays: 30, textDays: 365)
+        let store = makeStore(at: root, retention: politique)
+        let vieux = Self.noon.addingTimeInterval(-400 * Self.day)
+
+        await store.save(text("un jeton d'API", at: vieux), payloads: [payload("image")])
+        await store.save(text("copiée aujourd'hui"))
+        #expect(store.recent.count == 2)
+
+        _ = await store.purgeExpired(now: Self.noon)
+
+        #expect(store.recent.count == 1)
+        #expect(store.recent.first?.preview == "copiée aujourd'hui")
+        #expect(names(in: store.folder).contains(dayKey(vieux)) == false)
+
+        // Et le redémarrage dit la même chose.
+        let relu = makeStore(at: root, retention: politique)
+        #expect(await relu.load() == 1)
+    }
+
+    /// **L'épingle est ce qui rend cette purge acceptable.** Une entrée
+    /// épinglée garde son sidecar, donc son dossier, donc son texte ; les
+    /// voisines du même jour partent quand même.
+    @Test("Une entrée épinglée survit à la rétention du texte, ses voisines non")
+    func epingleeSurvitALaRetentionDuTexte() async throws {
+        let root = try makeRoot()
+        let politique = ClipboardRetention(blobDays: 30, textDays: 365)
+        let store = makeStore(at: root, retention: politique)
+        let vieux = Self.noon.addingTimeInterval(-400 * Self.day)
+
+        let gardee = await store.save(text("à garder", at: vieux))
+        await store.save(text("à oublier", at: vieux.addingTimeInterval(1)))
+        _ = try #require(await store.pin(gardee, at: vieux))
+
+        _ = await store.purgeExpired(now: Self.noon)
+
+        let relu = makeStore(at: root, retention: politique)
+        #expect(await relu.load() == 1)
+        #expect(relu.recent.first?.id == gardee.id)
+        #expect(relu.recent.first?.isPinned == true)
+    }
+
+    /// Un `.json` qu'on n'a pas su lire interdit le `rm` du dossier entier : il
+    /// est peut-être récupérable à la main, et c'est déjà ce que le dépôt dit du
+    /// même cas ailleurs. Les entrées lisibles partent quand même.
+    @Test("Un sidecar illisible reste, et n'empêche pas les autres de partir")
+    func sidecarIllisibleResteALEffacement() async throws {
+        let root = try makeRoot()
+        let politique = ClipboardRetention(blobDays: 30, textDays: 365)
+        let store = makeStore(at: root, retention: politique)
+        let vieux = Self.noon.addingTimeInterval(-400 * Self.day)
+
+        await store.save(text("lisible", at: vieux))
+        let jour = dossierDuJour(root, vieux)
+        let abime = "\(UUID().uuidString).json"
+        try Data("{ pas du JSON".utf8).write(to: jour.appending(path: abime))
+
+        _ = await store.purgeExpired(now: Self.noon)
+
+        #expect(names(in: jour).contains(abime))
+        #expect(names(in: jour).filter { $0.hasSuffix(".json") } == [abime])
+    }
+
+    /// La purge immédiate : « j'ai copié un jeton, efface-moi ça maintenant ».
+    @Test("La purge immédiate efface tout sauf les épingles")
+    func purgeImmediate() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+
+        let gardee = await store.save(text("à garder"))
+        await store.save(text("un mot de passe", at: Self.noon.addingTimeInterval(1)))
+        await store.save(text("un jeton", at: Self.noon.addingTimeInterval(-Self.day)))
+        _ = try #require(await store.pin(gardee, at: Self.noon))
+
+        #expect(await store.eraseUnpinned() == 2)
+        #expect(store.recent.map(\.id) == [gardee.id])
+
+        let relu = makeStore(at: root)
+        #expect(await relu.load() == 1)
+    }
+
     // MARK: - Un fichier trop gros
 
     /// **Lire puis refuser, c'est avoir déjà payé.** `Data(contentsOf:)`

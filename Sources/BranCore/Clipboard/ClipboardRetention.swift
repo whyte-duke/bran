@@ -77,12 +77,63 @@ public struct ClipboardRetention: Equatable, Sendable, Codable {
     /// entier.
     public var blobDays: Int
 
-    public init(blobDays: Int = 30) {
+    /// Le nombre de jours pendant lesquels **le texte** est conservé, ou `nil`
+    /// pour « indéfiniment ».
+    ///
+    /// **Ce champ renverse la décision écrite en tête de ce fichier, et la
+    /// décision d'origine reste écrite parce qu'elle explique le format.**
+    /// L'argument « ne rien oublier » tenait tant qu'on ne regardait que le
+    /// coût en octets, qui est dérisoire. Il ne tient pas contre ce qu'un
+    /// presse-papiers contient réellement : un jeton d'API copié depuis le
+    /// Terminal, un mot de passe collé d'un gestionnaire, une clé privée. Aucun
+    /// de ces gestes ne pose `org.nspasteboard.ConcealedType` — ce marqueur est
+    /// une convention que l'application source peut ignorer, et le Terminal
+    /// l'ignore. Le secret quittait donc un presse-papiers éphémère pour un
+    /// fichier permanent, et y restait après que l'utilisateur ait vidé son
+    /// presse-papiers, croyant l'avoir effacé.
+    ///
+    /// **Un an par défaut, et non trente jours.** Le produit existe parce que
+    /// Maccy oublie au bout de 4,7 jours — mesuré sur l'installation du
+    /// propriétaire — et une rétention courte le ramènerait à ce qu'il
+    /// remplace. Un an conserve tout ce qu'on cherche vraiment (« ce truc que
+    /// j'ai copié le mois dernier ») tout en donnant une fin aux secrets.
+    ///
+    /// **`nil` reste possible, et c'est un choix explicite.** Qui veut la
+    /// mémoire absolue la demande dans les réglages ; ce qui a changé, c'est
+    /// que ce n'est plus ce qu'on impose à quelqu'un qui n'a rien demandé.
+    ///
+    /// `Optional` et non `0` : `blobDays == 0` veut dire « rien à garder », et
+    /// employer le même zéro ici pour dire l'inverse — « garder pour
+    /// toujours » — serait le genre de piège qu'on ne repère qu'après avoir
+    /// effacé un historique.
+    public var textDays: Int?
+
+    public init(blobDays: Int = 30, textDays: Int? = defaultTextDays) {
         self.blobDays = blobDays
+        self.textDays = textDays
     }
+
+    /// **Décodage explicite, `decodeIfPresent` compris.** Le `Decodable`
+    /// synthétisé ignore les valeurs par défaut : le jour où une politique
+    /// écrite avant l'existence de `textDays` serait relue, elle cesserait de
+    /// se décoder — et les lecteurs de ce dépôt avalent un échec de décodage en
+    /// silence. Une absence vaut donc le défaut, et un `null` explicite vaut
+    /// « indéfiniment ».
+    public init(from decoder: any Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        self.blobDays = try box.decode(Int.self, forKey: .blobDays)
+        self.textDays = box.contains(.textDays)
+            ? try box.decodeIfPresent(Int.self, forKey: .textDays)
+            : Self.defaultTextDays
+    }
+
+    /// Un an. Voir `textDays` pour ce que ce chiffre arbitre.
+    public static let defaultTextDays = 365
 
     public static let `default` = ClipboardRetention()
 
+    /// Ne change que la durée des **contenus lourds** : c'est le seul curseur
+    /// que les réglages exposaient jusqu'ici, et son nom le dit.
     public static func days(_ count: Int) -> ClipboardRetention {
         ClipboardRetention(blobDays: count)
     }
@@ -96,12 +147,33 @@ public struct ClipboardRetention: Equatable, Sendable, Codable {
     /// au-delà de la journée en cours.
     public static let offeredDays = [0, 7, 14, 30, 90, 365]
 
-    /// Ce que les réglages affichent au-dessus du choix des jours.
+    /// Les choix offerts pour le texte. `nil` — « indéfiniment » — est en
+    /// dernier et non en premier : c'est un choix qu'on prend, pas celui qu'on
+    /// subit, et l'ordre d'une liste de réglages dit lequel est lequel.
+    public static let offeredTextDays: [Int?] = [30, 90, 365, 730, nil]
+
+    /// Ce que les réglages affichent au-dessus du choix des jours, quand le
+    /// texte est conservé pour toujours.
     ///
-    /// Sans cette ligne, « 30 jours » se lit comme « on perd tout au bout de
-    /// 30 jours », c'est-à-dire exactement le défaut que cette fonctionnalité
-    /// existe pour corriger.
+    /// **Conservé pour ne pas casser le site d'appel**, qui l'affiche en dur.
+    /// Ce n'est plus la vérité de tous les réglages depuis que `textDays`
+    /// existe : c'est `textDaysLabel` qu'il faut afficher, et le remplacement
+    /// est à faire dans `ClipboardSettingsSection`.
     public static let textLabel = "Texte conservé indéfiniment"
+
+    /// Ce que les réglages doivent afficher pour la durée de vie du texte.
+    public var textDaysLabel: String {
+        switch textDays {
+        case nil: Self.textLabel
+        case 1: "Texte conservé 1 jour"
+        case 365: "Texte conservé 1 an"
+        case 730: "Texte conservé 2 ans"
+        case let count?: "Texte conservé \(count) jours"
+        }
+    }
+
+    /// Le texte est-il gardé pour toujours ?
+    public var keepsTextForever: Bool { textDays == nil }
 
     /// La durée réglée, en secondes.
     ///
@@ -163,6 +235,59 @@ public struct ClipboardRetention: Equatable, Sendable, Codable {
         guard keepsNoBlobs == false else { return true }
         guard let age = Self.daysBetween(day, and: today) else { return false }
         return age >= blobDays
+    }
+
+    // MARK: - La fin du texte, décidée par le même nom de dossier
+
+    /// Les dossiers-jours qui doivent **disparaître en entier**, texte compris,
+    /// sur le format `AAAA-MM-JJ`.
+    ///
+    /// Même forme et même tour de force que `dayFoldersToPurge` : on décide par
+    /// le nom, sans ouvrir un fichier. C'est aussi ce qui garantit que les deux
+    /// échéances ne peuvent pas se contredire — elles lisent la même clé.
+    ///
+    /// **Ce que cette liste ne dit pas, et que l'appelant doit savoir** : un
+    /// dossier nommé ici peut contenir le sidecar d'une entrée épinglée. Une
+    /// épingle veut dire « celle-là, je la garde », et supprimer le dossier
+    /// emporterait son texte tout en laissant son contenu lourd dans
+    /// `Pinned/blobs/` — une entrée effacée et un fichier orphelin, le pire des
+    /// deux mondes. C'est `ClipboardStore.purgeExpired` qui ouvre le dossier
+    /// pour trancher, parce que c'est lui qui sait lire les sidecars ; ici on ne
+    /// répond qu'à la question de l'échéance.
+    public func dayFoldersToDelete(from names: [String], today: String) -> [String] {
+        names.filter { name in
+            guard let day = Self.day(from: name) else { return false }
+            return deletesText(day: day, on: today)
+        }
+    }
+
+    /// La règle, une fois pour toutes : ce jour-là a-t-il perdu son texte à la
+    /// date `today` ?
+    ///
+    /// Extraite pour la même raison que `purges(day:on:)` : deux copies d'une
+    /// condition divergent au premier correctif appliqué d'un seul côté.
+    func deletesText(day: String, on today: String) -> Bool {
+        guard let textDays else { return false }          // conservé pour toujours
+        guard day != today else { return false }          // jamais le jour vivant
+        guard let age = Self.daysBetween(day, and: today) else { return false }
+        return age >= Swift.max(textDays, 1)
+    }
+
+    /// La date à laquelle le texte de cette entrée s'en ira, ou `nil` quand il
+    /// ne s'en ira pas — texte conservé indéfiniment, ou entrée épinglée.
+    ///
+    /// Même arithmétique de calendrier et même minuit que `expiryDate` : la
+    /// suppression est gouvernée par un nom de dossier, donc elle a la
+    /// granularité du jour, et l'instant le plus tôt où le texte peut avoir
+    /// disparu est le minuit qui ouvre le jour du balayage.
+    public func textExpiryDate(for entry: ClipboardEntry) -> Date? {
+        textExpiryDate(for: entry, calendar: .current)
+    }
+
+    func textExpiryDate(for entry: ClipboardEntry, calendar: Calendar) -> Date? {
+        guard let textDays, entry.isPinned == false else { return nil }
+        let start = calendar.startOfDay(for: entry.copiedAt)
+        return calendar.date(byAdding: .day, value: Swift.max(textDays, 1), to: start) ?? start
     }
 
     /// `2026-08-06` → `2026-08-06`. Rend `nil` sur tout le reste.

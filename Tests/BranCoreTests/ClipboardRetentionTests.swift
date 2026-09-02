@@ -449,6 +449,71 @@ struct ClipboardRetentionTests {
         #expect(try JSONDecoder().decode(ClipboardRetention.self, from: data) == policy)
     }
 
+    // MARK: - La fin du texte
+
+    /// **Le texte aussi a une fin, et c'est un correctif de sécurité.** Le
+    /// presse-papiers ne contient pas que des adresses : il contient des jetons
+    /// d'API et des mots de passe, et le marqueur qui devrait les tenir hors de
+    /// l'historique n'est qu'une convention que le Terminal n'applique pas. Un
+    /// secret copié quittait un presse-papiers éphémère pour un fichier
+    /// permanent, et y restait après que l'utilisateur ait vidé son
+    /// presse-papiers en croyant l'avoir effacé.
+    @Test("Un dossier plus vieux que la rétention du texte est nommé pour disparaître")
+    func dossierTropVieuxPourSonTexte() {
+        let policy = ClipboardRetention(blobDays: 30, textDays: 365)
+        #expect(policy.dayFoldersToDelete(from: ["2025-08-10"], today: today) == ["2025-08-10"])
+        #expect(policy.dayFoldersToDelete(from: ["2025-08-11"], today: today).isEmpty)
+    }
+
+    @Test("Le texte conservé indéfiniment ne nomme aucun dossier")
+    func texteIndefiniNeNommeRien() {
+        let policy = ClipboardRetention(blobDays: 30, textDays: nil)
+        #expect(policy.keepsTextForever)
+        #expect(policy.dayFoldersToDelete(from: ["2019-01-01", today], today: today).isEmpty)
+    }
+
+    @Test("Le dossier du jour n'est jamais effacé, même à zéro jour de texte")
+    func jourVivantJamaisEfface() {
+        // Même mécanique que pour les contenus lourds : c'est le dossier dans
+        // lequel la capture écrit en ce moment.
+        let policy = ClipboardRetention(blobDays: 0, textDays: 0)
+        #expect(policy.dayFoldersToDelete(from: [today, "2026-08-09"], today: today) == ["2026-08-09"])
+    }
+
+    @Test("Le défaut donne une fin au texte, et elle est annonçable")
+    func defautDuTexte() {
+        let policy = ClipboardRetention.default
+        #expect(policy.textDays == 365)
+        #expect(policy.keepsTextForever == false)
+        #expect(policy.textDaysLabel == "Texte conservé 1 an")
+        #expect(ClipboardRetention(blobDays: 30, textDays: nil).textDaysLabel == ClipboardRetention.textLabel)
+
+        let entry = imageEntry(copiedAt: instant("2026-08-01"))
+        #expect(policy.textExpiryDate(for: entry, calendar: utc) == instant("2027-08-01", hour: 0))
+    }
+
+    @Test("Une entrée épinglée n'a pas de date de fin pour son texte non plus")
+    func epingleeSansFinDeTexte() {
+        let policy = ClipboardRetention.default
+        let entry = imageEntry(copiedAt: instant("2019-01-01")).pinned(at: instant("2019-01-02"))
+        #expect(policy.textExpiryDate(for: entry, calendar: utc) == nil)
+    }
+
+    /// Une politique écrite avant l'existence de `textDays` doit se relire, et
+    /// prendre le défaut plutôt que de cesser de se décoder — la leçon que ce
+    /// dépôt a déjà payée trois fois.
+    @Test("Une politique écrite sans rétention de texte se relit avec le défaut")
+    func politiqueAncienneSeRelit() throws {
+        let data = Data(#"{"blobDays":30}"#.utf8)
+        let relue = try JSONDecoder().decode(ClipboardRetention.self, from: data)
+        #expect(relue.blobDays == 30)
+        #expect(relue.textDays == ClipboardRetention.defaultTextDays)
+
+        // Et un « indéfiniment » explicite reste « indéfiniment ».
+        let explicite = Data(#"{"blobDays":30,"textDays":null}"#.utf8)
+        #expect(try JSONDecoder().decode(ClipboardRetention.self, from: explicite).textDays == nil)
+    }
+
     // MARK: - Nommer le dossier du jour
 
     @Test("La clé de jour est composée à la main, dans le calendrier de l'utilisateur")
