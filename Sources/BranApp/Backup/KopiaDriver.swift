@@ -597,6 +597,39 @@ public actor KopiaDriver {
             ))
         }
 
+        // **Le manifeste d'abord, le diagnostic ensuite — et cet ordre est la
+        // doctrine de l'écran Sauvegarde, pas une commodité.**
+        //
+        // « Ce que Kopia a réellement écrit dans le dépôt, jamais ce qu'il
+        // croit avoir écrit. » Un manifeste décodable sur stdout **est** ce
+        // que kopia a écrit : il porte l'identifiant du snapshot, sa taille,
+        // ses compteurs d'erreurs. Rien sur stderr, ni un code de sortie, ne
+        // peut le contredire — au mieux ils l'expliquent.
+        //
+        // L'ordre était inverse, et il a coûté la première sauvegarde réussie
+        // de ce Mac. Relevé le 02/09/2026 : 1 571 967 fichiers, 70 minutes,
+        // snapshot `k89c30b3c…` relu sans erreur par `snapshot verify` sur
+        // 1 448 825 objets. Kopia sort en code non nul dès qu'il a ignoré des
+        // erreurs de lecture — ce que la politique lui demande de faire — donc
+        // `classifiedFailure` levait, et le manifeste posé juste à côté sur
+        // stdout n'était jamais lu. L'écran affichait « message non
+        // interprété » au-dessus d'une sauvegarde parfaitement utilisable.
+        //
+        // Le compte des fichiers sautés n'est pas perdu pour autant : il est
+        // dans le manifeste, ``SnapshotProof/isComplete`` exige qu'il soit
+        // nul, et l'appelant dira « incomplète, et voilà de combien ». C'est
+        // la place juste pour ce chiffre — pas un échec sans nom.
+        //
+        // Un stdout tronqué est exclu de cette porte : un préfixe de JSON
+        // n'est pas un manifeste, et `overflowFailure` reste seul juge.
+        if result.stdoutOverflowed == false,
+           result.stdout.isEmpty == false,
+           let manifest = try? KopiaManifest.decodeCreatedSnapshot(result.stdout) {
+            return manifest
+        }
+
+        // Pas de manifeste exploitable : c'est seulement maintenant qu'il faut
+        // chercher pourquoi.
         if let failure = classifiedFailure(from: result) {
             throw KopiaDriverFailure.backup(failure)
         }
