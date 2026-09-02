@@ -508,13 +508,25 @@ public actor KopiaDriver {
             if result.totalTimeoutExpired {
                 throw KopiaDriverFailure.timedOut(command: "policy set", seconds: timeout)
             }
-            if let failure = classifiedFailure(from: result) {
-                throw KopiaDriverFailure.backup(failure)
-            }
-            // Le code de sortie ne fait pas foi ailleurs dans ce fichier, et
-            // pas davantage ici — mais un code non nul que le classifieur n'a
-            // pas su nommer reste un échec : on ne sauvegarde pas sur une
-            // politique dont rien ne dit qu'elle a été écrite.
+            // **`KopiaFailureClassifier` n'est délibérément pas appelé ici**,
+            // seul endroit de ce fichier où il ne l'est pas.
+            //
+            // Il a été écrit pour `snapshot create`, `repository status` et
+            // `snapshot list` : tout ce qu'il ne reconnaît pas et qui n'est pas
+            // du bruit connu (`isIgnorable`) devient `.unparseable`, par
+            // doctrine — ne jamais interpréter au bénéfice du doute. Or
+            // `policy set` écrit son résumé de politique sur stderr en marche
+            // **normale**, dans un format qu'aucun de ses motifs ne connaît :
+            // le passer au classifieur ferait échouer chaque écriture réussie,
+            // donc chaque sauvegarde, sur une politique parfaitement écrite.
+            // Le remède serait pire que le mal qu'il ferme.
+            //
+            // Le code de sortie suffit ici, contrairement à `repository
+            // status` : le cas mesuré où kopia sort en 0 en ayant échoué est
+            // celui du mauvais mot de passe sur `repository status`, et ce
+            // cas-là est de toute façon rattrapé à la commande suivante — le
+            // `snapshot create` qui suit immédiatement ne s'ouvrira pas
+            // davantage.
             guard result.exitCode == 0 else {
                 throw KopiaDriverFailure.backup(BackupFailure(
                     kind: .unparseable,
