@@ -1,3 +1,4 @@
+import AppKit
 import BranCore
 import Foundation
 import Observation
@@ -371,6 +372,41 @@ public final class AppModel {
         // suspendre : elle ne fait qu'observer des titres de fenêtres, et une
         // surveillance qu'on oublie d'activer ne sert à rien.
         startWatching()
+
+        watchSystemSettingsChanges()
+    }
+
+    /// Deux réglages qui vivent **hors** de bran sont relus à chaque retour au
+    /// premier plan.
+    ///
+    /// Ce sont les deux seuls que l'utilisateur peut changer dans Réglages
+    /// système sans que rien ne nous le dise, et les deux se lisaient une fois
+    /// pour toutes à l'initialisation :
+    ///
+    /// - l'autorisation de notifier. Elle n'est plus demandée au lancement — une
+    ///   fenêtre système sans contexte se refuse par réflexe, et macOS ne repose
+    ///   jamais la question. Celui qui l'accorde ensuite depuis les Réglages
+    ///   n'était jamais vu comme l'ayant accordée, et les alertes de retard de
+    ///   sauvegarde continuaient de partir dans le vide ;
+    /// - l'élément d'ouverture. Retiré depuis Réglages système › Général ›
+    ///   Ouverture, l'interrupteur de bran restait allumé pour toujours.
+    ///
+    /// Le retour au premier plan est le bon moment parce que c'est celui où
+    /// l'utilisateur revient **de** ces Réglages. Un sondage périodique aurait
+    /// relu les deux toutes les N secondes pour un changement qui arrive deux
+    /// fois dans la vie d'une installation.
+    private func watchSystemSettingsChanges() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.loginItem.refresh()
+                Task { await self.notifications.refresh() }
+            }
+        }
     }
 
     // MARK: - Dictée
