@@ -1,7 +1,7 @@
 # bran
 
 **Meeting recorder, dictation and on-screen text capture for macOS.** Free, open
-source, fully local. No account, no subscription, no upload.
+source, local by default. No account, no subscription.
 
 Three things, all of them computed on your Mac:
 
@@ -11,8 +11,17 @@ Three things, all of them computed on your Mac:
 | **Dictate** | hold ⌘ right → speak → the text is pasted where your cursor was | Parakeet TDT 0.6B v3 |
 | **Read the screen** | ⌘⇧2 → drag a rectangle → the text is in your clipboard | macOS Vision |
 
-Nothing is uploaded. The dictation model runs on the Neural Engine; the text
-recognition ships with macOS. Neither one needs a network.
+None of the three needs a network: the dictation model runs on the Neural
+Engine, the text recognition ships with macOS, and the recorder writes straight
+to disk.
+
+Two features do send data off the Mac. Both are **off until you configure
+them**, and neither is required by anything above: an end-to-end encrypted
+backup to S3-compatible storage you own — a NAS on your own network, in the
+deployment this was built for — and a CRM upload of a call's audio, which
+targets one specific deployment (see
+[CRM integration](#optional-crm-integration)). Left off, nothing leaves the
+machine: not a byte, not a probe.
 
 > The interesting problem here was never *recording* — the system does that. It
 > was the **trigger** and the **library**: starting without being asked, and
@@ -45,8 +54,10 @@ recognition ships with macOS. Neither one needs a network.
 - **Keeps the Mac awake on request** — one click, indefinitely, from the same
   menu bar item as everything else. See [Keeping the Mac awake](#keeping-the-mac-awake).
 
-Optionally, bran can push the audio of a call to a CRM for transcription and
-summarisation. That part is specific to one deployment and entirely opt-in — see
+Two things can send data off the Mac, and both are entirely opt-in. bran can
+back up chosen folders, end-to-end encrypted, to S3-compatible storage you own;
+and it can push the audio of a call to a CRM for transcription and
+summarisation — that part is specific to one deployment, see
 [CRM integration](#optional-crm-integration).
 
 ---
@@ -598,7 +609,7 @@ Two design points that generalise:
 | Distribute a signed binary | self-signed certificate; build from source |
 | Record a single window | full screen only, by design |
 | Zoom / Teams | Meet first. `MeetTitleMatcher` is written to extend |
-| Cloud storage | files stay on your Mac, by choice |
+| Third-party cloud | no vendor account; the optional backup is end-to-end encrypted and goes to S3-compatible storage you own |
 | Windows / Linux | ScreenCaptureKit is macOS-only |
 
 ---

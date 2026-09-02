@@ -53,7 +53,16 @@ struct PermissionsView: View {
                 textCapture
             }
 
-            if permissions.screenRecording != .granted {
+            // **Le conseil n'a de sens qu'une fois la question posée.**
+            //
+            // Il s'affichait dès que l'écran n'était pas accordé, donc aussi sur
+            // une installation neuve où macOS n'a encore rien demandé : « quittez
+            // et relancez après l'avoir accordée » y désigne un geste qui n'a pas
+            // eu lieu. Il apparaît maintenant exactement quand il est vrai — après
+            // le passage par la fenêtre système ou par les Réglages, moment où
+            // `CGPreflightScreenCaptureAccess()` continue de répondre non
+            // jusqu'au prochain démarrage du processus.
+            if permissions.nextStep(forScreenRecording: ()) == .systemSettings {
                 Label(
                     "L'autorisation d'enregistrement d'écran n'est prise en compte qu'au prochain démarrage. Quittez et relancez bran après l'avoir accordée.",
                     systemImage: "arrow.clockwise"
@@ -132,7 +141,13 @@ struct PermissionsView: View {
             }
         } else {
             HStack {
-                Text("Rien ne quitte cette machine. Aucun compte, aucun envoi.")
+                // **La promesse était absolue, et elle est fausse depuis que
+                // bran sait envoyer.** La sauvegarde chiffrée et l'envoi au CRM
+                // font tous deux sortir des données de la machine. Ils sont
+                // éteints tant qu'on ne les configure pas — c'est ce que la
+                // phrase dit maintenant, au lieu de promettre ce que le code ne
+                // tient plus.
+                Text("Ces trois fonctions restent sur cette machine. Aucun compte. La sauvegarde et l'envoi au CRM, eux, sortent des données — et restent éteints tant que vous ne les configurez pas.")
                     .font(Type.cardBody)
                     .foregroundStyle(.tertiary)
                 Spacer()
@@ -174,17 +189,49 @@ struct PermissionsView: View {
             gesture: "bran repère une fenêtre Meet et propose — il ne démarre jamais tout seul.",
             state: meetingsState
         ) {
-            if permissions.screenRecording != .granted {
-                Button("Autoriser l'écran") { permissions.requestScreenRecording() }
+            // **Le libellé dit où le clic mène, parce que le clic ne mène pas
+            // toujours au même endroit.**
+            //
+            // macOS ne pose chaque question qu'une fois. Après un refus, rappeler
+            // l'API ne fait plus rien du tout — aucune fenêtre, aucune erreur, un
+            // bouton mort. `PermissionsService.nextStep` distingue les deux cas ;
+            // ici on ne fait qu'en tirer le mot juste, et « Ouvrir les Réglages
+            // système » est le seul qui ne mente pas dans le second.
+            if permissions.nextStep(forScreenRecording: ()) != .nothingToDo {
+                Button(
+                    label(
+                        asking: "Autoriser l'écran",
+                        step: permissions.nextStep(forScreenRecording: ())
+                    )
+                ) {
+                    permissions.requestScreenRecording()
+                }
             }
-            if permissions.microphone != .granted {
-                Button("Autoriser le micro") { Task { await permissions.requestMicrophone() } }
+            if permissions.nextStep(forMicrophone: ()) != .nothingToDo {
+                Button(
+                    label(asking: "Autoriser le micro", step: permissions.nextStep(forMicrophone: ()))
+                ) {
+                    Task { await permissions.requestMicrophone() }
+                }
             }
-            if permissions.calendar != .granted, permissions.canRecord {
-                Button("Calendrier (facultatif)") { Task { await permissions.requestCalendar() } }
-                    .controlSize(.small)
+            if permissions.nextStep(forCalendar: ()) != .nothingToDo, permissions.canRecord {
+                Button(
+                    label(
+                        asking: "Calendrier (facultatif)",
+                        step: permissions.nextStep(forCalendar: ())
+                    )
+                ) {
+                    Task { await permissions.requestCalendar() }
+                }
+                .controlSize(.small)
             }
         }
+    }
+
+    /// Le libellé d'un bouton d'autorisation : ce qu'on demande, ou le détour
+    /// qu'il faut désormais prendre.
+    private func label(asking: String, step: PermissionsService.NextStep) -> String {
+        step == .systemSettings ? "Ouvrir les Réglages système" : asking
     }
 
     /// La dictée demande **deux** choses, et l'accueil doit les montrer
@@ -254,13 +301,38 @@ struct PermissionsView: View {
             symbol: "text.viewfinder",
             title: "Récupérer le texte affiché à l'écran",
             gesture: "⌘⇧2 → vous tracez un rectangle → le texte part dans le presse-papiers.",
-            // Le message qui compte sur cet écran : c'est déjà disponible.
-            state: permissions.screenRecording == .granted
-                ? .ready("Aucune autorisation supplémentaire")
-                : .todo("Utilise l'autorisation d'écran ci-dessus")
+            state: textCaptureState
         ) {
-            EmptyView()
+            if permissions.screenRecording == .granted, isAccessibilityTrusted == false {
+                Button("Autoriser") { HotkeyMonitor.requestTrust() }
+            }
         }
+    }
+
+    /// **La carte annonçait « prêt » sur une fonction qui ne démarrait pas.**
+    ///
+    /// Elle ne regardait que l'autorisation d'écran — vraie pour Vision, qui lit
+    /// bien l'image sans rien d'autre. Mais le geste que la carte décrit est un
+    /// **raccourci global**, et un raccourci global passe par l'event tap
+    /// d'Accessibilité : sans elle, `HotkeyMonitor.install()` échoue et
+    /// `AppModel` éteint la capture. Écran accordé, Accessibilité refusée
+    /// donnait donc une pastille verte « Aucune autorisation supplémentaire » et
+    /// un ⌘⇧2 qui ne fait rien.
+    ///
+    /// La distinction est dite au lieu d'être gommée : l'Accessibilité sert au
+    /// raccourci, pas à la lecture de l'écran.
+    private var textCaptureState: CapabilityState {
+        guard permissions.screenRecording == .granted else {
+            return .todo("Utilise l'autorisation d'écran ci-dessus")
+        }
+        guard isAccessibilityTrusted else {
+            return .todo("Le raccourci demande l'Accessibilité")
+        }
+        guard model.snapshotSettings.isEnabled else {
+            return .todo("Capture désactivée — à rallumer dans les Réglages")
+        }
+        // Le message qui compte sur cet écran : c'est déjà disponible.
+        return .ready("Aucune autorisation supplémentaire")
     }
 
     private var meetingsState: CapabilityState {
