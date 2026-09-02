@@ -285,6 +285,24 @@ enum Size {
     /// pose quelqu'un qui attend la fin d'une compression. La jauge se range sous
     /// les deux lignes de texte qu'elle complète, et ne les dépasse pas.
     static let stageProgress: CGFloat = 260
+
+    // MARK: Le plancher de composition
+
+    /// **La largeur en dessous de laquelle plus aucun texte ne se recompose.**
+    ///
+    /// Elle vivait en `fileprivate` dans `NoticeRow`, où son raisonnement est
+    /// écrit : la colonne de gauche réclame 200 points, la section la plus
+    /// contrainte — le cadran de « Débit » — environ 290 de plus, et en dessous
+    /// de cet ordre de grandeur la fenêtre ne montre plus rien d'utile. Il n'y a
+    /// donc aucune disposition à préserver là, seulement un plancher à ne pas
+    /// laisser exploser.
+    ///
+    /// Elle est remontée ici parce que **le défaut n'était propre ni aux
+    /// bandeaux ni à `fixedSize(vertical:)`** : mesuré le 02/09/2026, un `Text`
+    /// nu rend exactement la même hauteur idéale qu'un `Text` en `fixedSize`,
+    /// et les états vides du système explosent de la même façon sans qu'on
+    /// puisse borner leurs lignes de l'extérieur. Voir `View.branWidthFloor()`.
+    static let windowTextFloor: CGFloat = 320
 }
 
 // MARK: - Typographie
@@ -702,6 +720,34 @@ extension View {
         padding(Space.inset)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Palette.well, in: .rect(cornerRadius: Radius.field))
+    }
+
+    /// **Empêche cette vue de recomposer son texte sous la largeur utilisable
+    /// de la fenêtre.**
+    ///
+    /// À poser sur tout ce qui porte du texte enroulable et vit **hors** d'un
+    /// `ScrollView` : sa hauteur idéale remonte alors telle quelle comme
+    /// plancher vertical de la fenêtre, et macOS calcule ce plancher en
+    /// proposant une largeur proche de zéro. Le mécanisme complet est écrit
+    /// dans `NoticeRow`, qui l'a payé le premier.
+    ///
+    /// Mesuré le 02/09/2026 sur `ContentUnavailableView.search(text:)`, dont
+    /// on ne peut borner aucun texte de l'extérieur :
+    ///
+    /// ```
+    ///   largeur │ sans plancher │ avec plancher
+    ///       900 │        172 pt │        172 pt
+    ///       320 │        204 pt │        204 pt
+    ///        60 │      1 004 pt │        204 pt
+    ///         1 │      1 308 pt │        204 pt
+    /// ```
+    ///
+    /// Rien ne change au-dessus du plancher ; en dessous, la vue est composée à
+    /// `Size.windowTextFloor` et rognée, ce qui est franc et sans conséquence
+    /// puisque la fenêtre n'y montre plus rien d'utile.
+    func branWidthFloor() -> some View {
+        TextWidthFloor(floorWidth: Size.windowTextFloor) { self }
+            .clipped()
     }
 }
 

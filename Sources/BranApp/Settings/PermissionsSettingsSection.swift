@@ -38,7 +38,10 @@ struct PermissionsSettingsSection: View {
             }
             .padding(.vertical, Space.tight)
 
-            if permissions.screenRecording != .granted {
+            // Voir `PermissionsView` : le conseil « relancez bran » ne vaut
+            // qu'une fois la question posée, pas sur une installation neuve où
+            // rien n'a encore été demandé.
+            if permissions.nextStep(forScreenRecording: ()) == .systemSettings {
                 Label(
                     "L'autorisation d'enregistrement d'écran n'est prise en compte qu'au prochain démarrage. Quittez et relancez bran après l'avoir accordée.",
                     systemImage: "arrow.clockwise"
@@ -49,7 +52,9 @@ struct PermissionsSettingsSection: View {
             }
 
             HStack {
-                Text("Rien ne quitte cette machine. Aucun compte, aucun envoi.")
+                // Voir `PermissionsView` : la promesse absolue est fausse
+                // depuis que la sauvegarde et l'envoi au CRM existent.
+                Text("Ces autorisations ne servent qu'ici. La sauvegarde et l'envoi au CRM, eux, sortent des données — et restent éteints tant que vous ne les configurez pas.")
                     .font(Type.meta)
                     .foregroundStyle(.tertiary)
                 Spacer()
@@ -79,7 +84,14 @@ struct PermissionsSettingsSection: View {
             state: screenState
         ) {
             if screenState.isReady == false {
-                Button("Autoriser") {
+                // Le libellé dit où le clic mène : après un refus, macOS ne
+                // repose jamais la question, et « Autoriser » désignait un
+                // bouton qui ne faisait plus rien.
+                Button(
+                    permissions.nextStep(forScreenRecording: ()) == .systemSettings
+                        ? "Ouvrir les Réglages système"
+                        : "Autoriser"
+                ) {
                     _ = SystemSettings.reRequestScreenRecording()
                     refresh()
                 }
@@ -110,7 +122,11 @@ struct PermissionsSettingsSection: View {
             state: state(permissions.microphone)
         ) {
             if permissions.microphone != .granted {
-                Button("Autoriser") {
+                Button(
+                    permissions.nextStep(forMicrophone: ()) == .systemSettings
+                        ? "Ouvrir les Réglages système"
+                        : "Autoriser"
+                ) {
                     Task {
                         _ = await SystemSettings.reRequestMicrophone()
                         refresh()

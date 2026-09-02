@@ -177,6 +177,36 @@ struct SectionSidebar: View {
     }
 }
 
+// MARK: - Ouvrir les réglages au bon endroit
+
+extension AppModel {
+
+    /// **Ouvre les réglages sur l'onglet demandé.**
+    ///
+    /// Six boutons de l'application disent « Activer la dictée », « Activer la
+    /// capture de texte », « Activer la capture des copies »… et ne faisaient
+    /// qu'ouvrir la feuille. Or `SettingsPane` restaure le dernier onglet
+    /// consulté — délibérément, et c'est un bon réglage : on revient trois fois
+    /// de suite au même endroit. Conséquence : depuis l'état vide de « Dictées »,
+    /// le bouton ouvrait « Connexions » si c'était le dernier onglet vu. Rien
+    /// n'était activé, et rien ne désignait où aller ; l'action promise dans le
+    /// libellé n'avait tout simplement pas lieu.
+    ///
+    /// La sélection est écrite dans les préférences plutôt que passée en
+    /// paramètre parce que `SettingsPane` la lit par `@AppStorage` : la feuille
+    /// est construite au moment de la présentation, donc poser la valeur juste
+    /// avant suffit, et l'ouverture générique — le bouton « Réglages » du bas de
+    /// colonne — continue de restaurer le dernier onglet, comme avant.
+    ///
+    /// **La clé est écrite deux fois**, ici et dans `SettingsPane.selection`.
+    /// C'est le prix d'une correction qui ne touche pas ce fichier ; le jour où
+    /// on l'ouvre, elle a sa place là-bas, en constante.
+    func showSettings(on tab: SettingsTab) {
+        UserDefaults.standard.set(tab.rawValue, forKey: "settings.selectedTab")
+        showsSettings = true
+    }
+}
+
 /// Une action du bas de colonne. Deux existent, et elles s'alignaient déjà sur
 /// la même gouttière d'icône que les sections : ce type ne fait que cesser de
 /// l'écrire deux fois.

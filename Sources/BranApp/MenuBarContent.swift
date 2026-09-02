@@ -193,10 +193,66 @@ struct MenuBarContent: View {
 
         Divider()
 
-        Button("Quitter bran") {
+        Button(quitTitle, action: quit)
+            .keyboardShortcut("q")
+    }
+
+    // MARK: - Quitter
+
+    /// **Quitter pendant la finalisation perd la réunion, pas quelques
+    /// secondes.**
+    ///
+    /// ScreenCaptureKit n'écrit pas au fil de l'eau : mesuré sur ce projet,
+    /// **93 % du fichier est écrit après `stopCapture()`**, et cette
+    /// finalisation a duré douze minutes sur une réunion de trente-six. Pendant
+    /// toute cette fenêtre, la machine paraît au repos et le menu ne demandait
+    /// rien : un clic sur « Quitter » interrompait l'écriture d'un MP4 dont il
+    /// ne restait alors que l'en-tête.
+    ///
+    /// La question est posée par un `NSAlert` et non par un
+    /// `.confirmationDialog` : le menu se referme au clic, donc la feuille
+    /// serait attachée à une vue en train de disparaître — le défaut exact que
+    /// `RecordingCard` vient de corriger. `runModal()` ne dépend d'aucune vue.
+    ///
+    /// Ce n'est que la moitié du correctif : les autres portes de sortie —
+    /// ⌘Q du menu de l'application, la relance après mise à jour — se ferment
+    /// dans `BranApp` et `UpdateService`.
+    private var quitTitle: String {
+        isBusy ? "Quitter bran…" : "Quitter bran"
+    }
+
+    /// Y a-t-il un fichier en train d'être écrit ?
+    ///
+    /// `hasOpenSession` couvre la capture, `isFinalizing` la longue queue qui la
+    /// suit. Les deux comptent : l'une comme l'autre laisse un MP4 inutilisable
+    /// si le processus s'arrête.
+    private var isBusy: Bool {
+        model.hasOpenSession || model.isFinalizing
+    }
+
+    private func quit() {
+        guard isBusy else {
             NSApplication.shared.terminate(nil)
+            return
         }
-        .keyboardShortcut("q")
+
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Un enregistrement est en cours d'écriture."
+        alert.informativeText = """
+            bran écrit encore la vidéo sur le disque. L'essentiel du fichier est \
+            écrit après l'arrêt de la capture — sur une réunion de 36 minutes, \
+            cette étape a duré 12 minutes et représentait 93 % du fichier. \
+            Quitter maintenant laisse un MP4 tronqué, et la réunion est perdue.
+            """
+        alert.addButton(withTitle: "Continuer l'écriture")
+        alert.addButton(withTitle: "Quitter quand même")
+
+        // Sans activation, l'alerte d'une application accessoire s'ouvre
+        // derrière la fenêtre du premier plan : on l'entendrait sans la voir.
+        NSApplication.shared.activate()
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        NSApplication.shared.terminate(nil)
     }
 
     /// Y a-t-il encore quelque chose **à décider** ?

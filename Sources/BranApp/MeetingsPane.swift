@@ -205,49 +205,81 @@ private struct RecordingCard: View {
     @State private var isHovering = false
     @State private var isConfirmingDeletion = false
 
+    /// **Les trois actions sont sorties du `NavigationLink`, et c'est le
+    /// correctif.**
+    ///
+    /// Elles vivaient dans son *label* : trois `Button` imbriqués dans un
+    /// quatrième contrôle activable, donc deux cibles superposées dans le même
+    /// arbre d'événements. Un clic sur « Corbeille » pouvait activer la
+    /// navigation en plus de l'action — et la feuille de confirmation était
+    /// alors attachée à une vue en train d'être poussée hors de l'écran, donc
+    /// démontée avant d'avoir été lue. C'est un défaut qui ne se voit qu'une
+    /// fois, le jour où la question ne s'affiche pas et où la suppression, elle,
+    /// a bien eu lieu.
+    ///
+    /// Le lien et les actions sont désormais **frères** dans le même `HStack` :
+    /// le lien porte la ligne et tout l'espace élastique — c'est-à-dire la quasi-
+    /// totalité de la surface cliquable d'avant — et les actions ont leur propre
+    /// zone à droite. Le chevron reste à sa place mais devient décor : il
+    /// désigne la navigation, il ne la déclenche plus, parce qu'il ne peut pas
+    /// être à la fois à droite des actions et dans le lien.
     var body: some View {
-        NavigationLink(value: recording.id) {
-            HStack(alignment: .top, spacing: Space.inset) {
-                RecordingRow(
-                    recording: recording,
-                    step: model.pipeline[recording.id],
-                    upload: model.uploads.state(for: recording.id)
-                )
+        HStack(alignment: .top, spacing: Space.inset) {
+            NavigationLink(value: recording.id) {
+                HStack(alignment: .top, spacing: Space.inset) {
+                    RecordingRow(
+                        recording: recording,
+                        step: model.pipeline[recording.id],
+                        upload: model.uploads.state(for: recording.id)
+                    )
 
-                Spacer(minLength: Space.small)
-
-                // Toujours dans l'arbre, seulement peintes au survol.
-                // Insérées sous condition, ces trois actions n'existaient ni
-                // pour le clavier ni pour VoiceOver : une vue à opacité nulle
-                // reste focalisable et lisible, une vue absente non.
-                HStack(spacing: Space.hair) {
-                    CardAction(symbol: "arrow.up.doc", help: "Envoyer au CRM…") {
-                        model.requestUpload(for: recording)
-                    }
-                    .disabled(recording.existsOnDisk == false)
-
-                    CardAction(symbol: "folder", help: "Afficher dans le Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting(recording.revealTargets)
-                    }
-
-                    CardAction(symbol: "trash", help: "Mettre à la corbeille", tint: Palette.broken) {
-                        isConfirmingDeletion = true
-                    }
+                    Spacer(minLength: Space.small)
                 }
-                .opacity(isHovering ? 1 : 0)
-
-                Image(systemName: "chevron.right")
-                    .font(Type.metaFaint.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                    // Un cran optique, pour poser le chevron sur la première
-                    // ligne du titre plutôt que sur le haut de sa boîte : le
-                    // plus petit échelon de l'échelle, parce que c'est un
-                    // ajustement de l'œil et non un espacement.
-                    .padding(.top, Space.hair)
+                .contentShape(.rect)
             }
-            .branCard(isHovering: isHovering)
+            .buttonStyle(.plain)
+
+            // Toujours dans l'arbre, seulement peintes au survol.
+            // Insérées sous condition, ces trois actions n'existaient ni
+            // pour le clavier ni pour VoiceOver : une vue à opacité nulle
+            // reste focalisable et lisible, une vue absente non. L'estompage
+            // lui-même vit dans `CardAction`, qui refuse d'éteindre le bouton
+            // focalisé.
+            HStack(spacing: Space.hair) {
+                CardAction(
+                    symbol: "arrow.up.doc", help: "Envoyer au CRM…", isRevealed: isHovering
+                ) {
+                    model.requestUpload(for: recording)
+                }
+                .disabled(recording.existsOnDisk == false)
+
+                CardAction(
+                    symbol: "folder", help: "Afficher dans le Finder", isRevealed: isHovering
+                ) {
+                    NSWorkspace.shared.activateFileViewerSelecting(recording.revealTargets)
+                }
+
+                CardAction(
+                    symbol: "trash",
+                    help: "Mettre à la corbeille",
+                    tint: Palette.broken,
+                    isRevealed: isHovering
+                ) {
+                    isConfirmingDeletion = true
+                }
+            }
+
+            Image(systemName: "chevron.right")
+                .font(Type.metaFaint.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                // Un cran optique, pour poser le chevron sur la première
+                // ligne du titre plutôt que sur le haut de sa boîte : le
+                // plus petit échelon de l'échelle, parce que c'est un
+                // ajustement de l'œil et non un espacement.
+                .padding(.top, Space.hair)
+                .accessibilityHidden(true)
         }
-        .buttonStyle(.plain)
+        .branCard(isHovering: isHovering)
         .onHover { isHovering = $0 }
         .branAnimation(Motion.hover, value: isHovering)
         // Les mêmes gestes sans souris et sans viser : le projet n'avait aucun
