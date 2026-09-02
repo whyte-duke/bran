@@ -155,12 +155,14 @@ public enum KopiaFailureClassifier {
         return result
     }
 
-    // `NSRegularExpression` n'est pas `Sendable` dans l'overlay Foundation,
-    // mais elle est immuable une fois compilée et son appariement ne mute
-    // aucun état interne partagé — c'est le cas d'usage que
-    // `nonisolated(unsafe)` couvre légitimement, plutôt que de reconstruire
-    // le motif à chaque appel de `maskSecrets`.
-    private nonisolated(unsafe) static let secretPattern: NSRegularExpression = {
+    // `NSRegularExpression` est `Sendable` depuis que l'overlay Foundation le
+    // déclare : elle est immuable une fois compilée et son appariement ne mute
+    // aucun état interne partagé. Le `nonisolated(unsafe)` qui était posé ici
+    // n'est donc plus une précaution mais un mensonge sur le type, et le
+    // compilateur le signale en concurrence stricte complète. Le retirer ne
+    // change rien à l'exécution : la constante reste construite une fois, au
+    // lieu de recompiler le motif à chaque appel de `maskSecrets`.
+    private static let secretPattern: NSRegularExpression = {
         let names = "secretAccessKey|password|KOPIA_PASSWORD|Authorization"
         // Groupe 3 : la valeur, un seul jeton sans espace ni guillemet — ce
         // que le briefing décrit comme « une chaîne longue sans espace après

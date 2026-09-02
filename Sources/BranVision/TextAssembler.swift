@@ -82,7 +82,26 @@ public enum TextAssembler {
             // de l'image, ce qui décalerait tout.
             var cursor = leftMargin
             for fragment in row {
-                let gap = Int(((fragment.x - cursor) / charWidth).rounded())
+                // **`Int(_:)` d'un `Double` non fini est une erreur fatale.**
+                //
+                // Un fuzzing de cette fonction la fait tomber sur toutes ses
+                // graines : il suffit qu'une région porte un `NaN` ou un
+                // infini dans sa géométrie pour que la conversion arrête le
+                // processus, sans erreur rattrapable. Vision ne produit que
+                // des boîtes normalisées et finies, donc rien de tout ça
+                // n'arrive aujourd'hui par l'OCR — mais `TextRegion` est un
+                // type public d'une cible qui se veut pure, et un contrat
+                // qui plante sur une valeur que son type autorise n'est pas
+                // un contrat. Le repli est le seul honnête : sans géométrie
+                // lisible, on ne sait pas indenter, donc on n'indente pas.
+                //
+                // Le plafond répond à l'autre moitié du même problème : une
+                // largeur de caractère minuscule face à une abscisse énorme
+                // produit un écart de plusieurs milliards, et
+                // `String(repeating:count:)` allouerait cette ligne-là. 4096
+                // colonnes dépassent largement tout terminal réel.
+                let ecart = ((fragment.x - cursor) / charWidth).rounded()
+                let gap = ecart.isFinite ? Int(min(max(ecart, 0), 4096)) : 0
                 if gap > 0 { line += String(repeating: " ", count: gap) }
                 line += fragment.text
                 cursor = fragment.maxX
