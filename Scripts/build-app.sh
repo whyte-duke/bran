@@ -139,6 +139,25 @@ fi
 mkdir -p "$DEST/Contents/Frameworks"
 cp -R "$SPARKLE" "$DEST/Contents/Frameworks/"
 
+# Le moteur de sauvegarde. bran ne réimplémente ni la déduplication ni le
+# chiffrement : il pilote `kopia`, et le binaire voyage donc dans le paquet.
+#
+# **Il est dans le paquet et pas pris dans le `PATH`, et c'est une décision de
+# sûreté.** Sous launchd, le `PATH` d'un agent est minimal — un binaire trouvé au
+# hasard n'aurait aucune raison d'être celui qu'on a signé, ni même d'être kopia.
+# Le seul chemin fiable vers « le moteur que cette version de bran a testé »,
+# c'est celui qui est scellé dans sa signature.
+#
+# `Scripts/fetch-kopia.sh` l'apporte à une version épinglée, empreinte vérifiée.
+echo "→ embarquement de kopia"
+zsh "$ROOT/Scripts/fetch-kopia.sh"
+if [[ ! -x "$ROOT/Vendor/kopia/kopia" ]]; then
+  echo "✗ Vendor/kopia/kopia absent après l'approvisionnement."
+  exit 1
+fi
+cp "$ROOT/Vendor/kopia/kopia" "$DEST/Contents/Resources/kopia"
+chmod +x "$DEST/Contents/Resources/kopia"
+
 if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
   cp "$ROOT/Resources/AppIcon.icns" "$DEST/Contents/Resources/AppIcon.icns"
   ICON_ENTRY='    <key>CFBundleIconFile</key>          <string>AppIcon</string>'
@@ -301,6 +320,17 @@ do
   codesign "${NESTED_FLAGS[@]}" "$SPARKLE_IN_APP/$nested"
 done
 codesign "${NESTED_FLAGS[@]}" "$SPARKLE_IN_APP"
+
+# kopia se signe comme les composants de Sparkle : avec notre identité, sans nos
+# droits et sans notre identifiant de paquet — un moteur de sauvegarde n'a aucune
+# raison de réclamer le micro.
+#
+# **Le binaire livré par le projet est signé « ad hoc » et lié par l'éditeur de
+# liens** (`Signature=adhoc`, `Identifier=a.out`) : cette signature-là ne survit
+# pas au renforcement, et le paquet serait rejeté à la notarisation. On resigne
+# donc, en écrasant la sienne. C'est aussi ce qui fait que le sceau du paquet
+# couvre le moteur : un kopia substitué après coup casse la vérification.
+codesign "${NESTED_FLAGS[@]}" "$DEST/Contents/Resources/kopia"
 
 codesign "${SIGN_FLAGS[@]}" "$DEST"
 

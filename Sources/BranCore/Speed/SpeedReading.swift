@@ -70,6 +70,19 @@ public struct SpeedReading: Equatable, Sendable, Codable {
     /// première question devant un chiffre décevant est « contre quoi ? ».
     public var source: String?
 
+    /// Par où la mesure est passée. `nil` quand le système n'a pas répondu —
+    /// et pour tous les relevés écrits avant que ce champ existe. Voir
+    /// `SpeedLink` pour ce que son absence coûtait.
+    public var link: SpeedLink?
+
+    /// macOS annonce-t-il une liaison **facturée au volume** ? `nil` = on n'a
+    /// pas demandé, ce qui n'est pas la même chose que « non ».
+    ///
+    /// Séparé de `link` parce que les deux ne se recouvrent pas : un Mac relié
+    /// en Wi-Fi au partage de connexion d'un téléphone annonce `.wifi` **et**
+    /// une liaison facturée. C'est justement le cas où l'avertissement compte.
+    public var isExpensive: Bool?
+
     public var measuredAt: Date?
 
     /// Combien d'octets le test a consommés. **Affiché**, pas seulement compté :
@@ -85,6 +98,8 @@ public struct SpeedReading: Equatable, Sendable, Codable {
         latency: TimeInterval? = nil,
         jitter: TimeInterval? = nil,
         source: String? = nil,
+        link: SpeedLink? = nil,
+        isExpensive: Bool? = nil,
         measuredAt: Date? = nil,
         spentBytes: Int = 0
     ) {
@@ -94,6 +109,8 @@ public struct SpeedReading: Equatable, Sendable, Codable {
         self.latency = latency
         self.jitter = jitter
         self.source = source
+        self.link = link
+        self.isExpensive = isExpensive
         self.measuredAt = measuredAt
         self.spentBytes = spentBytes
     }
@@ -126,6 +143,8 @@ public struct SpeedReading: Equatable, Sendable, Codable {
         latency = try box.decodeIfPresent(TimeInterval.self, forKey: .latency)
         jitter = try box.decodeIfPresent(TimeInterval.self, forKey: .jitter)
         source = try box.decodeIfPresent(String.self, forKey: .source)
+        link = try box.decodeIfPresent(SpeedLink.self, forKey: .link)
+        isExpensive = try box.decodeIfPresent(Bool.self, forKey: .isExpensive)
         measuredAt = try box.decodeIfPresent(Date.self, forKey: .measuredAt)
         spentBytes = try box.decodeIfPresent(Int.self, forKey: .spentBytes) ?? 0
     }

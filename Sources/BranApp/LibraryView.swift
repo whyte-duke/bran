@@ -179,6 +179,18 @@ struct LibraryView: View {
         case .watch:
             WatchPane(model: model, query: $watchQuery)
                 .transition(.opacity)
+
+        // La seule section qui ne reçoive pas le modèle entier : le test de
+        // débit ne connaît ni les réunions, ni la dictée, ni le veilleur, et
+        // rien de tout ça ne le connaît. Lui passer `model` ouvrirait une porte
+        // que `AppModel` a pris soin de garder fermée.
+        case .speed:
+            SpeedPane(speed: model.speed)
+                .transition(.opacity)
+
+        case .backup:
+            BackupPane(backup: model.backup)
+                .transition(.opacity)
         }
     }
 }

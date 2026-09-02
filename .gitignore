@@ -13,3 +13,9 @@ xcuserdata/
 # Les worktrees des agents. Du scratch d'outillage, pas du dépôt.
 .claude/worktrees/
 dist/
+
+# Le moteur de sauvegarde, téléchargé à une version épinglée par
+# Scripts/fetch-kopia.sh. 46 Mo par version : ça ne rentre pas dans un dépôt
+# dont tout le reste est du texte.
+Vendor/
+.gstack/

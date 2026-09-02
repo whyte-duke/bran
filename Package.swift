@@ -83,6 +83,20 @@ let package = Package(
         // c'est là que doivent être les tests.
         .target(name: "BranWatch"),
 
+        // Le contrat, la logique et les preuves de la sauvegarde. Même règle que
+        // les quatre cibles ci-dessus, appliquée là où elle compte le plus :
+        // ici vivent les parseurs de la sortie de Kopia, l'évaluateur de la
+        // chaîne réseau, la politique de planification et la machine à états —
+        // c'est-à-dire tout ce qui décide si l'écran a le droit d'afficher
+        // « sauvegardé ». Rien de tout ça ne touche au réseau, au disque ni à
+        // un processus : le pilote Kopia et les sondes vivent dans `BranApp`.
+        //
+        // **La séparation est la fonctionnalité.** Une sauvegarde qui ment ne
+        // se démasque pas en la regardant tourner — elle met des semaines. Le
+        // seul endroit où cette classe de défaut s'attrape en une seconde,
+        // c'est un test qui rejoue une sortie figée de Kopia.
+        .target(name: "BranBackup"),
+
         // **L'exception assumée, et la seule.** AppKit et CoreGraphics sont
         // autorisés ici : cette cible n'est pas de la logique pure et ne
         // prétend pas l'être — elle énumère les fenêtres du système et réduit
@@ -104,6 +118,7 @@ let package = Package(
             name: "BranApp",
             dependencies: [
                 "CLame",
+                "BranBackup",
                 "BranCore",
                 "BranSpeech",
                 "BranVision",
@@ -120,6 +135,7 @@ let package = Package(
         .executableTarget(
             name: "BranSpike",
             dependencies: [
+                "BranBackup",
                 "BranCore",
                 "BranSpeech",
                 "BranVision",
@@ -129,6 +145,7 @@ let package = Package(
             ]
         ),
 
+        .testTarget(name: "BranBackupTests", dependencies: ["BranBackup"]),
         .testTarget(name: "BranCoreTests", dependencies: ["BranCore"]),
         .testTarget(name: "BranSpeechTests", dependencies: ["BranSpeech"]),
         .testTarget(name: "BranVisionTests", dependencies: ["BranVision"]),

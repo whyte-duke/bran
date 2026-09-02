@@ -367,6 +367,27 @@ enum Type {
     /// Le chrono : arrondi, chiffres de largeur fixe, pour ne pas gigoter.
     static let timer = Font.system(.title3, design: .rounded, weight: .semibold)
 
+    /// **Le chiffre au centre d'un grand cadran.** Deuxième taille fixe de
+    /// l'application, et la seule autre que l'encoche.
+    ///
+    /// La raison est la même qu'ailleurs — la géométrie est contrainte — mais
+    /// elle vient d'un autre côté : ici, ce n'est pas le matériel qui l'impose,
+    /// c'est le creux de l'arc. Sur un cadran de 270°, le carré inscrit fait
+    /// environ 70 % du diamètre ; un texte qui grandirait avec la préférence
+    /// système irait toucher l'arc des deux côtés, et `minimumScaleFactor` le
+    /// ferait alors rétrécir — c'est-à-dire que la préférence « texte plus
+    /// grand » rendrait ce chiffre-ci **plus petit**. Une taille fixe est plus
+    /// honnête que cette inversion.
+    ///
+    /// 52 points : le chiffre se lit d'un mètre, ce qui est la distance réelle
+    /// pendant les neuf secondes que dure un test — on le lance et on regarde
+    /// ailleurs.
+    static let dial = Font.system(size: 52, weight: .semibold, design: .rounded)
+
+    /// L'unité sous ce chiffre. Fixe aussi, et pour la même raison : elle
+    /// partage son creux.
+    static let dialUnit = Font.system(size: 13, weight: .medium, design: .rounded)
+
     /// L'encoche. Taille fixe assumée : la hauteur disponible est celle du
     /// matériel, elle ne suit aucune préférence.
     static let notch = Font.system(size: 11.5, weight: .medium, design: .rounded)

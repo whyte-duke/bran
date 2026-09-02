@@ -43,6 +43,26 @@ struct SpeedDial: View {
     /// La piste tourne tant que la mesure court.
     var isMeasuring: Bool
 
+    /// Le diamètre du cadran.
+    ///
+    /// **Deux tailles existent, et elles ne font pas le même métier.** Celle par
+    /// défaut est celle du panneau flottant : un afficheur d'état, posé dans un
+    /// coin, qu'on regarde du coin de l'œil pendant qu'on fait autre chose.
+    /// `Metric.heroDiameter` est celle de la section « Débit », où le cadran
+    /// **est** ce qu'on est venu voir — et où un cadran de la taille d'une pièce
+    /// de monnaie au milieu d'une fenêtre de mille points aurait l'air d'un
+    /// oubli.
+    ///
+    /// Le trait suit le diamètre au lieu d'être réglé à la main : un arc de sept
+    /// points sur un cadran de deux cents ressemble à un fil, et c'est ce qui
+    /// arrive quand on agrandit une figure sans agrandir son encre.
+    var diameter: CGFloat = Metric.diameter
+
+    /// Le chiffre du centre, et son unité. Ils ne suivent pas le diamètre —
+    /// voir `Type.dial` pour ce que « proportionnel » donnerait sur un texte.
+    var captionFont: Font = Type.metric
+    var unitFont: Font = Type.metaFaint
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// L'ouverture, en bas. 270° de course : au-delà, l'aiguille passe derrière
@@ -58,7 +78,7 @@ struct SpeedDial: View {
                 .trim(from: 0, to: Self.sweep)
                 .stroke(
                     Palette.trough,
-                    style: StrokeStyle(lineWidth: Metric.track, lineCap: .round, dash: [1.5, 5])
+                    style: StrokeStyle(lineWidth: track, lineCap: .round, dash: [1.5 * scale, 5 * scale])
                 )
                 .rotationEffect(.degrees(Self.start))
                 // Deux degrés de dérive : assez pour qu'on voie que ça vit, trop
@@ -71,7 +91,7 @@ struct SpeedDial: View {
                 .trim(from: 0, to: Self.sweep * max(0, min(1, needle)))
                 .stroke(
                     tint.gradient,
-                    style: StrokeStyle(lineWidth: Metric.arc, lineCap: .round)
+                    style: StrokeStyle(lineWidth: arc, lineCap: .round)
                 )
                 .rotationEffect(.degrees(Self.start))
                 // `.smooth` et pas un ressort : l'aiguille est rafraîchie dix
@@ -82,23 +102,30 @@ struct SpeedDial: View {
 
             VStack(spacing: 0) {
                 Text(caption)
-                    .font(Type.metric)
+                    .font(captionFont)
                     .monospacedDigit()
                     .minimumScaleFactor(0.5)
                     .lineLimit(1)
                 Text(unit)
-                    .font(Type.metaFaint)
+                    .font(unitFont)
                     .foregroundStyle(.secondary)
             }
             // **Le creux, pas le diamètre.** Sur un arc de 270°, le carré
             // inscrit fait environ 70 % du diamètre : rembourrer de l'épaisseur
             // du trait laissait « 124,0 » toucher l'arc des deux côtés — visible
             // au rendu, et c'est un chiffre qu'une fibre affiche vraiment.
-            .padding(.horizontal, Metric.arc * 2 + Space.tight)
+            .padding(.horizontal, arc * 2 + Space.tight)
         }
-        .frame(width: Metric.diameter, height: Metric.diameter)
+        .frame(width: diameter, height: diameter)
         .accessibilityHidden(true)
     }
+
+    /// Tout ce qui est dessiné suit le diamètre, dans le rapport où la petite
+    /// taille a été réglée. Rien à re-régler quand une troisième taille
+    /// apparaîtra.
+    private var scale: CGFloat { diameter / Metric.diameter }
+    private var track: CGFloat { Metric.track * scale }
+    private var arc: CGFloat { Metric.arc * scale }
 
     enum Metric {
         /// Assez grand pour que cinq caractères — « 124,0 » — tiennent dans le
@@ -107,6 +134,15 @@ struct SpeedDial: View {
         static let diameter: CGFloat = 104
         static let track: CGFloat = 4
         static let arc: CGFloat = 7
+
+        /// Le cadran de la section « Débit ».
+        ///
+        /// 216 points : c'est la taille à partir de laquelle le chiffre du
+        /// centre se lit depuis l'autre bout du bureau, c'est-à-dire depuis là
+        /// où on est vraiment pendant les neuf secondes que dure le test — on
+        /// lance la mesure et on regarde ailleurs. Un compteur qu'il faut venir
+        /// lire de près n'a aucune raison d'être un compteur.
+        static let heroDiameter: CGFloat = 216
     }
 }
 

@@ -101,7 +101,28 @@ struct SectionSidebar: View {
         // un compteur qui affiche « 7 » en permanence ne dit plus rien, alors
         // qu'un « 2 » qui apparaît est exactement l'information de la section.
         case .watch: model.watch.verdict.lanes.filter(\.state.deservesAttention).count
+        // Aucun compteur : il n'y a rien à dénombrer, et le seul chiffre que la
+        // section porte — le dernier débit — n'est pas une nouveauté qu'on
+        // aurait manquée.
+        case .speed: 0
+        // **Un compteur qui ne compte pas des objets, mais du retard.**
+        //
+        // Les autres sections répondent « combien y en a-t-il ». Celle-ci n'a
+        // rien à dénombrer : ce qui mérite un chiffre, c'est le nombre de
+        // jours écoulés depuis la dernière sauvegarde **prouvée**, et
+        // seulement quand il dépasse l'intervalle promis. Une pastille qui
+        // apparaît veut alors dire « ça ne s'est pas fait », ce qui est
+        // exactement l'information qu'aucun écran ne donnait à ce Mac.
+        //
+        // `lastSuccess` exige une preuve relue dans le dépôt : un run qui a
+        // tourné sans rien y écrire ne remet pas ce compteur à zéro.
+        //
+        // Elle sort par un retour anticipé plutôt que par ce `switch` : sa
+        // pastille n'est pas toujours un nombre — « aucune sauvegarde prouvée,
+        // jamais » y porte un « ! », parce que ce n'est pas une quantité.
+        case .backup: 0
         }
+        if item == .backup { return model.backup.badgeText }
         return count > 0 ? "\(count)" : nil
     }
 
@@ -326,6 +347,29 @@ enum LibraryPane: String, CaseIterable, Identifiable {
     case clipboard
     case watch
 
+    /// **En dernier, et c'est la seule section qui ne soit pas une boîte.**
+    ///
+    /// Les six autres répondent à « qu'est-ce que j'ai fait » ou « qu'est-ce que
+    /// j'ai gardé » : elles listent ce que bran a produit. Celle-ci ne liste
+    /// rien — elle mesure l'état d'une ligne, maintenant, et son contenu
+    /// n'existe pas tant qu'on ne l'a pas demandé. La ranger au milieu des
+    /// listes ferait attendre un historique là où il y a un instrument.
+    case speed
+
+    /// **En dernier, et après « Débit », parce que c'est la seule section qui
+    /// ne parle pas de ce que bran a fait.**
+    ///
+    /// Les six premières listent ce que l'application a produit ; « Débit »
+    /// mesure une ligne. Celle-ci répond à une question d'une autre nature —
+    /// « est-ce que mes fichiers sont à l'abri » — et c'est la seule dont la
+    /// bonne réponse est qu'on n'ait jamais besoin de l'ouvrir.
+    ///
+    /// Elle mérite quand même sa place dans la colonne plutôt qu'un coin des
+    /// réglages : ce Mac a passé des semaines avec 143 Go envoyés sur le
+    /// réseau et zéro sauvegarde restaurable, précisément parce que rien
+    /// n'était visible sans aller le chercher.
+    case backup
+
     var id: String { rawValue }
 
     var label: String {
@@ -336,6 +380,8 @@ enum LibraryPane: String, CaseIterable, Identifiable {
         case .snapshots: "Captures"
         case .clipboard: "Presse-papiers"
         case .watch: "Veille"
+        case .speed: "Débit"
+        case .backup: "Sauvegarde"
         }
     }
 
@@ -347,6 +393,19 @@ enum LibraryPane: String, CaseIterable, Identifiable {
         case .snapshots: "text.viewfinder"
         case .clipboard: "doc.on.clipboard"
         case .watch: "binoculars"
+        // **Pas le même glyphe que la barre de menus, et c'est délibéré.**
+        //
+        // Là-bas, `gauge.with.dots.needle.bottom.50percent` est un symbole à
+        // valeur variable : son remplissage suit l'aiguille pendant la mesure,
+        // ce qui est tout son intérêt. Ici il ne mesure rien, et à dix-sept
+        // points sa jauge se referme en un cercle avec un point au milieu —
+        // rendu à l'écran, il se lit comme un « i » d'information, à côté de
+        // jumelles et d'un presse-papiers qui, eux, se reconnaissent.
+        case .speed: "speedometer"
+        // Un bouclier plutôt qu'un disque dur ou un nuage : ce que la section
+        // promet n'est pas un support ni un serveur, c'est que les fichiers
+        // soient encore là après. Le glyphe suit la promesse, pas la plomberie.
+        case .backup: "externaldrive.badge.checkmark"
         }
     }
 
@@ -362,6 +421,15 @@ enum LibraryPane: String, CaseIterable, Identifiable {
         case .snapshots: "Le texte lu à l'écran, sans rien envoyer nulle part."
         case .clipboard: "Tout ce que vous avez copié, gardé et retrouvable."
         case .watch: "Laquelle de vos sessions parallèles vous attend, et depuis quand."
+        // Ni « testez votre connexion » ni « speed test » : ce que la section
+        // rend n'est pas un chiffre, c'est un verdict d'usage — et « d'ici »
+        // n'est pas de la modestie, c'est le point de mesure, sans lequel un
+        // débit ne se compare à rien.
+        case .speed: "Ce que votre connexion tient vraiment, mesuré depuis ce Mac."
+        // « Vérifiée » porte tout le sous-titre. Une sauvegarde qui affirme
+        // avoir tourné ne vaut rien — celle-ci relit le dépôt et montre
+        // l'identifiant du snapshot qu'elle y a retrouvé.
+        case .backup: "Vos fichiers, chiffrés, ailleurs — et la preuve vérifiée que c'est vrai."
         }
     }
 }

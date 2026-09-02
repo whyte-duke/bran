@@ -85,14 +85,28 @@ final class SpeedController {
     /// cent mégaoctets pour relire un chiffre qu'on avait déjà.
     private(set) var reading = SpeedReading()
 
-    /// Le relevé d'**avant**, pour la comparaison.
+    /// **Les derniers relevés complets, du plus ancien au plus récent.**
     ///
     /// C'est la réponse au fait le plus surprenant de toute la mise au point :
     /// la ligne du poste a été mesurée à 14 Mo/s puis à 30 Mo/s dans la même
     /// heure, sans que rien change de visible. Un chiffre seul se lit comme une
-    /// propriété de l'abonnement ; deux chiffres côte à côte disent la vérité,
-    /// qui est qu'un débit est une météo.
-    private(set) var previous: SpeedReading?
+    /// propriété de l'abonnement ; une suite de chiffres dit la vérité, qui est
+    /// qu'un débit est une météo.
+    ///
+    /// Le menu déroulant n'a la place que du relevé précédent — d'où `previous`
+    /// juste dessous — mais la section « Débit » a celle d'une courbe, et c'est
+    /// là que l'information devient un diagnostic : une ligne qui décroche tous
+    /// les soirs se voit en une fixation et ne se raconte pas.
+    private(set) var history: [SpeedReading] = []
+
+    /// Le relevé d'**avant**, pour la comparaison en une ligne.
+    ///
+    /// **Calculé et non stocké**, depuis que l'historique existe : deux endroits
+    /// pour la même vérité finissent toujours par diverger, et celui-ci se
+    /// déduit en une soustraction.
+    var previous: SpeedReading? {
+        history.count >= 2 ? history[history.count - 2] : nil
+    }
 
     /// Le libellé de la barre de menus. Il ne change que quand il change.
     private(set) var label = "…"
@@ -103,25 +117,60 @@ final class SpeedController {
 
     var onFailure: (String) -> Void = { _ in }
 
-    /// Ce que l'encoche doit montrer. Posé par `AppModel`, comme partout.
+    /// Ce que le panneau flottant doit montrer. Posé par `AppModel`, comme
+    /// partout : le contrôleur ignore qu'un panneau existe, ce qui permet à la
+    /// sonde en ligne de commande de faire tourner la même mesure sans écran.
     var onPresent: (Bool) -> Void = { _ in }
 
     // MARK: - Machinerie
 
     private enum Key {
         static let reading = "bran.speed.lastReading"
+        /// **Plus écrite, encore lue.** Elle portait le relevé précédent avant
+        /// que l'historique existe ; la relire au premier lancement évite de
+        /// jeter la seule comparaison que quelqu'un avait déjà.
         static let previous = "bran.speed.previousReading"
+        static let history = "bran.speed.history"
     }
+
+    /// Combien de relevés on garde.
+    ///
+    /// Douze, parce que c'est ce qu'une bande de barres montre sans devenir une
+    /// forêt : au-delà, chaque barre fait deux points de large et la courbe
+    /// cesse de se lire. Ce n'est pas une contrainte de stockage — douze relevés
+    /// pèsent moins de deux kilooctets — c'est une contrainte de lecture.
+    private static let depth = 12
 
     private let defaults = UserDefaults.standard
     private let version: String
     private var run: Task<Void, Never>?
     private var gate = LabelGate()
 
+    /// Combien de vues montrent déjà la mesure **dans la fenêtre**.
+    ///
+    /// Un compteur et pas un booléen : rien n'interdit d'ouvrir deux fenêtres,
+    /// et un drapeau que la seconde éteint en partant rallumerait le panneau
+    /// flottant par-dessus la première.
+    private var inlineViewers = 0
+
+    /// Ce que la mesure demande à voir, avant arbitrage.
+    private var wantsOverlay = false
+
     init(version: String) {
         self.version = version
         reading = Self.load(Key.reading, from: defaults) ?? SpeedReading()
-        previous = Self.load(Key.previous, from: defaults)
+        history = Self.loadHistory(from: defaults)
+
+        // **Reprise de l'ancien format, une fois.** Deux clés portaient le
+        // dernier relevé et celui d'avant ; l'historique les remplace toutes
+        // les deux. Sans cette reprise, la mise à jour effacerait la
+        // comparaison sous les yeux de quelqu'un qui venait de la gagner — et
+        // la seule façon de la retrouver serait de redépenser cent mégaoctets.
+        if history.isEmpty {
+            history = [Self.load(Key.previous, from: defaults), reading]
+                .compactMap { $0 }
+                .filter { $0.isEmpty == false }
+        }
     }
 
     // MARK: - Le geste
@@ -159,13 +208,66 @@ final class SpeedController {
         settle(.idle)
     }
 
+    // MARK: - Qui montre la mesure
+
+    /// **La section « Débit » prend la parole ; le panneau flottant se tait.**
+    ///
+    /// Le panneau existe pour montrer une mesure lancée depuis la barre de
+    /// menus, c'est-à-dire quand rien à l'écran ne la montre. Quand la section
+    /// est ouverte, elle affiche le même cadran en plus grand : le panneau
+    /// viendrait poser une seconde aiguille par-dessus la première, dans le coin
+    /// de l'écran, pour dire ce qu'on est déjà en train de regarder.
+    ///
+    /// **Le critère est « la section est à l'écran », pas « la fenêtre est au
+    /// premier plan ».** Suivre le premier plan ferait apparaître et disparaître
+    /// un panneau à chaque changement d'application pendant les neuf secondes
+    /// que dure un test — un clignotement pour une information que la section
+    /// porte déjà. Le prix de ce choix est nommé : une mesure lancée depuis la
+    /// section, puis laissée derrière une autre fenêtre, ne se voit plus que
+    /// dans la barre de menus, qui continue d'afficher l'aiguille.
+    func beginInlineViewing() {
+        inlineViewers += 1
+        refreshPresentation()
+    }
+
+    func endInlineViewing() {
+        inlineViewers = max(0, inlineViewers - 1)
+        refreshPresentation()
+    }
+
+    private func present(_ visible: Bool) {
+        wantsOverlay = visible
+        refreshPresentation()
+    }
+
+    private func refreshPresentation() {
+        onPresent(wantsOverlay && inlineViewers == 0)
+    }
+
     // MARK: - La mesure
 
     private func measure() async {
         let userAgent = SpeedPlan.userAgent(version: version)
         var fresh = SpeedReading()
 
-        onPresent(true)
+        present(true)
+
+        // **Par où ça passe, demandé avant de tirer le premier octet.**
+        //
+        // Avant, parce que c'est le seul moment où la réponse décrit bien la
+        // mesure qui suit : une interface peut basculer pendant les neuf
+        // secondes du test — un dock qu'on branche, un Wi-Fi qui retombe — et
+        // une question posée à la fin nommerait alors le mauvais chemin.
+        //
+        // La demande ne coûte rien : aucun octet, aucune autorisation, et une
+        // réponse en quelques millisecondes. Voir `SpeedLinkProbe`, y compris
+        // pour ce qui arrive quand le système ne répond pas — rien, le relevé
+        // s'écrit sans lien.
+        if let link = await SpeedLinkProbe.current() {
+            fresh.link = link.link
+            fresh.isExpensive = link.isExpensive
+        }
+        guard Task.isCancelled == false else { return settle(.idle) }
 
         // **Latence et descente forment un couple, par source.**
         //
@@ -332,20 +434,34 @@ final class SpeedController {
     }
 
     private func commit(_ fresh: SpeedReading) {
-        previous = reading.isEmpty ? nil : reading
         reading = fresh
+        history.append(fresh)
+        if history.count > Self.depth { history.removeFirst(history.count - Self.depth) }
         Self.save(fresh, at: Key.reading, in: defaults)
-        if let previous { Self.save(previous, at: Key.previous, in: defaults) }
+        Self.saveHistory(history, in: defaults)
 
         FeatureLog.record("débit — \(SpeedFormat.megabytesSigned(fresh.download)) descendant")
         settle(.done)
+    }
+
+    /// Oublier les relevés passés.
+    ///
+    /// **Le dernier reste**, et ce n'est pas une demi-mesure : effacer aussi le
+    /// chiffre courant obligerait à relancer un test — donc à dépenser cent
+    /// mégaoctets — pour retrouver un état que l'écran affichait déjà. Ce qu'on
+    /// veut oublier ici, c'est un historique pris ailleurs, chez un client, sur
+    /// un partage de connexion ; pas la réponse à « où en est ma ligne ».
+    func forgetHistory() {
+        history = reading.isEmpty ? [] : [reading]
+        Self.saveHistory(history, in: defaults)
+        defaults.removeObject(forKey: Key.previous)
     }
 
     private func fail(_ reason: String, spending bytes: Int) {
         reading.spentBytes = bytes
         publish(.failed(reason))
         onFailure(reason)
-        onPresent(true)
+        present(true)
         hideLater(after: 5)
     }
 
@@ -353,7 +469,7 @@ final class SpeedController {
     /// repos sans rien à dire.
     private func settle(_ next: Phase) {
         publish(next)
-        onPresent(next != .idle)
+        present(next != .idle)
         guard next != .idle else { return }
         // Cinq secondes : le temps de lire trois nombres. C'est plus long que
         // les 1,8 s de l'encoche de la dictée, parce qu'il y a plus à lire —
@@ -366,7 +482,7 @@ final class SpeedController {
         run = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard Task.isCancelled == false else { return }
-            self?.onPresent(false)
+            self?.present(false)
             self?.publish(.idle)
         }
     }
@@ -381,5 +497,15 @@ final class SpeedController {
     private static func save(_ reading: SpeedReading, at key: String, in defaults: UserDefaults) {
         guard let data = try? JSONEncoder().encode(reading) else { return }
         defaults.set(data, forKey: key)
+    }
+
+    private static func loadHistory(from defaults: UserDefaults) -> [SpeedReading] {
+        guard let data = defaults.data(forKey: Key.history) else { return [] }
+        return (try? JSONDecoder().decode([SpeedReading].self, from: data)) ?? []
+    }
+
+    private static func saveHistory(_ history: [SpeedReading], in defaults: UserDefaults) {
+        guard let data = try? JSONEncoder().encode(history) else { return }
+        defaults.set(data, forKey: Key.history)
     }
 }

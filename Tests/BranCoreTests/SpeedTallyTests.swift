@@ -671,4 +671,58 @@ struct SpeedMissTests {
         let reading = SpeedReading(download: 21_500_000, upload: 19_900_000)
         #expect(reading.uploadMiss == nil)
     }
+
+    @Test("La liaison se conserve d'un lancement à l'autre")
+    func linkSurvivesTheRoundTrip() throws {
+        // Sans ça, l'historique de la section « Débit » perdrait à chaque mise à
+        // jour la seule chose qui explique pourquoi un chiffre a doublé — voir
+        // `SpeedLink`.
+        let original = SpeedReading(
+            download: 30_100_000,
+            latency: 0.026, jitter: 0.001,
+            source: "OVH — Roubaix",
+            link: .wired, isExpensive: false,
+            measuredAt: Date(timeIntervalSince1970: 1_788_000_000)
+        )
+        let data = try JSONEncoder().encode(original)
+        #expect(try JSONDecoder().decode(SpeedReading.self, from: data) == original)
+    }
+
+    @Test("Un relevé écrit avant la liaison se relit sans liaison, pas sans relevé")
+    func olderReadingsDecodeWithoutALink() throws {
+        // La même classe de défaut que `spentBytes` puis `uploadMiss` ont déjà
+        // coûtée, ouverte une troisième fois par deux champs de plus. C'est
+        // exactement ce que l'en-tête de `init(from:)` annonce : chaque nouveau
+        // champ la rouvrirait si `decodeIfPresent` ne la fermait pas.
+        let legacy = Data(#"{"download":21500000,"spentBytes":140000000}"#.utf8)
+        let reading = try JSONDecoder().decode(SpeedReading.self, from: legacy)
+        #expect(reading.download == 21_500_000)
+        #expect(reading.link == nil)
+        #expect(reading.isExpensive == nil)
+    }
+
+    @Test("Un historique entier se relit, y compris ses relevés d'avant")
+    func historyDecodes() throws {
+        // Ce que `SpeedController` écrit sous `bran.speed.history` : un tableau,
+        // dont les plus anciens éléments ont pu être écrits par une version qui
+        // ne connaissait ni la liaison ni la raison d'une montée manquée.
+        let stored = Data(
+            #"[{"download":14200000},{"download":30100000,"link":"wired","spentBytes":140000000}]"#.utf8
+        )
+        let history = try JSONDecoder().decode([SpeedReading].self, from: stored)
+        #expect(history.count == 2)
+        #expect(history.first?.link == nil)
+        #expect(history.last?.link == .wired)
+    }
+
+    @Test("Une liaison a de quoi se dessiner et se nommer")
+    func everyLinkIsPresentable() {
+        // La puce d'en-tête et la légende de l'historique lisent les deux, sans
+        // repli : un cas ajouté sans son symbole s'afficherait comme un carré
+        // vide, ce qu'aucun rendu ne rattrape.
+        for link in [SpeedLink.wifi, .wired, .cellular, .other] {
+            #expect(link.title.isEmpty == false)
+            #expect(link.symbol.isEmpty == false)
+        }
+    }
 }

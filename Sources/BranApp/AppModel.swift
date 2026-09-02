@@ -94,6 +94,17 @@ public final class AppModel {
     /// navigateur, et c'est le seul endroit où cette chaîne sort de la machine.
     let speed: SpeedController
 
+    /// La sauvegarde. Le module le plus autonome de tous : il ne connaît ni les
+    /// réunions, ni la dictée, ni le veilleur, et aucun d'eux ne le connaît.
+    ///
+    /// **Il n'est pas le planificateur, et c'est le point à ne pas perdre.** Ce
+    /// qui tient le rythme est un LaunchAgent qui rappelle le même binaire en
+    /// `--backup-run`, fenêtre ouverte ou non — voir `BackupAgentInstaller`. Ce
+    /// contrôleur-ci sert l'écran, propose un rattrapage quand la fenêtre est
+    /// là, et partage avec le job un verrou de fichier pour que deux `kopia` ne
+    /// se disputent jamais le dépôt.
+    let backup = BackupController()
+
     /// Le journal de bord. **La seule chose du modèle qui lise les quatre
     /// sources d'un coup** — et elle ne les possède pas : elle relit le journal
     /// du veilleur en lecture seule, et la vue lui passe les repères des trois
@@ -205,6 +216,7 @@ public final class AppModel {
         // lise, et le compteur ne s'en sert que pour se nommer auprès du serveur
         // de mesure. Voir `SpeedPlan.userAgent`.
         self.speed = SpeedController(version: updates.installedVersion)
+        backup.start()
 
         let settings = self.dictationSettings
         let dictationStore = DictationStore(

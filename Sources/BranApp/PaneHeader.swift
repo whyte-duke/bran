@@ -8,8 +8,21 @@ import SwiftUI
 struct PaneHeader<Trailing: View>: View {
     let title: String
     let subtitle: String
-    @Binding var query: String
-    var searchPrompt: String
+
+    /// **Optionnel, pour la seule section qui n'a rien à chercher.**
+    ///
+    /// Les six autres listent des choses — des réunions, des dictées, des voies —
+    /// et un champ de recherche y répond à « laquelle ». « Débit » n'affiche pas
+    /// une liste : elle affiche un état, celui de la ligne maintenant. Un champ
+    /// qui filtrerait quatre nombres serait un contrôle qu'on ne peut pas
+    /// utiliser, posé exactement là où l'œil a appris qu'il y en a un — donc
+    /// pire qu'une absence.
+    ///
+    /// La forme, elle, ne bouge pas : grand titre, sous-titre, barre d'outils à
+    /// droite, filet en dessous. C'est ce qui fait qu'on sait où regarder, et
+    /// c'est ce que la régularité protégeait vraiment.
+    var query: Binding<String>?
+    var searchPrompt: String = ""
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
@@ -26,7 +39,9 @@ struct PaneHeader<Trailing: View>: View {
                 trailing()
             }
 
-            SearchField(text: $query, prompt: searchPrompt)
+            if let query {
+                SearchField(text: query, prompt: searchPrompt)
+            }
         }
         .padding(.horizontal, Space.gutter)
         .padding(.top, Space.gutter)

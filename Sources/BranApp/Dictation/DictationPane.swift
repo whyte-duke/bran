@@ -201,6 +201,17 @@ struct DictationPane: View {
 
 /// Un avertissement en bandeau, sous l'en-tête.
 struct NoticeRow<Action: View>: View {
+
+    /// La largeur en dessous de laquelle on cesse de recomposer le texte.
+    ///
+    /// Choisie sur la largeur minimale utilisable de la fenêtre : la colonne
+    /// de gauche en réclame 200, et la section la plus contrainte — le cadran
+    /// de « Débit » — en veut environ 290 de plus. En dessous de cet ordre de
+    /// grandeur, la fenêtre ne montre plus rien d'utile ; il n'y a donc aucune
+    /// disposition à préserver, seulement un plancher à ne pas laisser
+    /// exploser.
+    fileprivate static var textFloorWidth: CGFloat { 320 }
+
     let text: String
     let symbol: String
     let tint: Color
@@ -223,9 +234,49 @@ struct NoticeRow<Action: View>: View {
             Image(systemName: symbol)
                 .foregroundStyle(tint)
                 .font(.callout)
-            Text(text)
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
+            // **Ce texte a bloqué la hauteur de toute la fenêtre, dans sept
+            // sections sur huit.**
+            //
+            // `fixedSize(vertical: true)` dit « ignore la hauteur qu'on me
+            // propose, prends ma hauteur idéale » — mais il respecte toujours
+            // la **largeur** proposée. Or macOS calcule le plancher de
+            // redimensionnement d'une fenêtre en proposant à la vue racine une
+            // taille proche de zéro. À largeur quasi nulle, ce texte doit
+            // toujours s'enrouler : sa hauteur idéale devient celle de la même
+            // phrase écrite en centaines de lignes d'un caractère. Et comme les
+            // bandeaux vivent **hors** du `ScrollView` de leur section, cette
+            // hauteur remonte telle quelle jusqu'à la fenêtre.
+            //
+            // Mesuré le 02/09/2026 en recompilant ce composant à l'identique,
+            // avec le vrai moteur de disposition, sur le plus long bandeau de
+            // l'application (307 caractères) :
+            //
+            // ```
+            //   largeur │ sans plancher │ avec plancher
+            //         0 │      3 832 pt │        112 pt
+            //       260 │        202 pt │        112 pt
+            //       400 │        112 pt │        112 pt
+            //       500 │         97 pt │         97 pt
+            //       900 │         67 pt │         67 pt
+            // ```
+            //
+            // **Le plancher de largeur plutôt qu'une borne de lignes**, et la
+            // mesure a tranché entre les deux. Un `lineLimit(4)` ramenait bien
+            // la hauteur à 82 pt, mais il tronquait le texte dès 500 points de
+            // large — c'est-à-dire dans un usage réel, pour supprimer un défaut
+            // qui n'existe qu'à une largeur que personne ne verra jamais.
+            //
+            // Le plancher, lui, ne change **rien** au-dessus de 400 points : la
+            // colonne des chiffres est identique. En dessous, il refuse
+            // simplement de recomposer le texte plus étroit et laisse la vue
+            // rogner — ce qui est le bon compromis, puisque la fenêtre n'est de
+            // toute façon pas utilisable à cette largeur-là.
+            TextWidthFloor(floorWidth: Self.textFloorWidth) {
+                Text(text)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .clipped()
             Spacer(minLength: 8)
             action()
         }
@@ -659,5 +710,36 @@ private struct DictationStatusChip: View {
                 ? "\(model.dictationSettings.trigger.displayName) · prête"
                 : "désactivée"
         }
+    }
+}
+
+
+/// Une disposition qui ne propose jamais moins d'une certaine largeur à son
+/// contenu.
+///
+/// **Elle existe pour un défaut précis, mesuré**, et son en-tête est dans
+/// `NoticeRow` : un `Text` en `fixedSize(vertical:)` répond à une largeur
+/// quasi nulle par une hauteur qui explose, et cette hauteur devient le
+/// plancher de redimensionnement de la fenêtre entière.
+///
+/// Elle rapporte à son parent la largeur qu'on lui a proposée — donc elle ne
+/// gonfle rien — mais compose son contenu à `floorWidth` au minimum. Le
+/// surplus est rogné par le `clipped()` de l'appelant, ce qui est visible et
+/// franc, là où recomposer aurait été invisible et coûteux.
+struct TextWidthFloor: Layout {
+    let floorWidth: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        let asked = proposal.width ?? floorWidth
+        let laidOut = child.sizeThatFits(ProposedViewSize(width: max(asked, floorWidth), height: nil))
+        return CGSize(width: asked, height: laidOut.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let child = subviews.first else { return }
+        child.place(
+            at: CGPoint(x: bounds.minX, y: bounds.minY),
+            proposal: ProposedViewSize(width: max(bounds.width, floorWidth), height: bounds.height))
     }
 }

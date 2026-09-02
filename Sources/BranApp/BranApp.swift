@@ -26,6 +26,25 @@ struct BranLaunch {
     static func main() {
         if PasteboardAccessProbe.runIfRequested() { return }
         if SpeedProbeReport.runIfRequested() { return }
+
+        // Les deux sous-commandes de la sauvegarde, et elles ne sont pas des
+        // sondes de diagnostic comme les deux au-dessus : ce sont des modes de
+        // fonctionnement à part entière.
+        //
+        // **`--backup-run` est la fonctionnalité, pas un accessoire.** Le
+        // rythme d'une sauvegarde ne peut pas dépendre de l'ouverture d'une
+        // fenêtre : un minuteur posé dans l'interface annonce « tous les deux
+        // jours » et ne s'exécute jamais les jours où l'application n'est pas
+        // lancée — c'est le défaut qui a laissé ce Mac sans une seule
+        // sauvegarde restaurable pendant des semaines. C'est donc launchd qui
+        // appelle ce chemin, sur le même binaire, sans jamais démarrer AppKit.
+        //
+        // Les deux sortent par `exit()` plutôt que par un `return` : un script
+        // et `launchctl` lisent un code de sortie, et `BackupHeadlessRun` en
+        // distingue six.
+        if BackupProvisioning.runIfRequested() { return }
+        if BackupHeadlessRun.runIfRequested() { return }
+
         BranApp.main()
     }
 }
