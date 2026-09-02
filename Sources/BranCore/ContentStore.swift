@@ -444,6 +444,10 @@ public final class ContentStore<Entry: ContentEntry> {
             )
 
             let decoder = Self.decoder
+            // Un seul formateur pour tout le parcours : `containedBlobName` en
+            // a besoin à chaque entrée, et `DateFormatter` coûte plus cher que
+            // la comparaison qu'il sert. Même raison qu'au ramassage.
+            let blobNameFormatter = Self.stampFormatter
             var found: [Entry] = []
             var bytes: Int64 = 0
 
@@ -466,13 +470,40 @@ public final class ContentStore<Entry: ContentEntry> {
                         continue
                     }
 
-                    // Un fichier lourd supprimé à la main dans le Finder doit
-                    // rendre l'entrée non-relisable, pas planter au clic.
-                    if let name = entry.blobFileName,
-                       FileManager.default.fileExists(
-                           atPath: folder.appending(path: name).path(percentEncoded: false)
-                       ) == false {
-                        entry.blobFileName = nil
+                    // **Le nom du fichier lourd est validé avant d'être cru,
+                    // et l'ordre compte.**
+                    //
+                    // `blobFileName` est un champ JSON : il vient du disque,
+                    // donc de l'extérieur. Le README promet qu'on peut
+                    // déplacer ce dossier, le copier sur un autre Mac, le
+                    // restaurer d'une sauvegarde, et les réglages permettent
+                    // de le poser sur un volume partagé — un sidecar abîmé, ou
+                    // écrit par autre chose que bran, n'a rien d'hypothétique.
+                    //
+                    // Il était composé tel quel : `folder.appending(path:)`.
+                    // Un nom valant `../victime` donne
+                    // `…/Notes/../victime`, que le système résout hors du
+                    // dossier — et `removeBlob` y appelle `removeItem`, qui
+                    // supprime **récursivement**. Reproduit : un dossier
+                    // voisin et son contenu effacés par une purge de routine.
+                    //
+                    // Puis, seulement si le nom est acceptable : un fichier
+                    // supprimé à la main dans le Finder doit rendre l'entrée
+                    // non-relisable, pas planter au clic.
+                    if let name = entry.blobFileName {
+                        let contenu = Self.containedBlobName(
+                            name, extension: shape.blobExtension, formatter: blobNameFormatter
+                        )
+                        if contenu == nil {
+                            libraryLog.error(
+                                "\(self.shape.folderName, privacy: .public) : nom de fichier lourd refusé, entrée conservée sans son fichier"
+                            )
+                            entry.blobFileName = nil
+                        } else if FileManager.default.fileExists(
+                            atPath: folder.appending(path: name).path(percentEncoded: false)
+                        ) == false {
+                            entry.blobFileName = nil
+                        }
                     }
                     if let name = entry.blobFileName { claimed.insert(name) }
                     found.append(entry)
@@ -604,7 +635,16 @@ public final class ContentStore<Entry: ContentEntry> {
     /// `nil` quand le fichier lourd n'existe plus. Le bouton qui en dépend se
     /// désactive avec sa raison plutôt que d'échouer au clic.
     public func blobURL(for entry: Entry) -> URL? {
-        entry.blobFileName.map { folder.appending(path: $0) }
+        // Même raison qu'à `removeBlob` : celle-ci ne supprime rien, mais elle
+        // rend une URL qu'un appelant ouvrira, affichera ou joindra. Un nom
+        // qui s'échappe donnerait un chemin de lecture vers n'importe quel
+        // fichier personnel.
+        guard let name = entry.blobFileName,
+              Self.containedBlobName(
+                  name, extension: shape.blobExtension, formatter: Self.stampFormatter
+              ) != nil
+        else { return nil }
+        return folder.appending(path: name)
     }
 
     /// Annonce une **constatation** que la générique ne peut pas formuler à la
@@ -772,12 +812,49 @@ public final class ContentStore<Entry: ContentEntry> {
         return formatter.date(from: String(head.dropLast())) != nil
     }
 
+    /// Ce nom désigne-t-il un fichier **de ce dossier**, et lequel ?
+    ///
+    /// La question n'est pas cosmétique : `blobFileName` est lu dans un
+    /// fichier JSON, et rien ne garantit qui l'a écrit. Un nom contenant `..`
+    /// sort du dossier, et tout ce que le magasin fait ensuite — ouvrir,
+    /// compter, **supprimer récursivement** — le suit dehors.
+    ///
+    /// Le critère est celui qui existait déjà pour le ramassage des
+    /// orphelins, appliqué ici à l'autre bout du même problème : un nom
+    /// acceptable est un nom que ce magasin **aurait pu écrire**, c'est-à-dire
+    /// `<horodatage>-<UUID>.<extension>` et rien d'autre. C'est plus strict
+    /// que « pas de barre oblique », et c'est voulu — la forme entière est
+    /// vérifiée, donc aucune graphie exotique n'a de chemin de contournement à
+    /// chercher.
+    ///
+    /// Le repli est le même que pour un fichier disparu du Finder : l'entrée
+    /// survit sans son fichier lourd, et le dit. Perdre une image vaut mieux
+    /// que perdre un dossier.
+    private nonisolated static func containedBlobName(
+        _ name: String, extension suffix: String, formatter: DateFormatter
+    ) -> String? {
+        guard name.contains("/") == false, name.contains("\0") == false else { return nil }
+        guard (name as NSString).pathExtension == suffix else { return nil }
+        let stem = (name as NSString).deletingPathExtension
+        guard isSelfWritten(stem, formatter: formatter) else { return nil }
+        return name
+    }
+
     /// Le `try?` est délibéré et n'est plus un trou : un fichier que le disque
     /// refuse de rendre reste sur place, cesse d'être réclamé par son entrée, et
     /// se fait ramasser à la prochaine relecture. C'était l'autre moitié du
     /// défaut — la purge annonçait des suppressions qu'elle n'avait pas faites.
     private func removeBlob(of entry: Entry) {
-        guard let name = entry.blobFileName else { return }
+        // Revalidé ici, et pas seulement à la relecture : `mutate` laisse un
+        // appelant poser n'importe quel `blobFileName` en mémoire, et c'est
+        // cette ligne-ci qui supprime. Une garde à la frontière d'entrée qui
+        // ne serait pas doublée devant l'effet destructeur ne tiendrait que
+        // tant que personne n'ajoute un second chemin d'écriture.
+        guard let name = entry.blobFileName,
+              Self.containedBlobName(
+                  name, extension: shape.blobExtension, formatter: Self.stampFormatter
+              ) != nil
+        else { return }
         try? FileManager.default.removeItem(at: folder.appending(path: name))
     }
 

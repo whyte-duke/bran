@@ -265,8 +265,30 @@ enum BackupAgentInstaller {
         } catch {
             throw Failure.launchctlLaunchFailed(arguments: arguments, underlying: String(describing: error))
         }
-        process.waitUntilExit()
+        // **Lire d'abord, attendre ensuite. L'ordre inverse est un
+        // interblocage, et le dépôt le sait déjà.**
+        //
+        // Un tube a une capacité finie — 64 Kio sur Darwin. Quand un enfant
+        // écrit plus que ça et que personne ne lit, son `write` bloque ; il
+        // ne se termine donc jamais, et le `waitUntilExit()` qui devait
+        // précéder la lecture attend un événement que la lecture seule
+        // pourrait provoquer. Le processus appelant est figé pour toujours.
+        //
+        // Ce n'est pas une hypothèse ici : `launchctl print` est appelé plus
+        // haut, et c'est la commande la plus bavarde de la famille — elle
+        // déballe le domaine entier. Les deux flux sont en plus dirigés vers
+        // le **même** tube, donc vers le même plafond.
+        //
+        // Le piège a déjà coûté cher sur ce projet : `ChainProbes.runProcess`
+        // le documente et l'évite par `readabilityHandler`, parce que les
+        // 13 436 octets de `tailscale status --json` arrivaient tronqués. Le
+        // même défaut avait survécu ici, dans un chemin synchrone.
+        //
+        // `readDataToEndOfFile()` rend la main sur la fermeture du côté
+        // écriture, c'est-à-dire à la mort de l'enfant : le tube ne peut plus
+        // se remplir, et `waitUntilExit()` n'a plus qu'à moissonner.
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
         return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 }
