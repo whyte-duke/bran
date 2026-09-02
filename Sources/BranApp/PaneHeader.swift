@@ -28,12 +28,62 @@ struct PaneHeader<Trailing: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Space.stack) {
             HStack(alignment: .firstTextBaseline) {
+                // **Le même défaut que les bandeaux, sans `fixedSize` pour le
+                // trahir.**
+                //
+                // `NoticeRow` a payé la découverte : un texte qui s'enroule
+                // répond à une largeur quasi nulle par une hauteur idéale
+                // gigantesque, et cette hauteur devient le plancher de
+                // redimensionnement de la fenêtre entière. Le correctif de
+                // l'époque a visé `fixedSize(vertical:)` en le croyant coupable ;
+                // mesuré le 02/09/2026 sur une phrase de 130 caractères, un
+                // `Text` **nu** rend exactement la même hauteur idéale :
+                //
+                // ```
+                //   largeur │ Text nu │ Text + fixedSize
+                //       900 │   16 pt │            16 pt
+                //       260 │   64 pt │            64 pt
+                //         1 │ 1 744 pt│         1 744 pt
+                // ```
+                //
+                // `fixedSize` change ce qui arrive quand on **contraint** la
+                // hauteur ; il ne change pas la hauteur idéale annoncée, et
+                // c'est cette dernière que macOS interroge. Ce sous-titre fait
+                // 50 à 80 caractères et vit hors du `ScrollView` de sa section,
+                // dans les huit sections.
+                //
+                // **Deux bornes de lignes plutôt qu'un `TextWidthFloor`.** Le
+                // plancher de largeur est le remède des bandeaux parce qu'un
+                // bandeau est une phrase qu'il faut lire en entier ; ici le
+                // titre tient sur un mot et le sous-titre sur deux lignes à
+                // toute largeur utilisable. Et `TextWidthFloor` est un
+                // `Layout` : posé dans ce `HStack` en `.firstTextBaseline`, il
+                // ne publierait plus la ligne de base du grand titre, dont
+                // dépend l'alignement de la pastille d'état à droite — le
+                // réglage que `SnapshotStatusChip` documente.
+                //
+                // Mesuré sur le bloc titre + sous-titre le plus long, avec
+                // `Type.paneTitle` et `Type.paneLead` :
+                //
+                // ```
+                //   largeur │ sans bornes │ avec bornes
+                //     1 080 │       50 pt │       50 pt
+                //       400 │       50 pt │       50 pt
+                //       320 │       65 pt │       65 pt
+                //        60 │      266 pt │       65 pt
+                //         1 │    1 238 pt │       65 pt
+                // ```
+                //
+                // Rien ne change au-dessus de 320 : c'est exactement la même
+                // colonne de chiffres.
                 VStack(alignment: .leading, spacing: Space.tight) {
                     Text(title)
                         .font(Type.paneTitle)
+                        .lineLimit(1)
                     Text(subtitle)
                         .font(Type.paneLead)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
                 Spacer(minLength: Space.inset)
                 trailing()

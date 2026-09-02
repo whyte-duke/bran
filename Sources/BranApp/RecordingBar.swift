@@ -136,13 +136,23 @@ struct RecordingBar: View {
                         .truncationMode(.tail)
                 }
 
+                // **Bornés, pour la même raison que le sous-titre de
+                // `PaneHeader`.** La barre vit hors de tout `ScrollView`, en
+                // `safeAreaInset` de la fenêtre entière : sa hauteur idéale est
+                // le plancher vertical de la fenêtre. Deux `Text` sans borne y
+                // répondaient à la largeur quasi nulle que macOS propose pour
+                // ce calcul par une phrase écrite en dizaines de lignes d'un
+                // caractère — mesuré à 1 744 pt sur 130 caractères. Une étape
+                // tient sur une ligne, son détail sur deux au pire.
                 Text(step.title)
                     .font(Type.groupHead)
+                    .lineLimit(1)
 
                 Text(step.detail)
                     .font(Type.meta)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                    .lineLimit(2)
 
                 if let fraction = step.fraction {
                     ProgressView(value: fraction)
@@ -180,21 +190,47 @@ struct RecordingBar: View {
 
     // MARK: - Le pilotage
 
+    /// **La barre n'avait aucun repli, et elle apparaît sans prévenir.**
+    ///
+    /// Un seul `HStack` additionnait une colonne de chrono à plancher de 130
+    /// points, un filet, un champ de titre, deux boutons en `controlSize(.large)`
+    /// et cinq espacements — de l'ordre de cinq cents points avant que quoi que
+    /// ce soit ne puisse se comprimer. Or la barre s'insère **au démarrage d'un
+    /// enregistrement**, pas à l'ouverture de la fenêtre : quelqu'un qui avait
+    /// réduit bran à une colonne étroite pour la poser à côté de sa visio voyait
+    /// soit la fenêtre s'élargir toute seule, soit le champ de titre et le bouton
+    /// « Arrêter » se faire écraser — c'est-à-dire le seul bouton qu'on cherche.
+    ///
+    /// Deux dispositions, et `ViewThatFits` choisit. Mesuré le 02/09/2026 en
+    /// recomposant les deux variantes avec `Design.swift` et le vrai moteur de
+    /// disposition :
+    ///
+    /// ```
+    ///            │ largeur idéale │ hauteur @1 pt
+    ///   large    │         657 pt │         57 pt
+    ///   compacte │         281 pt │         97 pt
+    /// ```
+    ///
+    /// La barre passe donc à sa forme compacte sous 657 points, et le plancher
+    /// horizontal qu'elle impose à la fenêtre tombe de 657 à 281.
+    ///
+    /// Ce que la compacte concède, et c'est réel : passer d'une variante à
+    /// l'autre en redimensionnant reconstruit le champ de titre, donc lui fait
+    /// perdre le focus. Le geste est rare — on redimensionne rarement en tapant
+    /// — et l'échange se fait contre une barre qui ne masque plus « Arrêter ».
     private var controls: some View {
+        ViewThatFits(in: .horizontal) {
+            wideControls
+            compactControls
+        }
+    }
+
+    private var wideControls: some View {
         HStack(spacing: Space.stack) {
             indicator
 
-            VStack(alignment: .leading, spacing: Space.line) {
-                elapsedLabel
-                    .font(Type.timer)
-                    .monospacedDigit()
-
-                Text(model.isPaused ? "En pause · \(sizeLine)" : sizeLine)
-                    .font(Type.meta)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            .frame(minWidth: Size.timerColumn, alignment: .leading)
+            timerColumn
+                .frame(minWidth: Size.timerColumn, alignment: .leading)
 
             Divider().frame(height: Size.barDivider)
 
@@ -202,27 +238,72 @@ struct RecordingBar: View {
 
             Spacer(minLength: Space.inset)
 
-            Button(
-                model.isPaused ? "Reprendre" : "Pause",
-                systemImage: model.isPaused ? "play.fill" : "pause.fill"
-            ) {
-                model.togglePause()
-            }
-            .controlSize(.large)
-            .keyboardShortcut("p", modifiers: [.command, .shift])
-            .help(model.isPaused
-                ? "Ouvre un nouveau morceau, recollé au précédent à l'arrêt."
-                : "Ferme le morceau en cours. Rien n'est enregistré pendant la pause.")
-
-            Button("Arrêter", systemImage: "stop.fill") {
-                isTitleFocused = false
-                model.stopRecording()
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Palette.live)
-            .controlSize(.large)
-            .keyboardShortcut("s", modifiers: [.command, .shift])
+            pauseButton
+            stopButton
         }
+    }
+
+    /// Le titre passe sur une seconde ligne et les deux boutons deviennent des
+    /// icônes. Rien n'est retiré : le chrono, la taille écrite, le titre et les
+    /// deux commandes sont tous là, et les boutons gardent leur libellé pour
+    /// l'infobulle et pour VoiceOver.
+    private var compactControls: some View {
+        VStack(alignment: .leading, spacing: Space.small) {
+            HStack(spacing: Space.inset) {
+                indicator
+                timerColumn
+                Spacer(minLength: Space.small)
+                pauseButton
+                stopButton
+            }
+            .labelStyle(.iconOnly)
+
+            titleField
+        }
+    }
+
+    private var timerColumn: some View {
+        VStack(alignment: .leading, spacing: Space.line) {
+            elapsedLabel
+                .font(Type.timer)
+                .monospacedDigit()
+                // Un chrono ne s'écrit pas sur deux lignes, et surtout pas à la
+                // largeur quasi nulle où macOS calcule le plancher vertical de
+                // la fenêtre : « 1:04:32 » s'y enroulait en sept.
+                .lineLimit(1)
+
+            Text(model.isPaused ? "En pause · \(sizeLine)" : sizeLine)
+                .font(Type.meta)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+    }
+
+    private var pauseButton: some View {
+        Button(
+            model.isPaused ? "Reprendre" : "Pause",
+            systemImage: model.isPaused ? "play.fill" : "pause.fill"
+        ) {
+            model.togglePause()
+        }
+        .controlSize(.large)
+        .keyboardShortcut("p", modifiers: [.command, .shift])
+        .help(model.isPaused
+            ? "Ouvre un nouveau morceau, recollé au précédent à l'arrêt."
+            : "Ferme le morceau en cours. Rien n'est enregistré pendant la pause.")
+    }
+
+    private var stopButton: some View {
+        Button("Arrêter", systemImage: "stop.fill") {
+            isTitleFocused = false
+            model.stopRecording()
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(Palette.live)
+        .controlSize(.large)
+        .keyboardShortcut("s", modifiers: [.command, .shift])
+        .help("Arrêter l'enregistrement et lancer la finalisation")
     }
 
     /// Le chrono.

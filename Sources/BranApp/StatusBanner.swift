@@ -19,8 +19,13 @@ struct StatusBanner: View {
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: Space.line) {
+                // Borné pour la même raison que le sous-titre de `PaneHeader` :
+                // le bandeau vit hors du `ScrollView` de la section, donc sa
+                // hauteur idéale à largeur quasi nulle est le plancher vertical
+                // de la fenêtre. La ligne du dessous était déjà bornée.
                 Text(headline)
                     .font(Type.groupHead)
+                    .lineLimit(1)
                 Text(subline)
                     .font(Type.meta)
                     .foregroundStyle(.secondary)
