@@ -205,7 +205,47 @@ enum BackupHeadlessRun {
         guard configuration.isEnabled else {
             log.notice("sauvegarde désactivée ; rien à faire")
             print("la sauvegarde n'est pas activée ; rien à faire.")
+            // Appelé même ici : c'est ce qui remet à zéro la date d'activation
+            // retenue par `BackupAlerts`, pour qu'une réactivation dans six
+            // mois ne réveille pas une alerte fondée sur l'ancienne.
+            await BackupAlerts.checkAndFireIfNeeded(
+                now: Date(), configuration: configuration,
+                journal: BackupJournal.readAll().attempts, coverage: nil)
             return ExitCode.notDue.rawValue
+        }
+
+        // **L'évaluateur d'alerte tourne à chaque passage, pas seulement après
+        // un succès.**
+        //
+        // Il n'était appelé que dans la branche qui vient de prouver un
+        // snapshot — c'est-à-dire précisément le cas où il n'y a rien à
+        // signaler. Toutes les issues qui *méritent* une alerte le
+        // court-circuitaient : chaîne rouge (« pas encore l'heure »,
+        // « chaîne réseau indisponible »), batterie, échec de kopia, verrou
+        // pris. Un Mac dont le serveur est éteint pendant cinq semaines
+        // repassait ici 840 fois sans jamais atteindre la seule ligne capable
+        // de prévenir quelqu'un.
+        //
+        // Ce `defer` couvre **tous** les chemins de sortie de cette fonction,
+        // y compris ceux ajoutés plus tard. Il relit le journal après coup :
+        // `performBackup` a pu y écrire entre-temps, et l'alerte doit juger
+        // sur l'état final, pas sur celui d'avant la tentative.
+        //
+        // `defer` ne peut pas contenir d'`await` : la notification est donc
+        // envoyée juste avant chaque `return` par cette fonction-ci, appelée à
+        // travers `finish(_:)`.
+        func finish(_ code: Int32) async -> Int32 {
+            await BackupAlerts.checkAndFireIfNeeded(
+                now: Date(),
+                configuration: configuration,
+                journal: BackupJournal.readAll().attempts,
+                // La couverture n'est pas recalculée ici : elle exige de relire
+                // le dépôt (`listSnapshots`), ce qu'on ne fait pas sur un
+                // chemin qui n'a rien tenté. `nil` veut dire « pas mesuré cette
+                // fois » et n'est jamais lu comme « tout va bien » — voir la
+                // garde dans `BackupAlerts.decide`.
+                coverage: nil)
+            return code
         }
 
         let chainVerdict = await probeChain(configuration: configuration)
@@ -265,33 +305,33 @@ enum BackupHeadlessRun {
         // sauvegarde, seulement un échec de plus dans le journal.
         if forced, case .wait = decision {
             log.notice("échéance forcée par --force")
-            return await performBackup(trigger: .manual, configuration: configuration)
+            return await finish(await performBackup(trigger: .manual, configuration: configuration))
         }
 
         switch decision {
         case .backUpNow(let trigger):
             log.notice("déclenchement d'une sauvegarde (\(trigger.rawValue, privacy: .public))")
-            return await performBackup(trigger: trigger, configuration: configuration)
+            return await finish(await performBackup(trigger: trigger, configuration: configuration))
 
         case .wait(let until, let because):
             log.notice("pas encore l'heure : \(because, privacy: .public)")
             print("pas encore l'heure (\(because)) ; prochaine échéance \(until).")
-            return ExitCode.notDue.rawValue
+            return await finish(ExitCode.notDue.rawValue)
 
         case .waitForNetwork(let because):
             log.notice("chaîne réseau indisponible : \(because, privacy: .public)")
             print("chaîne réseau indisponible : \(because)")
-            return ExitCode.notDue.rawValue
+            return await finish(ExitCode.notDue.rawValue)
 
         case .waitForPower(let forceAt, let because):
             log.notice("attente secteur : \(because, privacy: .public)")
             print("sur batterie (\(because)) ; forcé au plus tard \(forceAt) si le secteur ne revient pas avant.")
-            return ExitCode.notDue.rawValue
+            return await finish(ExitCode.notDue.rawValue)
 
         case .disabled(let reason):
             log.notice("désactivé : \(reason, privacy: .public)")
             print("désactivé : \(reason)")
-            return ExitCode.notDue.rawValue
+            return await finish(ExitCode.notDue.rawValue)
 
         case .alreadyRunning:
             // Ne devrait jamais arriver : on vient de prouver le contraire
@@ -300,7 +340,7 @@ enum BackupHeadlessRun {
             // run sur la foi d'un désaccord qu'on ne comprend pas.
             log.error("SchedulePolicy signale un run en cours, en contradiction avec le verrou tenu")
             print("incohérence : SchedulePolicy signale un run en cours alors que le verrou vient d'être pris ; on n'agit pas.")
-            return ExitCode.alreadyRunning.rawValue
+            return await finish(ExitCode.alreadyRunning.rawValue)
         }
     }
 
@@ -323,7 +363,7 @@ enum BackupHeadlessRun {
             endpoint: configuration.s3Endpoint, bucket: configuration.s3Bucket,
             disableTLS: configuration.disableTLS, timeout: configuration.probeTimeout
         )
-        async let repository = repositoryOpensProbe()
+        async let repository = repositoryOpensProbe(timeout: configuration.repositoryTimeout)
 
         let results = [await tailscale, await peer, await port, await health, await bucket, await repository]
         return ChainEvaluator.evaluate(results, now: Date(), freshness: chainFreshness)
@@ -341,10 +381,16 @@ enum BackupHeadlessRun {
     /// dépôt (`BackupProvisioning.swift`) au moment où celui-ci est écrit ;
     /// ce maillon s'y accroche plutôt que de supposer l'existence d'un
     /// `ChainProbes.repositoryOpens` non vérifié.
-    private static func repositoryOpensProbe() async -> LinkProbeResult {
+    private static func repositoryOpensProbe(timeout: TimeInterval) async -> LinkProbeResult {
         let start = Date()
         do {
-            let status = try await BackupEngine.driver().repositoryStatus()
+            // `repositoryTimeout` est enfin lu : sans lui, un dépôt qui accepte
+            // la connexion puis se tait suspendait ce processus pour toujours,
+            // **le verrou de simultanéité tenu**. Le job launchd repassant
+            // toutes les heures, le suivant sortait aussitôt en
+            // `alreadyRunning` : plus jamais une sauvegarde, et pas une ligne
+            // pour le dire.
+            let status = try await BackupEngine.driver().repositoryStatus(timeout: timeout)
             return LinkProbeResult(
                 link: .repositoryOpens,
                 state: .up,
@@ -395,6 +441,17 @@ enum BackupHeadlessRun {
             // un run complet se ressemblent trait pour trait dans le journal,
             // et la promesse « ça reprend sans tout refaire » devient
             // invérifiable.
+            // Les règles d'exclusion, d'abord : `snapshot create` n'a aucun
+            // drapeau pour ça, tout passe par la politique du dépôt. Sans cet
+            // appel, `configuration.ignoreRules` restait un réglage mort et un
+            // dossier explicitement exclu partait quand même — voir
+            // `KopiaDriver.applyIgnoreRules`. Un échec ici arrête le run
+            // plutôt que de sauvegarder ce qu'on avait demandé d'exclure.
+            try await driver.applyIgnoreRules(
+                configuration.ignoreRules,
+                to: configuration.sourcePaths,
+                timeout: configuration.repositoryTimeout)
+
             let reported = try await driver.createSnapshot(
                 paths: configuration.sourcePaths,
                 onProgress: { progress in uploaded.record(progress) }
@@ -403,7 +460,9 @@ enum BackupHeadlessRun {
             // 2. Confirmer. Relire le dépôt est l'étape qu'un pilote naïf
             //    saute — c'est exactement elle qui a manqué le 02/09/2026 :
             //    143,1 Go envoyés, zéro manifeste retrouvable.
-            let confirmed = try await driver.listSnapshots()
+            // Quatre fois le budget d'une ouverture : `snapshot list --all`
+            // relit tous les manifestes, pas seulement l'en-tête du dépôt.
+            let confirmed = try await driver.listSnapshots(timeout: configuration.repositoryTimeout * 4)
 
             guard let matched = confirmed.first(where: { $0.id == reported.id }) else {
                 // Le manifeste existe selon `create` ; `list` ne le
@@ -435,7 +494,23 @@ enum BackupHeadlessRun {
                 return ExitCode.backupFailed.rawValue
             }
 
-            recordAttempt(id: attemptID, startedAt: startedAt, trigger: trigger, proof: matched, failure: nil, uploadedBytes: uploaded.value, estimatedBytes: uploaded.estimated)
+            let recorded = recordAttempt(id: attemptID, startedAt: startedAt, trigger: trigger, proof: matched, failure: nil, uploadedBytes: uploaded.value, estimatedBytes: uploaded.estimated)
+            // **Un succès non consigné n'est pas un succès à rendre à
+            // `launchd`.** Le journal est la seule trace qu'un run headless
+            // laisse : personne ne regarde cet écran. Sortir en 0 après une
+            // écriture ratée annoncerait au système que tout va bien, pendant
+            // que `BackupJournal.readAll()` continue de répondre « aucune
+            // sauvegarde réussie » — donc que `SchedulePolicy` relance sans
+            // fin, et que l'alerte finira par prévenir d'un retard qui
+            // n'existe pas. Le code 5 dit la seule chose vraie : le snapshot
+            // est bien dans le dépôt, mais bran n'a pas pu l'écrire, et c'est
+            // le disque local qu'il faut regarder.
+            guard recorded else {
+                log.fault("snapshot confirmé (\(matched.id, privacy: .public)) mais journal non écrit")
+                print("sauvegarde confirmée dans le dépôt (\(matched.id)), mais le journal n'a pas pu être "
+                    + "écrit : bran ne pourra pas le prouver au prochain démarrage.")
+                return ExitCode.internalError.rawValue
+            }
 
             // **C'est ici que l'alerte compte le plus.** Ce chemin tourne sous
             // launchd, sans interface et sans personne devant l'écran : si la
@@ -516,6 +591,10 @@ enum BackupHeadlessRun {
     /// être écrit » avec « rien à signaler » referait, à l'échelle du
     /// journal cette fois, exactement le mensonge que cette fonctionnalité
     /// existe pour fermer.
+    /// - Returns: vrai quand la ligne a bien été écrite. **L'appelant du
+    ///   chemin heureux doit le lire** — voir la garde après le succès
+    ///   confirmé.
+    @discardableResult
     private static func recordAttempt(
         id: UUID,
         startedAt: Date,
@@ -524,7 +603,7 @@ enum BackupHeadlessRun {
         failure: BackupFailure?,
         uploadedBytes: Int64? = nil,
         estimatedBytes: Int64? = nil
-    ) {
+    ) -> Bool {
         let attempt = BackupAttempt(
             id: id,
             startedAt: startedAt,
@@ -540,9 +619,11 @@ enum BackupHeadlessRun {
         )
         do {
             try BackupJournal.append(attempt)
+            return true
         } catch {
             log.fault("écriture au journal impossible : \(String(describing: error), privacy: .public)")
             FileHandle.standardError.write(Data("échec d'écriture au journal de sauvegarde : \(error)\n".utf8))
+            return false
         }
     }
 

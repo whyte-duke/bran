@@ -99,12 +99,18 @@ enum BackupAlerts {
     ///   - lastAlertFiredAt: La date de la dernière notification réellement
     ///     envoyée par ce fichier — jamais une tentative de sauvegarde.
     ///     `nil` la première fois.
+    ///   - watchingSince: Le premier instant où ce Mac a été vu avec une
+    ///     sauvegarde **activée** — retenu par `checkAndFireIfNeeded` dans
+    ///     `UserDefaults`, remis à zéro quand la sauvegarde est éteinte. C'est
+    ///     la date de départ qui manquait pour pouvoir alerter sur un journal
+    ///     **vide**. Voir plus bas.
     static func decide(
         now: Date,
         configuration: BackupConfiguration,
         journal: [BackupAttempt],
         coverage: SourceCoverageReport?,
-        lastAlertFiredAt: Date?
+        lastAlertFiredAt: Date?,
+        watchingSince: Date? = nil
     ) -> Decision {
         guard configuration.isEnabled else {
             // Une configuration éteinte est un choix, pas une panne. L'alerte
@@ -117,20 +123,51 @@ enum BackupAlerts {
             return .silence("une alerte a déjà été envoyée il y a moins de 24 h ; on ne double pas")
         }
 
-        guard let mostRecentActivity = journal.map(activityDate).max() else {
-            // Aucune tentative, jamais. Sans une date de départ à comparer à
-            // `now` — ni la configuration ni le journal n'en portent une —
-            // il n'existe aucune façon honnête de dire depuis quand ce
-            // silence dure. Se taire ici plutôt qu'inventer une urgence non
-            // mesurée ; voir le rapport de mission pour ce que ça laisse
-            // ouvert.
-            return .silence("aucune tentative n'a encore été consignée ; rien à mesurer")
+        // **Le compteur repart du dernier *succès*, jamais de la dernière
+        // *activité* — et c'est la correction qui rendait ce fichier muet.**
+        //
+        // L'ancienne mesure prenait `journal.map(activityDate).max()`,
+        // c'est-à-dire la tentative la plus récente, réussie ou non. Or le job
+        // launchd tourne **toutes les heures** et journalise chaque échec :
+        // un serveur MinIO éteint produisait donc une tentative ratée par
+        // heure, chacune repoussant `mostRecentActivity` à moins d'une heure,
+        // donc toujours en dessous du seuil de 144 h. Plus la panne durait,
+        // plus elle rafraîchissait le compteur censé la détecter. Ce Mac
+        // pouvait rester 35 jours sans une seule sauvegarde en émettant
+        // 840 échecs et zéro alerte — précisément la panne fondatrice du
+        // projet, cette fois du côté du signal plutôt que du côté du stockage.
+        //
+        // Trois origines possibles pour l'instant de départ, dans cet ordre :
+        //  1. le dernier succès prouvé — la seule chose qui remette vraiment
+        //     le compteur à zéro ;
+        //  2. à défaut, la **première** tentative connue : « jamais réussi
+        //     depuis N jours » se mesure depuis le premier essai, pas depuis
+        //     le dernier ;
+        //  3. à défaut de tout journal, l'instant où ce Mac a été vu avec la
+        //     sauvegarde activée. C'est ce troisième cas qui manquait : sans
+        //     lui, un Mac dont **aucune** tentative n'aboutit jamais à une
+        //     ligne de journal — chaîne rouge en permanence, verrou
+        //     inaccessible, binaire kopia absent — restait silencieux pour
+        //     toujours, sous prétexte qu'il n'y avait « rien à mesurer ».
+        let reference: Date
+        let referenceLabel: String
+        if let lastSuccess = BackupJournalModel.lastSuccess(in: journal) {
+            reference = referenceDate(for: lastSuccess)
+            referenceLabel = "le dernier succès"
+        } else if let firstAttempt = journal.map(\.startedAt).min() {
+            reference = firstAttempt
+            referenceLabel = "la première tentative"
+        } else if let watchingSince {
+            reference = watchingSince
+            referenceLabel = "l'activation de la sauvegarde"
+        } else {
+            return .silence("aucune tentative n'a encore été consignée et aucune date d'activation n'est connue")
         }
 
-        let elapsed = now.timeIntervalSince(mostRecentActivity)
+        let elapsed = now.timeIntervalSince(reference)
         let threshold = max(configuration.intervalHours * staleMultiplier, minimumThresholdHours) * 3600
         guard elapsed >= threshold else {
-            return .silence("la dernière activité de sauvegarde date de moins de \(Int(threshold / 3600)) h")
+            return .silence("\(referenceLabel) date de moins de \(Int(threshold / 3600)) h")
         }
 
         // La couverture prime sur l'ancienneté d'un succès : c'est elle qui
@@ -142,15 +179,12 @@ enum BackupAlerts {
             return .notify(coverageGapContent(coverage: coverage))
         }
 
-        guard let lastSuccess = BackupJournalModel.lastSuccess(in: journal) else {
-            let days = max(Int(elapsed / 86400), 1)
-            let lastFailure = BackupJournalModel.lastAttempt(in: journal)?.failure
-            return .notify(neverSucceededContent(daysSinceLastAttempt: days, lastFailure: lastFailure))
-        }
-
-        let successAge = now.timeIntervalSince(referenceDate(for: lastSuccess))
-        let days = max(Int(successAge / 86400), 1)
+        let days = max(Int(elapsed / 86400), 1)
         let lastFailure = BackupJournalModel.lastAttempt(in: journal)?.failure
+        guard BackupJournalModel.lastSuccess(in: journal) != nil else {
+            return .notify(neverSucceededContent(
+                days: days, hasAnyAttempt: !journal.isEmpty, lastFailure: lastFailure))
+        }
         return .notify(staleBackupContent(daysSinceSuccess: days, lastFailure: lastFailure))
     }
 
@@ -159,16 +193,6 @@ enum BackupAlerts {
     private static let staleMultiplier: Double = 3
     private static let minimumThresholdHours: Double = 24
     private static let reminderCooldown: TimeInterval = 24 * 3600
-
-    /// La date qui ordonne une tentative pour cette seule question — « quand
-    /// a-t-on vu Kopia s'activer pour la dernière fois », prouvé ou non.
-    /// Même choix que `BackupJournalModel.orderingDate` (privée, donc
-    /// reproduite ici à l'identique plutôt qu'exposée pour ce seul usage) :
-    /// l'issue quand elle existe, le départ sinon — une tentative interrompue
-    /// sans fin connue compte quand même comme une activité récente.
-    private static func activityDate(_ attempt: BackupAttempt) -> Date {
-        attempt.finishedAt ?? attempt.startedAt
-    }
 
     /// L'instant qui fait foi pour un succès : celui où le dépôt l'a
     /// confirmé, pas celui où la ligne de journal a été écrite. Même choix
@@ -197,10 +221,32 @@ enum BackupAlerts {
         return Content(identifier: healthAlertIdentifier, title: "Sauvegarde en retard", body: body)
     }
 
-    private static func neverSucceededContent(daysSinceLastAttempt: Int, lastFailure: BackupFailure?) -> Content {
-        let dayWord = daysSinceLastAttempt > 1 ? "jours" : "jour"
-        var body = "Vos fichiers n'ont jamais été sauvegardés avec succès. "
-            + "Dernière tentative il y a \(daysSinceLastAttempt) \(dayWord)"
+    /// - Parameters:
+    ///   - days: le nombre de jours **depuis le début du silence** — la
+    ///     première tentative connue, ou l'activation de la sauvegarde quand
+    ///     aucune tentative n'a jamais été consignée. Jamais « depuis la
+    ///     dernière tentative » : un job qui échoue toutes les heures rendrait
+    ///     ce nombre éternellement égal à 1, ce qui minimise exactement ce
+    ///     qu'il faut signaler.
+    ///   - hasAnyAttempt: faux quand le journal est vide. Les deux situations
+    ///     n'appellent pas le même geste : « ça échoue » se diagnostique avec
+    ///     le dernier message d'erreur, « rien n'est jamais parti » se
+    ///     diagnostique en ouvrant bran.
+    private static func neverSucceededContent(
+        days: Int, hasAnyAttempt: Bool, lastFailure: BackupFailure?
+    ) -> Content {
+        let dayWord = days > 1 ? "jours" : "jour"
+        guard hasAnyAttempt else {
+            return Content(
+                identifier: healthAlertIdentifier,
+                title: "Aucune sauvegarde n'a démarré",
+                body: "La sauvegarde est activée depuis \(days) \(dayWord), et aucune tentative n'a jamais "
+                    + "été consignée — pas même un échec. Ouvrez bran : la chaîne réseau, le Trousseau ou "
+                    + "le job planifié empêchent le démarrage."
+            )
+        }
+        var body = "Vos fichiers n'ont jamais été sauvegardés avec succès, malgré des tentatives "
+            + "depuis \(days) \(dayWord)"
         body += lastFailure.map { " — \($0.summary)." } ?? "."
         return Content(identifier: healthAlertIdentifier, title: "Aucune sauvegarde réussie", body: body)
     }
@@ -265,6 +311,7 @@ enum BackupAlerts {
 
     private static let lastFiredDefaultsKey = "bran.backup.alerts.lastFiredAt"
     private static let passwordWarnedDefaultsKey = "bran.backup.alerts.repositoryPasswordWarned"
+    private static let watchingSinceDefaultsKey = "bran.backup.alerts.watchingSince"
 
     /// Ce que `BackupController` (après chaque rafraîchissement) et
     /// `BackupHeadlessRun` (après chaque tentative) doivent appeler — la
@@ -291,10 +338,35 @@ enum BackupAlerts {
             }
         }
 
+        // **La date de départ qui manquait.** Tant qu'aucune tentative n'a été
+        // consignée, il n'existe dans le programme aucun instant auquel
+        // comparer `now` — ni la configuration ni le journal n'en portent un —
+        // et `decide` se taisait donc pour toujours sur le pire cas de tous :
+        // une sauvegarde activée dont rien ne part jamais. On retient ici, une
+        // fois, l'instant où ce Mac a été vu avec la sauvegarde active. Effet
+        // de bord assumé, à la frontière — la décision, elle, reste pure et
+        // reçoit cet instant en paramètre.
+        //
+        // Remis à zéro dès que la sauvegarde est désactivée : réactiver plus
+        // tard doit repartir d'aujourd'hui, pas réveiller une alerte fondée sur
+        // une activation d'il y a six mois.
+        let watchingSince: Date?
+        if configuration.isEnabled {
+            if let stored = defaults.object(forKey: watchingSinceDefaultsKey) as? Date {
+                watchingSince = stored
+            } else {
+                defaults.set(now, forKey: watchingSinceDefaultsKey)
+                watchingSince = now
+            }
+        } else {
+            defaults.removeObject(forKey: watchingSinceDefaultsKey)
+            watchingSince = nil
+        }
+
         let lastAlertFiredAt = defaults.object(forKey: lastFiredDefaultsKey) as? Date
         switch decide(
             now: now, configuration: configuration, journal: journal, coverage: coverage,
-            lastAlertFiredAt: lastAlertFiredAt
+            lastAlertFiredAt: lastAlertFiredAt, watchingSince: watchingSince
         ) {
         case .silence:
             break
