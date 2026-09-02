@@ -162,6 +162,126 @@ struct SourceCoverageTests {
         #expect(report.verdict == .notCovered)
     }
 
+    // MARK: - Les chemins qui ne veulent pas dire ce qu'ils ont l'air de dire
+
+    /// **La seule façon connue de faire dire « couvert » à un chemin situé
+    /// ailleurs.** `/Users/x/../hors-home` produit les composants
+    /// `["Users", "x", "..", "hors-home"]`, dont `["Users", "x"]` est un
+    /// préfixe : le découpage lexical concluait « couvert » pour un chemin
+    /// qui désigne en réalité `/Users/hors-home`, hors du snapshot.
+    ///
+    /// On refuse plutôt que de résoudre : résoudre `..` lexicalement est faux
+    /// dès qu'un lien symbolique est dans le chemin, et cette cible pure
+    /// n'a pas le droit de toucher le disque pour le savoir.
+    @Test("Un chemin qui remonte avec .. ne se déclare pas couvert par son faux ancêtre")
+    func parentTraversalIsRefused() {
+        let homeProof = makeProof(path: "/Users/x")
+
+        let report = SourceCoverageEvaluator.evaluate(
+            sourcePaths: ["/Users/x/../hors-home"],
+            proofs: [homeProof],
+            expectedHost: homeProof.sourceHost, expectedUser: homeProof.sourceUser,
+            now: referenceNow, staleAfter: referenceStaleAfter
+        )
+
+        #expect(report.verdict == .notCovered)
+    }
+
+    /// L'inverse : une preuve dont le chemin remonte ne couvre rien non plus.
+    /// La règle vaut des deux côtés de la comparaison, sans quoi il resterait
+    /// une moitié de porte ouverte.
+    @Test("Une preuve dont le chemin remonte avec .. ne couvre rien")
+    func parentTraversalInTheProofCoversNothing() {
+        let trickProof = makeProof(path: "/Users/x/..")
+
+        let report = SourceCoverageEvaluator.evaluate(
+            sourcePaths: ["/Users/hors-home"],
+            proofs: [trickProof],
+            expectedHost: trickProof.sourceHost, expectedUser: trickProof.sourceUser,
+            now: referenceNow, staleAfter: referenceStaleAfter
+        )
+
+        #expect(report.verdict == .notCovered)
+    }
+
+    /// `~` n'est pas un dossier, c'est une convention de shell. Sans
+    /// résolution, `~/Documents` et `/Users/x/Documents` sont deux chaînes
+    /// différentes et le resteraient — mais un chemin relatif comme
+    /// `Users/x` produisait exactement les mêmes composants que `/Users/x`
+    /// et se déclarait donc couvert, alors qu'il désigne un dossier relatif
+    /// au répertoire courant, inconnu d'ici.
+    @Test("Un chemin qui n'est pas absolu ne se déclare jamais couvert")
+    func relativePathIsRefused() {
+        let homeProof = makeProof(path: "/Users/x")
+
+        let report = SourceCoverageEvaluator.evaluate(
+            sourcePaths: ["Users/x/Documents"],
+            proofs: [homeProof],
+            expectedHost: homeProof.sourceHost, expectedUser: homeProof.sourceUser,
+            now: referenceNow, staleAfter: referenceStaleAfter
+        )
+
+        #expect(report.verdict == .notCovered)
+    }
+
+    @Test("Un chemin en ~ n'est pas résolu ici, donc ne se déclare pas couvert")
+    func tildePathIsRefused() {
+        let homeProof = makeProof(path: "/Users/x")
+
+        let report = SourceCoverageEvaluator.evaluate(
+            sourcePaths: ["~/Documents"],
+            proofs: [homeProof],
+            expectedHost: homeProof.sourceHost, expectedUser: homeProof.sourceUser,
+            now: referenceNow, staleAfter: referenceStaleAfter
+        )
+
+        #expect(report.verdict == .notCovered)
+    }
+
+    /// `.` est le seul composant sans effet qu'on normalise plutôt que de
+    /// refuser : `/Users/x/./Documents` désigne exactement
+    /// `/Users/x/Documents`, quels que soient les liens symboliques du
+    /// chemin. Le refuser n'ajouterait aucune sécurité, seulement un faux
+    /// « jamais envoyé ».
+    @Test("Un composant . est sans effet, il ne casse pas la couverture")
+    func currentDirectoryComponentIsHarmless() {
+        let homeProof = makeProof(path: "/Users/x")
+
+        let report = SourceCoverageEvaluator.evaluate(
+            sourcePaths: ["/Users/x/./Documents"],
+            proofs: [homeProof],
+            expectedHost: homeProof.sourceHost, expectedUser: homeProof.sourceUser,
+            now: referenceNow, staleAfter: referenceStaleAfter
+        )
+
+        #expect(report.verdict == .fullyCovered)
+    }
+
+    /// **Mesuré, pas déduit.** macOS écrit ses noms de fichiers en NFD
+    /// (`e` + U+0301) là où un chemin tapé ou collé arrive souvent en NFC
+    /// (U+00E9). Ces deux chaînes n'ont pas le même nombre d'octets UTF-8 —
+    /// 9 contre 10 pour `Bureau_é` — mais `==` sur `String` en Swift compare
+    /// par **équivalence canonique** Unicode, pas octet à octet : elles sont
+    /// égales, et `split` en préserve l'égalité composant par composant.
+    ///
+    /// Ce test fige ce comportement du langage, dont dépend silencieusement
+    /// toute la comparaison de chemins de ce fichier : le jour où quelqu'un
+    /// remplacerait `==` par une comparaison d'octets « pour aller plus
+    /// vite », un dossier accentué cesserait d'être vu comme sauvegardé.
+    @Test("Un accent en NFD couvre le même chemin écrit en NFC")
+    func nfdAndNfcAreTheSamePath() {
+        let nfdProof = makeProof(path: "/Users/x/Bureau_e\u{0301}")
+
+        let report = SourceCoverageEvaluator.evaluate(
+            sourcePaths: ["/Users/x/Bureau_\u{00E9}"],
+            proofs: [nfdProof],
+            expectedHost: nfdProof.sourceHost, expectedUser: nfdProof.sourceUser,
+            now: referenceNow, staleAfter: referenceStaleAfter
+        )
+
+        #expect(report.verdict == .fullyCovered)
+    }
+
     // MARK: - Plusieurs sources
 
     @Test("Plusieurs dossiers configurés : certains couverts, d'autres jamais envoyés")

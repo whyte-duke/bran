@@ -54,6 +54,13 @@ import Foundation
 // 8. Rester muet sur `sourcePaths` vide plutôt que de le traiter. → Un
 //    verdict explicite, `notCovered`, avec une phrase qui le dit — jamais un
 //    tableau vide qu'un appelant lirait comme « rien à signaler ».
+// 9. Prendre un chemin qui *ressemble* à un descendant pour un descendant.
+//    `/Users/x/../hors-home` découpé en composants donne
+//    `["Users", "x", "..", "hors-home"]`, dont `["Users", "x"]` est un
+//    préfixe : un snapshot prouvé du dossier personnel déclarait donc
+//    couvert un chemin qui désigne `/Users/hors-home`. → `pathComponents`
+//    refuse désormais tout chemin non absolu ou contenant `..`, plutôt que
+//    de résoudre une indirection qu'aucune cible pure ne peut vérifier.
 
 // MARK: - La couverture d'un chemin
 
@@ -380,11 +387,54 @@ public enum FirstUploadEvaluator {
 
 // MARK: - Chemins : comparaison par composants, jamais par chaîne
 
-/// Découpe un chemin en composants, en ignorant les composants vides. C'est
-/// ce qui rend `/Users/x/` et `/Users/x` identiques sans code spécial pour la
-/// barre oblique finale, en tête ou au milieu.
-private func pathComponents(_ path: String) -> [String] {
-    path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+/// Découpe un chemin **absolu et sans indirection** en composants, ou rend
+/// `nil` si le chemin ne peut pas être comparé de façon sûre.
+///
+/// Les composants vides sont ignorés : c'est ce qui rend `/Users/x/` et
+/// `/Users/x` identiques sans code spécial pour la barre oblique finale, en
+/// tête ou au milieu.
+///
+/// **Les trois refus, et pourquoi ils sont des refus plutôt que des
+/// résolutions :**
+///
+/// 1. `..` — c'était la seule façon connue de faire dire « couvert » à un
+///    chemin situé ailleurs. `/Users/x/../hors-home` produisait
+///    `["Users", "x", "..", "hors-home"]`, dont `["Users", "x"]` est un
+///    préfixe : un snapshot prouvé de `/Users/x` déclarait donc couvert un
+///    chemin qui désigne en réalité `/Users/hors-home`. Le résoudre
+///    lexicalement — retirer le composant précédent — serait faux dès qu'un
+///    lien symbolique est dans le chemin, et cette cible pure n'a pas le
+///    droit de toucher le disque pour trancher.
+/// 2. Un chemin qui ne commence pas par `/` — `Users/x` produisait
+///    exactement les mêmes composants que `/Users/x`, alors qu'il désigne un
+///    dossier relatif à un répertoire courant dont ce fichier ne sait rien.
+///    Cette exigence couvre aussi `~/Documents`, qui n'est pas un chemin mais
+///    une convention de shell : personne ne l'a résolu, on ne fait pas
+///    semblant.
+/// 3. `.` est le seul composant qu'on normalise au lieu de le refuser :
+///    `/Users/x/./Documents` désigne exactement `/Users/x/Documents`, quels
+///    que soient les liens symboliques du chemin. Le refuser n'ajouterait
+///    aucune sécurité, seulement un faux « jamais envoyé ».
+///
+/// **Ce que ce refus coûte, et pourquoi c'est le bon sens du risque.** Une
+/// source non canonisable devient `neverBackedUp` alors qu'elle est
+/// peut-être sauvegardée : l'utilisateur voit « jamais envoyé » à tort. C'est
+/// le sens de risque que tout ce fichier assume déjà pour la casse — mieux
+/// vaut sous-déclarer une couverture que la sur-déclarer. La correction
+/// durable est en amont : `BranApp` doit remettre ici des chemins déjà
+/// absolus et résolus (`URL.resolvingSymlinksInPath`), pas des chaînes
+/// telles que saisies.
+private func pathComponents(_ path: String) -> [String]? {
+    guard path.hasPrefix("/") else { return nil }
+    var components: [String] = []
+    for component in path.split(separator: "/", omittingEmptySubsequences: true) {
+        switch component {
+        case ".": continue
+        case "..": return nil
+        default: components.append(String(component))
+        }
+    }
+    return components
 }
 
 /// Vrai quand `candidate` couvre `target` : `target` est `candidate` lui-même
@@ -403,9 +453,19 @@ private func pathComponents(_ path: String) -> [String] {
 /// Entre sur-déclarer et sous-déclarer une couverture, ce fichier existe pour
 /// ne jamais prendre le premier risque. D'où la comparaison sensible à la
 /// casse, dans les deux fonctions ci-dessous.
+///
+/// **Les accents, en revanche, ne posent pas de problème — mesuré.** macOS
+/// écrit ses noms de fichiers en NFD (`e` + U+0301) là où un chemin tapé ou
+/// collé arrive souvent en NFC (U+00E9) : 9 octets UTF-8 contre 10 pour
+/// `Bureau_é`. Mais `==` sur `String` en Swift compare par **équivalence
+/// canonique** Unicode, pas octet à octet, et rend `true` sur ces deux
+/// formes. Remplacer cette comparaison par une comparaison d'octets ferait
+/// disparaître de l'écran chaque dossier accentué ; le test
+/// `nfdAndNfcAreTheSamePath` est là pour l'empêcher.
 private func path(_ candidate: String, covers target: String) -> Bool {
-    let candidateComponents = pathComponents(candidate)
-    let targetComponents = pathComponents(target)
+    guard let candidateComponents = pathComponents(candidate),
+          let targetComponents = pathComponents(target)
+    else { return false }
     guard candidateComponents.count <= targetComponents.count else { return false }
     return zip(candidateComponents, targetComponents).allSatisfy { $0 == $1 }
 }
@@ -414,8 +474,14 @@ private func path(_ candidate: String, covers target: String) -> Bool {
 /// symétrique dont `FirstUploadEvaluator` a besoin pour attribuer une
 /// tentative à un chemin configuré, distincte de `covers` qui est
 /// délibérément asymétrique.
+///
+/// Deux chemins non canonisables ne sont jamais « le même dossier », même
+/// écrits à l'identique : `pathComponents` rend `nil` pour les deux, et
+/// `nil == nil` serait vrai. La garde explicite évite qu'une tentative soit
+/// attribuée à un chemin dont personne ne sait ce qu'il désigne.
 private func sameDirectory(_ lhs: String, _ rhs: String) -> Bool {
-    pathComponents(lhs) == pathComponents(rhs)
+    guard let left = pathComponents(lhs), let right = pathComponents(rhs) else { return false }
+    return left == right
 }
 
 // MARK: - Mise en forme
