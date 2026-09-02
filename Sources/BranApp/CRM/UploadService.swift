@@ -13,7 +13,35 @@ final class UploadService {
     let configuration = CRMConfiguration()
 
     private let store: RecordingStore
-    private var trackers: [UUID: Task<Void, Never>] = [:]
+
+    /// Le travail en cours pour un enregistrement, et **son jeton**.
+    ///
+    /// Le jeton corrige une panne qui se voyait à l'écran : `retry` annulait la
+    /// tâche A puis rangeait B sous la même clé, mais A finissait toujours par
+    /// exécuter son effacement — `trackers[id] = nil` — après l'installation de
+    /// B. Un troisième clic lançait donc C alors que B tournait encore, et les
+    /// deux publiaient états et métadonnées dans un ordre indéterminé. A
+    /// affichait en prime son erreur d'annulation comme un échec, sur un envoi
+    /// qui venait de repartir.
+    ///
+    /// Rien n'est publié ni effacé sans que le jeton soit encore celui du
+    /// travail courant.
+    private struct Job {
+        let token: UUID
+        let task: Task<Void, Never>
+    }
+
+    private var jobs: [UUID: Job] = [:]
+
+    /// Le dernier rendez-vous visé pour cet enregistrement, dans cette session.
+    ///
+    /// C'est ce qui rend « Réessayer » utile quand l'échec précède la création
+    /// côté CRM : sans identifiant de transcription, il n'y avait rien à
+    /// reprendre et le bouton ne faisait **rien du tout** — DNS tombé pendant
+    /// `createTranscription`, l'utilisateur voit l'erreur, clique, et rien ne se
+    /// passe. Le rendez-vous choisi, lui, est toujours connu : il vient d'être
+    /// choisi.
+    private var lastAttempt: [UUID: (booking: CRMBooking, complement: String?)] = [:]
 
     init(store: RecordingStore) {
         self.store = store
@@ -44,12 +72,19 @@ final class UploadService {
 
         guard let best = near.first else { return .none(bookings) }
 
-        // Un seul candidat ET rien de déjà déposé dessus : le seul cas où
-        // décider tout seul est légitime. Sinon on demande — le dernier
-        // compte-rendu généré gagne sur `bookings.notes`.
-        // Un RDV sans entreprise ne peut pas être retenu automatiquement : il
-        // n'est pas envoyable, et le présenter comme évident serait trompeur.
-        if near.count == 1, best.hasExistingTranscription == false, best.company != nil {
+        // Un seul candidat, et un candidat que bran a le droit de viser tout
+        // seul : le seul cas où décider sans demander est légitime. Sinon on
+        // demande — le dernier compte-rendu généré gagne sur `bookings.notes`.
+        //
+        // La condition n'est plus écrite ici : c'est `MeetingUploadPolicy` qui
+        // la tient, la même que celle du dernier verrou avant l'envoi. Les deux
+        // avaient divergé, et un rendez-vous annulé passait pour « évident ».
+        let admissible = MeetingUploadPolicy.refusal(
+            target: best.uploadTarget,
+            isConfigured: true,
+            intent: .automatic
+        ) == nil
+        if near.count == 1, admissible {
             return .unique(best)
         }
         return .ambiguous(near)
@@ -62,7 +97,23 @@ final class UploadService {
     /// le signaler plutôt que de laisser croire à une liste exhaustive.
     struct SearchResults: Sendable {
         let bookings: [CRMBooking]
+
+        /// **Ce qui a empêché la recherche d'aboutir**, ou `nil` quand la liste
+        /// est celle du CRM.
+        ///
+        /// Sans ce champ, toute panne — réseau coupé, jeton refusé, réponse
+        /// illisible — était convertie en succès vide, et la feuille affichait
+        /// « Aucun rendez-vous proche ». L'utilisateur en concluait que son
+        /// rendez-vous n'existait pas et remettait l'envoi à plus tard, pour un
+        /// CRM qui était simplement injoignable.
+        var problem: String?
+
         var wasTruncated: Bool { bookings.count >= 100 }
+
+        init(bookings: [CRMBooking], problem: String? = nil) {
+            self.bookings = bookings
+            self.problem = problem
+        }
     }
 
     private var searchCache: (results: SearchResults, fetchedAt: Date)?
@@ -74,7 +125,9 @@ final class UploadService {
             return cache.results
         }
 
-        guard let client = client() else { return SearchResults(bookings: []) }
+        guard let client = client() else {
+            return SearchResults(bookings: [], problem: "Liaison CRM non configurée — voir les Réglages.")
+        }
 
         do {
             let bookings = try await client.targets(
@@ -85,7 +138,13 @@ final class UploadService {
             searchCache = (results, .now)
             return results
         } catch {
-            return SearchResults(bookings: [])
+            // La liste précédente est conservée : périmée vaut mieux que vide,
+            // à condition de dire qu'elle est périmée. Le cache n'est pas
+            // rafraîchi, donc la prochaine ouverture réessaiera.
+            return SearchResults(
+                bookings: searchCache?.results.bookings ?? [],
+                problem: "CRM injoignable : \(error.localizedDescription)"
+            )
         }
     }
 
@@ -96,21 +155,74 @@ final class UploadService {
     /// Le contrôle est ici et pas seulement dans l'interface : un envoi
     /// automatique, une reprise après redémarrage ou un futur raccourci clavier
     /// passeraient à côté d'une garde qui ne vivrait que dans une vue.
+    ///
+    /// - Parameter intent: `.automatic` par défaut, c'est-à-dire le régime le
+    ///   plus strict. Un appelant qui oublie de se déclarer se voit appliquer
+    ///   les gardes de l'envoi automatique — rendez-vous clos, compte-rendu déjà
+    ///   déposé — et non l'inverse. Seule la feuille de choix, où quelqu'un a lu
+    ///   l'avertissement et cliqué, passe `.manual`.
     @discardableResult
-    func send(_ recording: Recording, to booking: CRMBooking, complement: String?) -> Bool {
-        let eligibility = UploadEligibility.evaluate(booking: booking, isConfigured: configuration.isConfigured)
+    func send(
+        _ recording: Recording,
+        to booking: CRMBooking,
+        complement: String?,
+        intent: UploadIntent = .automatic
+    ) -> Bool {
+        let eligibility = UploadEligibility.evaluate(
+            booking: booking,
+            isConfigured: configuration.isConfigured,
+            intent: intent
+        )
         guard eligibility.canSend else {
             states[recording.id] = .failed(eligibility.blockingReason ?? "Envoi impossible.")
             return false
         }
 
-        guard trackers[recording.id] == nil else { return false }
+        guard jobs[recording.id] == nil else { return false }
 
-        trackers[recording.id] = Task { [weak self] in
-            await self?.perform(recording, booking: booking, complement: complement)
-            self?.trackers[recording.id] = nil
+        lastAttempt[recording.id] = (booking, complement)
+        start(for: recording.id) { [weak self] token in
+            await self?.perform(recording, booking: booking, complement: complement, token: token)
         }
         return true
+    }
+
+    /// Range un travail sous le jeton qui lui appartient, et ne l'efface à la
+    /// sortie que si personne n'a pris sa place entre-temps.
+    private func start(
+        for id: UUID,
+        cancellingCurrent: Bool = false,
+        _ work: @escaping @MainActor (UUID) async -> Void
+    ) {
+        if let existing = jobs[id] {
+            guard cancellingCurrent else { return }
+            existing.task.cancel()
+        }
+
+        let token = UUID()
+        let task = Task { @MainActor [weak self] in
+            await work(token)
+            if self?.jobs[id]?.token == token { self?.jobs[id] = nil }
+        }
+        jobs[id] = Job(token: token, task: task)
+    }
+
+    /// Publie un état **si le travail qui le publie est encore celui en cours**.
+    private func publish(_ state: UploadState, for id: UUID, token: UUID) {
+        guard jobs[id]?.token == token else { return }
+        states[id] = state
+    }
+
+    /// Une annulation n'est pas un échec, et elle arrive sous **deux** formes.
+    ///
+    /// `CancellationError` quand la tâche est annulée entre deux appels, mais
+    /// `URLError.cancelled` quand elle l'est pendant une requête — c'est
+    /// `URLSession` qui répond, pas Swift Concurrency. Ne traiter que la
+    /// première laissait un « Échec : annulé » s'afficher par-dessus l'envoi qui
+    /// venait justement de repartir.
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        return (error as? URLError)?.code == .cancelled
     }
 
     /// Réévalue l'admissibilité en rafraîchissant la vue du CRM.
@@ -125,12 +237,25 @@ final class UploadService {
             booking = (try? await resolveBooking(for: recording))?.booking
         }
 
-        return UploadEligibility.evaluate(booking: booking, isConfigured: configuration.isConfigured)
+        // `.manual` : ce chemin est le bouton « Revérifier » du détail d'un
+        // enregistrement, et il mène à la feuille de choix, pas à un envoi
+        // automatique. Répondre `.automatic` afficherait « impossible » sur un
+        // rendez-vous que l'utilisateur a parfaitement le droit de viser.
+        return UploadEligibility.evaluate(
+            booking: booking,
+            isConfigured: configuration.isConfigured,
+            intent: .manual
+        )
     }
 
-    private func perform(_ recording: Recording, booking: CRMBooking, complement: String?) async {
+    private func perform(
+        _ recording: Recording,
+        booking: CRMBooking,
+        complement: String?,
+        token: UUID
+    ) async {
         guard let client = client() else {
-            states[recording.id] = .failed("Liaison CRM non configurée.")
+            publish(.failed("Liaison CRM non configurée."), for: recording.id, token: token)
             return
         }
 
@@ -156,7 +281,7 @@ final class UploadService {
             // Sur le chemin de réutilisation il ne dure que le temps d'un
             // `AVURLAsset`, et inventer un état de plus pour ça n'aurait servi
             // qu'à faire clignoter l'interface.
-            states[recording.id] = .extractingAudio
+            publish(.extractingAudio, for: recording.id, token: token)
             let prepared = try await prepareAudio(for: recording)
             temporaryFile = prepared.temporary
             let audio = prepared.audio
@@ -185,30 +310,56 @@ final class UploadService {
                 metadata.uploadedAt = .now
             }
 
-            guard let uploadURL = URL(string: created.upload.url) else {
-                throw CRMClient.Failure(statusCode: 0, message: "URL d'envoi invalide.")
+            // **C'est ici que l'audio d'un client pouvait partir n'importe où.**
+            //
+            // `created.upload.url` vient de la réponse du CRM, et le seul garde
+            // était `URL(string:)` — qui accepte `http://100.64.3.7/upload`
+            // aussi volontiers qu'une URL signée Supabase. La ligne suivante
+            // était un `PUT` du MP3 entier vers cette adresse. Un CRM mal
+            // configuré, une réponse falsifiée en chemin, et le closing complet
+            // se retrouvait en clair sur une machine choisie par la réponse,
+            // avec la même barre de progression que d'habitude.
+            //
+            // La règle — HTTPS, hôte approuvé, pas d'identifiant, pas de
+            // redirection hors origine — vit dans `CRMOriginPolicy`, avec ses
+            // tests. `CRMClient.upload` la repose de son côté : deux portes, une
+            // seule décision.
+            let destination = CRMOriginPolicy.uploadDestination(
+                created.upload.url,
+                crmHost: configuration.endpoint?.host()
+            )
+            guard let uploadURL = destination.url else {
+                throw CRMClient.Failure(
+                    statusCode: 0,
+                    message: "Adresse d'envoi refusée par bran — "
+                        + (destination.refusal?.message ?? "origine non autorisée.")
+                )
             }
 
-            states[recording.id] = .uploading(0)
+            publish(.uploading(0), for: recording.id, token: token)
             try await client.upload(
                 file: audio.url,
                 to: uploadURL,
                 mimeType: audio.mimeType
             ) { fraction in
                 Task { @MainActor [weak self] in
-                    self?.states[recording.id] = .uploading(fraction)
+                    self?.publish(.uploading(fraction), for: recording.id, token: token)
                 }
             }
 
-            states[recording.id] = .starting
+            publish(.starting, for: recording.id, token: token)
             try await client.start(created.id)
 
             // À partir d'ici, bran n'a plus aucune obligation : tout l'état vit
             // en base. Fermer l'app ne change rien au traitement.
-            await track(recording.id, transcriptionID: created.id, client: client)
+            await track(recording.id, transcriptionID: created.id, client: client, token: token)
         } catch {
+            // Une reprise a pris la place : ce n'est pas un échec, et l'afficher
+            // comme tel effacerait l'état de l'envoi qui vient de repartir.
+            guard Self.isCancellation(error) == false else { return }
+            guard jobs[recording.id]?.token == token else { return }
             let message = error.localizedDescription
-            states[recording.id] = .failed(message)
+            publish(.failed(message), for: recording.id, token: token)
             await store.mutate(recording.id) { $0.crmError = message }
         }
     }
@@ -335,33 +486,122 @@ final class UploadService {
     // MARK: - Suivi
 
     /// Cadence de 4 s, comme le §5.5 le conseille. Ne jamais descendre sous 2 s.
-    private func track(_ id: UUID, transcriptionID: String, client: CRMClient) async {
-        while Task.isCancelled == false {
-            do {
-                let status = try await client.status(transcriptionID)
-                apply(status, to: id)
-
-                if status.stage.isTerminal { return }
-            } catch {
-                states[id] = .failed(error.localizedDescription)
-                return
-            }
-
-            try? await Task.sleep(for: .seconds(4))
+    ///
+    /// **Mais pas 4 s pour toujours.** La boucle n'avait ni durée maximale, ni
+    /// nombre d'interrogations, ni recul : un traitement bloqué sur `queued` —
+    /// Azure en panne, worker mort — produisait 21 600 requêtes par jour et par
+    /// Mac, sans qu'une seule ligne le dise à qui que ce soit. La cadence
+    /// s'écarte donc avec le temps, et le suivi s'arrête en le disant.
+    ///
+    /// Les paliers viennent de ce qu'on sait du traitement : les premières
+    /// minutes sont celles où l'étape change vraiment (dépôt → file → Azure),
+    /// après quoi le rythme utile est celui d'un humain qui regarde de temps en
+    /// temps.
+    private static func pollDelay(afterElapsed elapsed: Duration) -> Duration {
+        switch elapsed {
+        case ..<(.seconds(120)): .seconds(4)
+        case ..<(.seconds(600)): .seconds(10)
+        default: .seconds(30)
         }
     }
 
-    private func apply(_ status: CRMStatus, to id: UUID) {
+    /// Combien de temps bran suit un traitement avant de rendre la main.
+    ///
+    /// Deux heures en mode asynchrone : au-delà de 70 min d'audio, le CRM passe
+    /// sur `azure_batch`, où rester des minutes sur `transcribing` est normal.
+    /// Trente minutes sinon — un closing d'une demi-heure revient en une à deux
+    /// minutes, et vingt fois cette durée est déjà une anomalie.
+    private static func trackingBudget(batch: Bool) -> Duration {
+        batch ? .seconds(7200) : .seconds(1800)
+    }
+
+    /// Le nombre d'échecs de transport consécutifs tolérés avant d'abandonner.
+    ///
+    /// **Un seul suffisait à faire disparaître le suivi**, et c'est la panne la
+    /// plus discrète des trois : une bascule Wi-Fi pendant un `/status`, le
+    /// `catch` posait un état `.failed` — que la vue considère comme terminé,
+    /// donc masque — sans jamais écrire `crmError`, donc sans bouton
+    /// « Réessayer ». Le panneau devenait silencieux pendant que le traitement
+    /// continuait côté serveur.
+    private static let transportFailureBudget = 5
+
+    private func track(_ id: UUID, transcriptionID: String, client: CRMClient, token: UUID) async {
+        let startedAt = ContinuousClock.now
+        var budget = Self.trackingBudget(batch: false)
+        var consecutiveFailures = 0
+
+        while Task.isCancelled == false {
+            let elapsed = ContinuousClock.now - startedAt
+
+            do {
+                let status = try await client.status(transcriptionID)
+                guard jobs[id]?.token == token else { return }
+                consecutiveFailures = 0
+                budget = Self.trackingBudget(batch: status.isBatchEngine)
+                apply(status, to: id, token: token)
+
+                if status.stage.isTerminal { return }
+            } catch {
+                guard Self.isCancellation(error) == false else { return }
+                guard Task.isCancelled == false, jobs[id]?.token == token else { return }
+
+                consecutiveFailures += 1
+                FeatureLog.record(
+                    "✗ CRM — suivi \(transcriptionID) : \(error.localizedDescription) "
+                    + "(\(consecutiveFailures)/\(Self.transportFailureBudget))"
+                )
+
+                // Une coupure passagère ne condamne pas le suivi ; un jeton
+                // refusé, si. Le code HTTP fait la différence : les 4xx ne
+                // s'arrangeront pas d'eux-mêmes, sauf 408 et 429 qui disent
+                // explicitement « réessayez ».
+                let permanent = (error as? CRMClient.Failure).map(Self.isPermanent) ?? false
+                if permanent || consecutiveFailures >= Self.transportFailureBudget {
+                    let message = "Suivi interrompu : \(error.localizedDescription)"
+                    publish(.failed(message), for: id, token: token)
+                    await store.mutate(id) { $0.crmError = message }
+                    return
+                }
+            }
+
+            guard elapsed < budget else {
+                let minutes = Int(budget.components.seconds / 60)
+                let message = """
+                    Le CRM n'a pas terminé après \(minutes) min et n'a rien signalé. \
+                    Le traitement continue peut-être de son côté : « Réessayer » relance le suivi.
+                    """
+                publish(.failed(message), for: id, token: token)
+                await store.mutate(id) { $0.crmError = message }
+                return
+            }
+
+            try? await Task.sleep(for: Self.pollDelay(afterElapsed: elapsed))
+        }
+    }
+
+    /// Une panne de transport qui ne s'arrangera pas en réessayant.
+    private static func isPermanent(_ failure: CRMClient.Failure) -> Bool {
+        guard (400..<500).contains(failure.statusCode) else { return false }
+        return failure.statusCode != 408 && failure.statusCode != 429
+    }
+
+    private func apply(_ status: CRMStatus, to id: UUID, token: UUID) {
         switch status.stage {
         case .ready:
-            states[id] = .ready(summary: status.summary?.resume)
+            publish(.ready(summary: status.summary?.resume), for: id, token: token)
         case .failed:
-            states[id] = .failed(status.error ?? "Transcription impossible.")
+            publish(.failed(status.error ?? "Transcription impossible."), for: id, token: token)
         case .upload, .queued, .transcribing, .summarizing:
-            states[id] = .processing(
-                stage: status.stage,
-                progress: status.progress ?? 0,
-                label: status.label
+            publish(
+                .processing(
+                    stage: status.stage,
+                    // `boundedProgress` et non `progress` : le CRM a le droit
+                    // d'annoncer 250, l'interface n'a pas le droit de l'afficher.
+                    progress: status.boundedProgress ?? 0,
+                    label: status.label
+                ),
+                for: id,
+                token: token
             )
         }
 
@@ -401,7 +641,7 @@ final class UploadService {
         // vraiment un suivi à reprendre.
         let pending = recordings.filter { recording in
             guard recording.metadata.transcriptionID != nil,
-                  trackers[recording.id] == nil,
+                  jobs[recording.id] == nil,
                   states[recording.id]?.isFinished != true
             else { return false }
 
@@ -413,25 +653,144 @@ final class UploadService {
 
         for recording in pending {
             guard let transcriptionID = recording.metadata.transcriptionID else { continue }
-            trackers[recording.id] = Task { [weak self] in
-                await self?.track(recording.id, transcriptionID: transcriptionID, client: client)
-                self?.trackers[recording.id] = nil
+            start(for: recording.id) { [weak self] token in
+                await self?.track(
+                    recording.id,
+                    transcriptionID: transcriptionID,
+                    client: client,
+                    token: token
+                )
             }
         }
     }
 
+    /// « Réessayer », et il y a **deux** choses à reprendre.
+    ///
+    /// Le bouton n'en connaissait qu'une : il appelait `/retry`, c'est-à-dire
+    /// « relance le traitement serveur », puis remettait le suivi en marche.
+    /// C'est le bon geste quand Azure a échoué sur un audio qui est bien arrivé.
+    /// Ce ne l'est pas du tout dans les deux cas où l'envoi s'est cassé plus
+    /// tôt, et ce sont eux qui laissaient l'utilisateur devant un bouton inerte
+    /// ou trompeur :
+    ///
+    /// - **Le Wi-Fi tombe à 40 % du `PUT`.** L'identifiant et l'étape `upload`
+    ///   sont déjà en base, l'objet Supabase est absent ou incomplet — et aucun
+    ///   chemin ne rappelait `upload(file:to:)`. « Réessayer » relançait un
+    ///   traitement serveur sur un fichier qui n'existait pas.
+    /// - **Le DNS tombe pendant `createTranscription`.** Il n'y a pas encore
+    ///   d'identifiant, donc le `guard` sortait sans rien faire : l'écran
+    ///   affichait « Réessayer », le clic ne produisait rien, pas même une
+    ///   erreur.
+    ///
+    /// Ce qui décide est l'étape atteinte : tant que le CRM n'a pas confirmé
+    /// avoir reçu les octets, il faut refaire l'envoi complet ; après, il faut
+    /// laisser le serveur reprendre son travail.
     func retry(_ recording: Recording) {
-        guard let client = client(), let transcriptionID = recording.metadata.transcriptionID else { return }
+        let stage = recording.metadata.crmStage.flatMap(CRMStage.init(rawValue:))
+        let bytesLanded = recording.metadata.transcriptionID != nil && stage != nil && stage != .upload
 
-        trackers[recording.id]?.cancel()
-        trackers[recording.id] = Task { [weak self] in
+        guard bytesLanded, let transcriptionID = recording.metadata.transcriptionID else {
+            start(for: recording.id, cancellingCurrent: true) { [weak self] token in
+                await self?.resend(recording, token: token)
+            }
+            return
+        }
+
+        guard let client = client() else {
+            states[recording.id] = .failed("Liaison CRM non configurée.")
+            return
+        }
+
+        start(for: recording.id, cancellingCurrent: true) { [weak self] token in
             do {
                 try await client.retry(transcriptionID)
-                await self?.track(recording.id, transcriptionID: transcriptionID, client: client)
+                await self?.track(
+                    recording.id,
+                    transcriptionID: transcriptionID,
+                    client: client,
+                    token: token
+                )
             } catch {
-                self?.states[recording.id] = .failed(error.localizedDescription)
+                guard Self.isCancellation(error) == false else { return }
+                self?.publish(.failed(error.localizedDescription), for: recording.id, token: token)
             }
-            self?.trackers[recording.id] = nil
+        }
+    }
+
+    /// Refait l'envoi depuis le début : audio, dépôt, octets, lancement.
+    ///
+    /// **Le rendez-vous se retrouve dans cet ordre**, du plus sûr au plus
+    /// coûteux : celui qui vient d'être choisi dans cette session, puis celui
+    /// qui est écrit dans les métadonnées — qu'il faut alors relire au CRM,
+    /// parce que son entreprise a pu être rattachée depuis, et que c'est
+    /// précisément le geste de réparation qu'on conseille à l'utilisateur.
+    ///
+    /// Faute des deux, on ne devine pas : envoyer un audio « au rendez-vous le
+    /// plus proche » est exactement ce que le contrat interdit.
+    private func resend(_ recording: Recording, token: UUID) async {
+        guard let client = client() else {
+            publish(.failed("Liaison CRM non configurée."), for: recording.id, token: token)
+            return
+        }
+
+        let complement = lastAttempt[recording.id]?.complement
+
+        do {
+            var booking = lastAttempt[recording.id]?.booking
+
+            if let bookingID = recording.metadata.bookingID {
+                let start = recording.metadata.startedAt
+                let known = try await client.targets(
+                    from: start.addingTimeInterval(-12 * 3600),
+                    to: start.addingTimeInterval(12 * 3600)
+                )
+                booking = known.first { $0.booking_id == bookingID } ?? booking
+            }
+
+            guard let booking else {
+                publish(
+                    .failed(
+                        "Impossible de savoir à quel rendez-vous rattacher cet envoi. "
+                        + "Relancez-le depuis la bibliothèque en choisissant le rendez-vous."
+                    ),
+                    for: recording.id,
+                    token: token
+                )
+                return
+            }
+
+            // Le rendez-vous a pu changer entre-temps — lead rattaché, ou au
+            // contraire rendez-vous annulé. `.manual` : c'est un clic.
+            let eligibility = UploadEligibility.evaluate(
+                booking: booking,
+                isConfigured: configuration.isConfigured,
+                intent: .manual
+            )
+            guard eligibility.canSend else {
+                publish(
+                    .failed(eligibility.blockingReason ?? "Envoi impossible."),
+                    for: recording.id,
+                    token: token
+                )
+                return
+            }
+
+            // Le dépôt précédent est incomplet : le CRM n'autorise sa
+            // suppression que pour `uploading` et `failed`, ce qui est
+            // exactement le cas ici — et un refus n'empêche rien, la création
+            // suivante rend une URL signée neuve de toute façon.
+            if let previous = recording.metadata.transcriptionID {
+                try? await client.deleteFailedUpload(previous)
+            }
+
+            await perform(recording, booking: booking, complement: complement, token: token)
+        } catch {
+            guard Self.isCancellation(error) == false else { return }
+            publish(
+                .failed("Reprise impossible : \(error.localizedDescription)"),
+                for: recording.id,
+                token: token
+            )
         }
     }
 

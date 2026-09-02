@@ -117,6 +117,24 @@ struct CRMStatus: Codable, Sendable {
     /// Le mode asynchrone (> 70 min d'audio) peut rester sur `transcribing`
     /// plusieurs minutes sans que rien ne soit bloqué.
     var isBatchEngine: Bool { engine == "azure_batch" }
+
+    /// La progression, **si elle est possible**.
+    ///
+    /// `progress` est un entier libre dans le contrat. La réponse exacte
+    /// `{"id":"x","stage":"transcribing","progress":250}` produisait
+    /// « Traitement — 250 % » et une barre remplie deux fois et demie ; avec
+    /// `-1`, une barre négative. Aucune des deux ne ressemble à une erreur, et
+    /// c'est le problème : l'interface présentait un chiffre inventé par le
+    /// serveur comme un état normal.
+    ///
+    /// Une valeur hors bornes rend `nil` — « on ne sait pas » — plutôt que de
+    /// faire échouer le suivi. Le suivi, lui, dit l'étape, et l'étape reste
+    /// juste : transformer une progression farfelue en panne arrêterait
+    /// l'interrogation d'un traitement qui, lui, avance.
+    var boundedProgress: Int? {
+        guard let progress, (0...100).contains(progress) else { return nil }
+        return progress
+    }
 }
 
 struct CRMSummary: Codable, Sendable {
