@@ -525,3 +525,54 @@ closure in particular is the kind of thing that breaks silently: it once used
 `URL.resourceValues`, which serves cached values and would have turned a healthy
 finalisation into a two-minute silence. A `BranAppTests` target with a fake
 filesystem clock would cover it.
+
+---
+
+## Confirm the System Settings deep links still land on the right pane
+
+**What:** open each of the four URLs `SystemSettings.open(_:)` builds, on this
+macOS, and look at where System Settings actually lands.
+
+**Why:** they are the only repair path bran can offer once a permission has been
+denied — macOS never re-asks, so `PermissionsService` now routes every refused
+request to `SystemSettings.open`. If a URL is stale, the user is dropped on the
+wrong page, or on the root of System Settings, at the exact moment they were
+promised a fix.
+
+The four are built as:
+
+```
+x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone
+                                                       ?Privacy_ScreenCapture
+                                                       ?Privacy_Accessibility
+                                                       ?Privacy_Calendars
+```
+
+`com.apple.preference.security` is the pre-Ventura identifier. It has kept
+working through several releases, and it may well still work — but nothing in
+the repo has ever checked, and this cannot be measured from code:
+`NSWorkspace.shared.open` returns `true` as soon as System Settings launches,
+whatever the anchor. The return value proves the app opened, not that the page
+is right. Only a human looking at the window can tell.
+
+**How to check (about thirty seconds):**
+
+```sh
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+```
+
+and repeat for the three others. Each should land directly on its own privacy
+list, with bran visible in it.
+
+**If one is wrong:** the modern form is
+`x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?<anchor>`.
+Do not add it as a blind fallback — since `open` always reports success, a
+fallback chain would never fire, and would only make the code look safer than it
+is. Replace the identifier once you know which one is right.
+
+**Where:** `Sources/BranApp/SystemSettings.swift`, `Pane.rawValue` and
+`open(_:)`.
+
+**Found by:** the 2026-09-02 external audit, axis A03. It flagged the risk
+without being able to test it either — a read-only sandbox has the same blind
+spot.
