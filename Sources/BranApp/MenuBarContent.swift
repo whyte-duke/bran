@@ -223,11 +223,23 @@ struct MenuBarContent: View {
 
     /// Y a-t-il un fichier en train d'être écrit ?
     ///
-    /// `hasOpenSession` couvre la capture, `isFinalizing` la longue queue qui la
-    /// suit. Les deux comptent : l'une comme l'autre laisse un MP4 inutilisable
-    /// si le processus s'arrête.
+    /// **La question est posée au modèle, et une seule fois.** Elle était
+    /// écrite ici comme `hasOpenSession || isFinalizing`, ce qui paraît
+    /// couvrir « la capture et sa longue queue ». En réalité
+    /// `RecordingState.isActive` inclut déjà `.finalizing` : le second terme ne
+    /// changeait rien, et l'expression entière valait `hasOpenSession`.
+    ///
+    /// Elle ratait donc ce qui vient **après** la session — la fusion des
+    /// segments, la compression, l'extraction de l'audio, que porte
+    /// `currentStep` et qui peut tourner une demi-heure après la disparition de
+    /// la barre. Quitter par ce menu-là ne demandait rien pendant tout ce
+    /// temps ; quitter par ⌘Q, oui, depuis que `applicationShouldTerminate`
+    /// interroge `quitWouldLose`.
+    ///
+    /// Deux portes vers la même perte, deux réponses différentes, et la plus
+    /// visible était la plus faible. Il n'y a plus qu'une définition.
     private var isBusy: Bool {
-        model.hasOpenSession || model.isFinalizing
+        model.quitWouldLose != nil
     }
 
     private func quit() {
@@ -238,12 +250,14 @@ struct MenuBarContent: View {
 
         let alert = NSAlert()
         alert.alertStyle = .critical
-        alert.messageText = "Un enregistrement est en cours d'écriture."
+        alert.messageText = "bran est en train d'écrire un fichier."
         alert.informativeText = """
-            bran écrit encore la vidéo sur le disque. L'essentiel du fichier est \
-            écrit après l'arrêt de la capture — sur une réunion de 36 minutes, \
-            cette étape a duré 12 minutes et représentait 93 % du fichier. \
-            Quitter maintenant laisse un MP4 tronqué, et la réunion est perdue.
+            \(model.quitWouldLose ?? "Écriture en cours…")
+
+            L'essentiel du fichier est écrit après l'arrêt de la capture — sur \
+            une réunion de 36 minutes, cette étape a duré 12 minutes et \
+            représentait 93 % du fichier. Quitter maintenant laisse un MP4 \
+            tronqué, et la réunion est perdue.
             """
         alert.addButton(withTitle: "Continuer l'écriture")
         alert.addButton(withTitle: "Quitter quand même")
