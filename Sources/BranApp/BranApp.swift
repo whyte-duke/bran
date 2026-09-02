@@ -49,8 +49,63 @@ struct BranLaunch {
     }
 }
 
+/// **Ce qui ferme ⌘Q, et pourquoi il fallait un délégué pour ça.**
+///
+/// `MenuBarContent` demande confirmation avant de quitter pendant qu'un fichier
+/// s'écrit, et son commentaire dit la vérité : ce n'est que la moitié. Le menu
+/// de l'application porte son propre « Quitter », posé par AppKit, avec ⌘Q
+/// derrière — et il ne passe par aucune vue. Un raccourci que tout le monde
+/// tape par réflexe contournait donc entièrement la garde.
+///
+/// Le coût, mesuré sur ce projet : ScreenCaptureKit écrit **93 % du fichier
+/// après `stopCapture()`**, et cette finalisation a duré douze minutes sur une
+/// réunion de trente-six. Pendant toute cette fenêtre la machine paraît au
+/// repos, et ⌘Q ne perdait pas quelques secondes : il perdait la réunion.
+///
+/// `applicationShouldTerminate` est le seul endroit qui les attrape **toutes** —
+/// ⌘Q, le menu Pomme, un `killall` poli, la relance d'un installeur. Il rend
+/// `.terminateCancel` après un refus, ce qui laisse l'application exactement là
+/// où elle était : en train d'écrire.
+///
+/// La question vient d'`AppModel.quitWouldLose`, et pas d'une seconde
+/// définition de « occupé » écrite ici. Deux définitions de la même chose
+/// finissent toujours par diverger, et celle qui diverge en silence est celle
+/// qui n'a pas d'écran pour la démentir.
+@MainActor
+final class BranAppDelegate: NSObject, NSApplicationDelegate {
+
+    /// Posé par `BranApp` à la construction de la scène. Optionnel parce que le
+    /// délégué est instancié par AppKit avant que le modèle n'existe : dans
+    /// cette fenêtre-là, rien n'a encore pu commencer à s'écrire.
+    weak var model: AppModel?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let perte = model?.quitWouldLose else { return .terminateNow }
+
+        let alerte = NSAlert()
+        alerte.alertStyle = .critical
+        alerte.messageText = "bran est en train d'écrire un fichier."
+        alerte.informativeText = """
+            \(perte)
+
+            L'écriture d'un enregistrement se termine après la réunion, et elle \
+            est longue : la quasi-totalité du fichier est produite à ce \
+            moment-là. Quitter maintenant laisse un MP4 tronqué, et la réunion \
+            est perdue.
+            """
+        alerte.addButton(withTitle: "Continuer l'écriture")
+        alerte.addButton(withTitle: "Quitter quand même")
+
+        // Sans activation, l'alerte s'ouvre derrière la fenêtre du premier
+        // plan : on l'entendrait sans la voir, et ⌘Q paraîtrait ignoré.
+        NSApplication.shared.activate()
+        return alerte.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+    }
+}
+
 struct BranApp: App {
     @State private var model = AppModel()
+    @NSApplicationDelegateAdaptor(BranAppDelegate.self) private var delegate
 
     var body: some Scene {
         // **Un seul élément de barre de menus, et c'est un choix qui a été
@@ -96,6 +151,10 @@ struct BranApp: App {
 
         Window("bran", id: "library") {
             LibraryView(model: model)
+                // Le délégué est construit par AppKit avant que `model`
+                // n'existe ; c'est ici qu'on les présente. Une référence faible,
+                // pour que le délégué ne prolonge pas la vie du modèle.
+                .task { delegate.model = model }
         }
         .defaultSize(width: 1080, height: 700)
         // Une app dont le seul point d'entrée est une icône de barre de menus

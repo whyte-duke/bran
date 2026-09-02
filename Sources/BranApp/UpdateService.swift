@@ -179,10 +179,23 @@ private final class SessionGuard: NSObject, SPUUpdaterDelegate {
         throw Refusal.sessionInProgress
     }
 
+    /// **L'étiquette est `untilInvokingBlock`, et se tromper d'un mot rendait
+    /// tout ce correctif inerte.**
+    ///
+    /// L'en-tête de Sparkle déclare
+    /// `updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:`. Écrite
+    /// `untilInvoking:`, la méthode ne conforme à rien : le protocole n'exige
+    /// pas ce membre — il est optionnel —, donc **rien n'échoue à la
+    /// compilation**. Sparkle ne l'appelle jamais, la relance n'est jamais
+    /// repoussée, et l'enregistrement en finalisation est perdu comme avant.
+    ///
+    /// Le compilateur le disait pourtant, en avertissement et non en erreur :
+    /// « nearly matches optional requirement ». C'est exactement le genre de
+    /// ligne qu'un `swift build` bruyant enterre.
     func updater(
         _ updater: SPUUpdater,
         shouldPostponeRelaunchForUpdate item: SUAppcastItem,
-        untilInvoking installHandler: @escaping () -> Void
+        untilInvokingBlock installHandler: @escaping () -> Void
     ) -> Bool {
         guard hasSomethingToLose() else { return false }
 
