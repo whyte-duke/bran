@@ -37,14 +37,50 @@ enum ScreenAccess {
     /// Ce que le système déclare, qui peut être faux dans le sens permissif.
     static var isDeclaredGranted: Bool { CGPreflightScreenCaptureAccess() }
 
-    /// Le verdict utilisé avant d'ouvrir le viseur.
+    /// **Trois états, parce qu'il y en a trois — et en confondre deux
+    /// refusait la capture à des gens qui y avaient droit.**
     ///
-    /// Les deux sondes doivent être d'accord. Le désaccord — déclaré accordé
-    /// mais aucun titre lisible — est précisément le cas d'une autorisation
-    /// accordée à une **ancienne signature** du binaire.
-    static var isUsable: Bool { isDeclaredGranted && canSeeOtherWindows }
+    /// Le désaccord entre les deux sondes — déclaré accordé, mais aucun titre
+    /// lisible — était traité comme un refus. C'est bien le symptôme d'une
+    /// autorisation accordée à une ancienne signature. Ce n'est pas le seul :
+    /// `WindowList.onScreen()` écarte les fenêtres **sans titre**, donc un
+    /// bureau où toutes les autres applications sont réduites, ou une session
+    /// où bran est seul au premier plan, ne fournit aucun témoin non plus.
+    ///
+    /// Dans ce cas, l'utilisateur recevait un refus catégorique assorti d'une
+    /// procédure de suppression et de réajout de bran dans les Réglages
+    /// système — pour une autorisation parfaitement valide. On ne peut pas
+    /// distinguer les deux causes **avant** la capture ; on le peut très bien
+    /// après, en regardant ce qu'elle a rendu.
+    ///
+    /// D'où : ne bloquer que ce qui est certain, et laisser le doute passer.
+    enum Verdict: Equatable {
+        /// Les deux sondes sont d'accord.
+        case usable
+        /// Le système lui-même refuse. Aucune capture ne servira à rien.
+        case blocked
+        /// Déclaré accordé, aucun témoin pour le confirmer. Peut être une
+        /// autorisation périmée, peut être un bureau vide. **Tenter, puis
+        /// classer le résultat** — voir `SnapshotController.beginSelection`.
+        case unconfirmed
+    }
 
-    /// Le diagnostic à afficher quand ce n'est pas utilisable.
+    static var verdict: Verdict {
+        if isDeclaredGranted == false { return .blocked }
+        return canSeeOtherWindows ? .usable : .unconfirmed
+    }
+
+    /// « Rien ne prouve que c'est impossible. »
+    ///
+    /// Volontairement permissif : le doute ne doit pas fermer la porte. Les
+    /// écrans de réglages s'en servent pour décider s'il faut afficher un
+    /// avertissement, et un avertissement affiché à tort sur une autorisation
+    /// saine coûte plus cher qu'un avertissement manqué — il envoie retirer et
+    /// rajouter bran dans les Réglages système sans raison.
+    static var isUsable: Bool { verdict != .blocked }
+
+    /// Le diagnostic à afficher quand ce n'est pas utilisable, ou quand une
+    /// capture faite dans le doute (`.unconfirmed`) n'a rien rendu.
     static var diagnosis: String {
         if isDeclaredGranted == false {
             return """

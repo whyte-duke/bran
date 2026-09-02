@@ -76,6 +76,8 @@ struct SettingsPane: View {
                 ClipboardSettingsSection(model: model)
             case .watch:
                 WatchSettingsSection(model: model)
+            case .backup:
+                BackupSettingsSection(model: model)
             case .connections:
                 CRMSettingsSection(configuration: model.uploads.configuration, uploads: model.uploads)
             case .permissions:
@@ -111,6 +113,18 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     case snapshot
     case clipboard
     case watch
+    // **Absent, et son absence rendait la sauvegarde inconfigurable.**
+    //
+    // `BackupSettingsSection` existe depuis le jour où la sauvegarde est
+    // arrivée — 401 lignes qui portent le point d'accès S3, le seau, les
+    // dossiers à sauvegarder, l'intervalle et la politique batterie. Elle
+    // n'était montée nulle part : aucun cas ici, donc aucun onglet, donc
+    // aucun écran. Sur une installation neuve, `isEnabled` est faux et le S3
+    // est vide ; le seul chemin restant pour activer la sauvegarde était le
+    // drapeau de provisionnement en ligne de commande, prévu pour du SSH.
+    //
+    // La fonctionnalité entière n'était donc atteignable que par un terminal.
+    case backup
     case connections
     case permissions
 
@@ -124,6 +138,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .snapshot: "Capture"
         case .clipboard: "Presse-papiers"
         case .watch: "Veille"
+        case .backup: "Sauvegarde"
         case .connections: "Connexions"
         case .permissions: "Autorisations"
         }
@@ -137,6 +152,9 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .snapshot: "text.viewfinder"
         case .clipboard: "doc.on.clipboard"
         case .watch: "binoculars"
+        // Le même symbole que la section « Sauvegarde » de la barre latérale :
+        // c'est le même sujet, il doit porter la même image.
+        case .backup: "externaldrive.badge.checkmark"
         case .connections: "link"
         case .permissions: "lock.shield"
         }

@@ -751,6 +751,26 @@ final class BackupController {
 
     func cancel() {
         runTask?.cancel()
+
+        // **`runTask.cancel()` seul ne coupe rien, et le bouton mentait.**
+        //
+        // Annuler une `Task` ne fait que poser un drapeau. Ce que fait le
+        // pilote, lui, c'est attendre la fin du processus sur une
+        // `withCheckedContinuation` reprise par un `DispatchGroup` — une
+        // attente qui n'écoute pas l'annulation et qui ne rend la main que
+        // lorsque kopia a terminé. L'utilisateur cliquait « Annuler » sur une
+        // sauvegarde de quinze heures, l'écran passait à autre chose, et
+        // kopia continuait à lire, chiffrer et transférer jusqu'au bout : la
+        // batterie, le réseau et le disque avec lui.
+        //
+        // `cancelCurrentRun()` est la seule chose qui l'arrête vraiment —
+        // SIGTERM d'abord, pour que kopia referme ses index locaux, SIGKILL
+        // après le délai de grâce. Elle existait déjà, complète et
+        // documentée ; seule la coupure automatique sur perte réseau
+        // l'appelait (`cutRunForNetworkLoss`). Le geste de l'utilisateur, non.
+        if let driver = activeDriver {
+            Task { await driver.cancelCurrentRun() }
+        }
     }
 
     /// Resonde les six maillons tout de suite, dépôt compris.

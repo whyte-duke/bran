@@ -218,3 +218,59 @@ struct TextAssemblerTests {
         #expect(lines[2] == "}")
     }
 }
+
+/// **Ce que ce fichier protège** : que `TextAssembler` ne puisse pas arrêter
+/// le processus.
+///
+/// `Int(_:)` d'un `Double` non fini est une erreur fatale, pas un `nil`. Un
+/// fuzzing de `assemble` le faisait tomber sur **toutes** ses graines dès
+/// qu'une région portait un `NaN` ou un infini dans sa géométrie. Vision ne
+/// produit que des boîtes normalisées et finies, donc l'OCR n'y menait pas —
+/// mais `TextRegion` est un type public d'une cible qui se veut pure, et un
+/// contrat qui plante sur une valeur que son propre type autorise n'est pas
+/// un contrat.
+@Suite("Une géométrie aberrante ne fait pas tomber l'assemblage")
+struct TextAssemblerHostileGeometryTests {
+
+    @Test("Une abscisse non finie n'arrête pas le processus")
+    func nonFiniteAbscissaIsSurvived() {
+        let regions = [
+            TextRegion(x: 0, y: 0, width: 10, height: 2, text: "gauche"),
+            TextRegion(x: .nan, y: 0, width: 10, height: 2, text: "milieu"),
+            TextRegion(x: .infinity, y: 0, width: 10, height: 2, text: "droite"),
+        ]
+        let texte = TextAssembler.assemble(regions, layout: .monospaced)
+        // On n'affirme pas la mise en forme — sans géométrie lisible, il n'y
+        // a pas d'indentation juste. On affirme que le texte survit : perdre
+        // l'alignement est acceptable, perdre les mots ne l'est pas.
+        #expect(texte.contains("gauche"))
+        #expect(texte.contains("milieu"))
+        #expect(texte.contains("droite"))
+    }
+
+    @Test("Une largeur nulle partout ne fait pas allouer une ligne démesurée")
+    func zeroWidthDoesNotAllocateAnEnormousLine() {
+        let regions = [
+            TextRegion(x: 0, y: 0, width: 0, height: 2, text: "a"),
+            TextRegion(x: 1e9, y: 0, width: 0, height: 2, text: "b"),
+        ]
+        let texte = TextAssembler.assemble(regions, layout: .monospaced)
+        // Le plafond est à 4096 colonnes : largement au-dessus de tout
+        // terminal réel, et très loin des milliards qu'une largeur de
+        // caractère minuscule produirait sans lui.
+        #expect(texte.count < 5_000)
+        #expect(texte.contains("a"))
+        #expect(texte.contains("b"))
+    }
+
+    @Test("Une hauteur et une confiance non finies ne font pas tomber le regroupement")
+    func nonFiniteHeightIsSurvived() {
+        let regions = [
+            TextRegion(x: 0, y: .nan, width: 10, height: .nan, text: "un", confidence: .nan),
+            TextRegion(x: 20, y: 0, width: 10, height: .infinity, text: "deux", confidence: 1),
+        ]
+        _ = TextAssembler.assemble(regions, layout: .prose)
+        _ = TextAssembler.assemble(regions, layout: .monospaced)
+        _ = TextAssembler.group(regions)
+    }
+}
