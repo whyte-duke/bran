@@ -547,4 +547,59 @@ struct HTTPStatusLookalikeTests {
             stderr: "NoSuchBucket: the specified bucket does not exist\n", exitCode: 1,
             wasCancelled: false, signal: nil)?.kind == .notConfigured)
     }
+
+    // MARK: - Les erreurs ignorées ne sont pas des échecs
+
+    /// **La sortie réelle du premier snapshot réussi de ce Mac**, copiée du
+    /// journal de bran le 02/09/2026. Kopia avait écrit 1 571 967 fichiers et
+    /// `snapshot verify` les relisait sans une seule erreur — pourtant
+    /// `classify` rendait `.unparseable`, parce que la politique porte
+    /// `Ignore file read errors: true`, que kopia obéit en annonçant chaque
+    /// fichier sauté, et qu'il sort alors en code non nul.
+    @Test("Une sortie qui n'annonce que des erreurs ignorées n'est pas un échec")
+    func ignoredErrorsAreNotAFailure() {
+        let stderr = """
+        Snapshotting whyteduke@macbook-pro-de-whyte-2:/Users/whyteduke ...
+        ! Ignored error when processing "Library/Application Support/FileProvider/AC36B9EA/wharf/tombstone/a": unable to open file: unable to open local file
+        ! Ignored error when processing "Library/Application Support/FileProvider/D0184045/wharf/tombstone/a": unable to open file: unable to open local file
+        Ignored 132 error(s) while snapshotting whyteduke@macbook-pro-de-whyte-2:/Users/whyteduke.
+        Running quick maintenance...
+        Compacting an eligible uncompacted epoch...
+        Advancing epoch markers...
+        Finished quick maintenance.
+        """
+        #expect(KopiaFailureClassifier.classify(
+            stderr: stderr, exitCode: 1, wasCancelled: false, signal: nil) == nil)
+    }
+
+    /// L'élision est le texte de bran, pas celui de kopia : ne pas la
+    /// reconnaître revenait à traiter sa propre sortie comme un message
+    /// inconnu. Le fragment de ligne de progression qu'elle laisse derrière
+    /// elle — privé de son caractère de rotation — tombait dans le même trou.
+    @Test("Le marqueur d'élision de bran et le fragment qu'il laisse ne sont pas des échecs")
+    func branOwnElisionMarkerIsNotAFailure() {
+        let stderr = """
+        Snapshotting whyteduke@macbook-pro-de-whyte-2:/Users/whyteduke ...
+        … [829755 octets de sortie élidés par bran — tête et fin conservées] …
+        (132 errors ignored), estimating...
+        Ignored 132 error(s) while snapshotting whyteduke@macbook-pro-de-whyte-2:/Users/whyteduke.
+        """
+        #expect(KopiaFailureClassifier.classify(
+            stderr: stderr, exitCode: 1, wasCancelled: false, signal: nil) == nil)
+    }
+
+    /// Le contrepoint indispensable : écarter le bruit ne doit pas rendre
+    /// sourd. Une vraie cause nommée, noyée au milieu des mêmes lignes
+    /// ignorées, doit toujours ressortir.
+    @Test("Une vraie erreur au milieu des erreurs ignorées se voit encore")
+    func realFailureAmongIgnoredErrorsIsStillSeen() {
+        let stderr = """
+        Snapshotting whyteduke@macbook-pro-de-whyte-2:/Users/whyteduke ...
+        ! Ignored error when processing "Library/Foo/bar": unable to open file
+        NoSuchBucket: the specified bucket does not exist
+        Ignored 3 error(s) while snapshotting whyteduke@macbook-pro-de-whyte-2:/Users/whyteduke.
+        """
+        #expect(KopiaFailureClassifier.classify(
+            stderr: stderr, exitCode: 1, wasCancelled: false, signal: nil)?.kind == .notConfigured)
+    }
 }

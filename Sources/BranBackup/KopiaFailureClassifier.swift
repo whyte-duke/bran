@@ -87,6 +87,20 @@ public enum KopiaFailureClassifier {
             // dans ce cas précis, faute d'autre signal : un code non nul sans
             // une seule ligne exploitable est un échec réel qu'on ne peut pas
             // nommer, pas un succès qu'on invente par optimisme.
+            //
+            // **Sauf quand kopia a lui-même nommé la raison de son code non
+            // nul.** « faute d'autre signal » est la condition de cette
+            // règle, pas un décor : kopia sort en code non nul dès qu'il a
+            // ignoré des erreurs de lecture — ce que la politique
+            // `Ignore file read errors` lui demande de faire — et il l'écrit
+            // en toutes lettres. Ce n'est alors plus un échec sans nom, c'est
+            // un code de sortie expliqué par la ligne juste au-dessus.
+            //
+            // Le compte n'est pas perdu pour autant : le manifeste porte
+            // `ignoredErrorCount`, ``SnapshotProof/isComplete`` exige qu'il
+            // soit nul, et l'écran dira « incomplète, et voilà de combien ».
+            // Le chiffre est gardé là où il veut dire quelque chose.
+            if exitCode != 0, mentionsIgnoredErrorSummary(lines) { return nil }
             return exitCode == 0 ? nil : unparseableFailure(rawOutput: stderr)
         }
 
@@ -420,6 +434,20 @@ public enum KopiaFailureClassifier {
     /// snapshot, résumé d'agrégation d'erreurs, ou ligne vide. Aucune de ces
     /// lignes ne doit, à elle seule, faire basculer une sortie propre en
     /// `.unparseable`.
+    /// Kopia a-t-il annoncé lui-même avoir ignoré des erreurs ?
+    ///
+    /// C'est la seule chose qui autorise à ne pas croire un code de sortie non
+    /// nul — et elle se lit sur la ligne de résumé que kopia écrit, jamais sur
+    /// une supposition.
+    private static func mentionsIgnoredErrorSummary(_ lines: [String]) -> Bool {
+        lines.contains { rawLine in
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            return line.hasPrefix("Ignored ")
+                && line.contains(" error")
+                && line.contains(" while snapshotting ")
+        }
+    }
+
     private static func isIgnorable(_ rawLine: String) -> Bool {
         let line = rawLine.trimmingCharacters(in: .whitespaces)
         if line.isEmpty { return true }
@@ -466,6 +494,40 @@ public enum KopiaFailureClassifier {
         // n'atteigne ce filtre.
         if line.hasPrefix("encountered ") && line.hasSuffix("errors:") { return true }
         if line == "encountered 1 error:" { return true }
+
+        // **Les erreurs que la politique demande d'ignorer ne sont pas des
+        // échecs — les compter comme tels a fait déclarer « échec » une
+        // sauvegarde réussie et vérifiée.**
+        //
+        // Relevé le 02/09/2026, premier snapshot complet de ce Mac : la
+        // politique porte `Ignore file read errors: true`, kopia obéit, écrit
+        // une ligne par fichier sauté puis un résumé, et sort en code non
+        // nul. Aucune de ces lignes n'était reconnue, donc `classify` rendait
+        // `.unparseable` — « Kopia a rendu un message que bran ne sait pas
+        // interpréter » — sur un snapshot de 1 571 967 fichiers que
+        // `snapshot verify` relisait sans une seule erreur.
+        //
+        // Ces lignes ne disparaissent pas pour autant : le manifeste porte
+        // `ignoredErrorCount`, ``SnapshotProof/isComplete`` l'exige nul, et
+        // l'écran dira « incomplète, et voilà de combien ». Le compte est
+        // gardé là où il veut dire quelque chose, pas ici sous la forme d'un
+        // échec qu'on ne sait pas nommer.
+        if line.hasPrefix("! Ignored error when processing ") { return true }
+        if line.hasPrefix("Ignored ") && line.contains(" error") && line.contains(" while snapshotting ") { return true }
+
+        // **Le marqueur d'élision de bran lui-même.** `BoundedOutputBuffer`
+        // remplace le milieu d'une sortie trop longue par cette ligne ; ne
+        // pas la reconnaître revenait à traiter son propre texte comme un
+        // message inconnu de kopia.
+        if line.contains("élidés par bran") { return true }
+
+        // Le fragment de ligne de progression que l'élision laisse derrière
+        // elle : coupée en deux, la seconde moitié perd son caractère de
+        // rotation et n'est plus reconnue par le filtre du dessus. On ne
+        // reconnaît que des fins de progression sans ambiguïté — une vraie
+        // erreur ne se termine pas par « estimating... ».
+        if line.hasSuffix("estimating...") { return true }
+        if line.hasSuffix(" left") && line.contains("estimated ") { return true }
 
         return false
     }
