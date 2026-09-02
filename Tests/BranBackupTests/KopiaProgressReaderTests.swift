@@ -299,4 +299,62 @@ struct KopiaProgressReaderLargeUnitTests {
             line: " - 5 hashing, 7 hashed (99999999999 TB), 0 cached (0 B), uploaded 215.2 MB, estimated 240 MB (97.1%) 0s left"
         ) == nil)
     }
+
+    // MARK: - Le suffixe d'erreurs ignorées
+
+    /// **La ligne qui a tué la première sauvegarde de ce Mac.** Copiée
+    /// littéralement du `rawOutput` conservé au journal de bran le
+    /// 02/09/2026, run tué à 19:46:07 après 43,8 Go réellement envoyés.
+    /// Kopia accole le décompte d'erreurs au champ `uploaded` dès qu'il en
+    /// ignore une seule ; le parseur rendait `nil`, le chien de garde de
+    /// `KopiaDriver` ne se réarmait plus, et le run mourait à 600 s.
+    @Test("La ligne réelle qui portait « (127 errors ignored) » se lit")
+    func uploadedWithIgnoredErrorsFromTheJournal() {
+        let progress = try! #require(KopiaProgressReader.parse(
+            line: " | 0 hashing, 718146 hashed (90.7 GB), 0 cached (0 B), uploaded 43.8 GB (127 errors ignored), estimating..."
+        ))
+        #expect(progress.hashedFiles == 718_146)
+        #expect(progress.hashedBytes == 90_700_000_000)
+        #expect(progress.uploadedBytes == 43_800_000_000)
+        #expect(progress.estimatedBytes == nil)
+    }
+
+    /// Le second run tué n'avait que **deux** erreurs : le nombre n'a jamais
+    /// été le sujet, seule la présence du suffixe compte.
+    @Test("Deux erreurs suffisaient à tuer le run — cette ligne se lit aussi")
+    func uploadedWithTwoIgnoredErrors() {
+        let progress = try! #require(KopiaProgressReader.parse(
+            line: " / 5 hashing, 241790 hashed (1 TB), 360177 cached (65.7 GB), uploaded 30.5 GB (2 errors ignored), estimating..."
+        ))
+        #expect(progress.hashedBytes == 1_000_000_000_000)
+        #expect(progress.cachedBytes == 65_700_000_000)
+        #expect(progress.uploadedBytes == 30_500_000_000)
+    }
+
+    @Test("Le singulier « 1 error ignored » se lit comme le pluriel")
+    func uploadedWithSingularIgnoredError() {
+        let progress = try! #require(KopiaProgressReader.parse(
+            line: " - 5 hashing, 7 hashed (233 MB), 0 cached (0 B), uploaded 215.2 MB (1 error ignored), estimated 240 MB (97.1%) 0s left"
+        ))
+        #expect(progress.uploadedBytes == 215_200_000)
+    }
+
+    /// Le suffixe est reconnu, pas contourné : tolérer n'importe quelle
+    /// parenthèse rouvrirait le trou qu'on vient de fermer, cette fois pour
+    /// un texte dont on ne saurait rien.
+    @Test("Une parenthèse inconnue rend la ligne illisible, elle n'est pas jetée")
+    func unknownParentheticalSuffixIsStillRefused() {
+        for suffix in ["(whatever)", "(127 fichiers ignorés)", "(errors ignored)", "(12.5 errors ignored)", "(127 errors)"] {
+            #expect(KopiaProgressReader.parse(
+                line: " - 5 hashing, 7 hashed (233 MB), 0 cached (0 B), uploaded 215.2 MB \(suffix), estimated 240 MB (97.1%) 0s left"
+            ) == nil, "« \(suffix) » ne devrait pas se lire")
+        }
+    }
+
+    @Test("Sans l'espace avant la parenthèse, la forme n'est pas celle de Kopia et se refuse")
+    func missingSpaceBeforeParenthesisIsRefused() {
+        #expect(KopiaProgressReader.parse(
+            line: " - 5 hashing, 7 hashed (233 MB), 0 cached (0 B), uploaded 215.2 MB(1 error ignored), estimated 240 MB (97.1%) 0s left"
+        ) == nil)
+    }
 }

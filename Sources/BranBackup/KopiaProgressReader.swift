@@ -122,10 +122,55 @@ public struct KopiaProgressReader: Sendable {
     }
 
     /// « uploaded 0 B » → 0. « uploaded 215.2 MB » → 215 200 000.
+    ///
+    /// **Le suffixe d'erreurs ignorées, et ce qu'il a coûté.** Relevé le
+    /// 02/09/2026 sur ce Mac : dès que Kopia ignore au moins une erreur de
+    /// lecture, il accole le décompte à **ce champ précis** —
+    /// `uploaded 43.8 GB (127 errors ignored)`. `parseSize` y voyait alors
+    /// cinq morceaux au lieu de deux, rendait `nil`, et toute la ligne
+    /// devenait illisible. Comme `KopiaDriver` ne réarmait son horloge de
+    /// blocage que sur une progression **décodée**, le chien de garde
+    /// concluait « plus rien n'avance » et tuait un run parfaitement sain —
+    /// mesuré : 43,8 Go envoyés et 718 146 fichiers hachés au moment de
+    /// l'exécution. C'est la panne que le commentaire de `TB` décrit dans
+    /// `parseSize`, revenue par une autre porte : ce Mac porte des fichiers
+    /// fantômes OneDrive/GoogleDrive qui expirent en lecture, donc la ligne
+    /// portait ce suffixe en permanence. Deux erreurs suffisent, le nombre
+    /// n'y change rien.
+    ///
+    /// Le suffixe est **reconnu, pas contourné** : seule la forme exacte
+    /// `(<entier> error|errors ignored)` est retirée. Toute autre parenthèse
+    /// reste une ligne qu'on ne comprend pas, donc un `nil` — la règle du
+    /// fichier ne bouge pas d'un pouce.
     private static func parseUploaded(_ field: String) -> Int64? {
         let prefix = "uploaded "
         guard field.hasPrefix(prefix) else { return nil }
-        return parseSize(String(field.dropFirst(prefix.count)))
+        var value = String(field.dropFirst(prefix.count))
+
+        if value.hasSuffix(")") {
+            guard let openParen = value.lastIndex(of: "(") else { return nil }
+            let note = value[value.index(after: openParen)..<value.index(before: value.endIndex)]
+            guard isIgnoredErrorsNote(String(note)) else { return nil }
+            value = String(value[value.startIndex..<openParen])
+            // L'espace qui séparait le volume de la parenthèse doit exister :
+            // `uploaded 43.8 GB(2 errors ignored)` n'est pas une forme vue,
+            // et la deviner serait exactement le genre de supposition que ce
+            // fichier refuse.
+            guard value.hasSuffix(" ") else { return nil }
+            value.removeLast()
+        }
+        return parseSize(value)
+    }
+
+    /// « 127 errors ignored » et « 1 error ignored » → vrai ; tout le reste →
+    /// faux. Le décompte doit être un entier : `(quelque chose ignored)` n'est
+    /// pas une forme connue, et se laisser attendrir ici rouvrirait le trou
+    /// que ``parseUploaded`` vient de fermer.
+    private static func isIgnoredErrorsNote(_ note: String) -> Bool {
+        let parts = note.split(separator: Character(" "))
+        guard parts.count == 3, Int(parts[0]) != nil else { return false }
+        guard parts[1] == "error" || parts[1] == "errors" else { return false }
+        return parts[2] == "ignored"
     }
 
     /// « estimating... » → (nil, nil). Le total est inconnu, et `nil` est
