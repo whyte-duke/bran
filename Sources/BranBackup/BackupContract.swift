@@ -346,9 +346,16 @@ public struct ChainVerdict: Codable, Sendable, Hashable {
     /// Le message à afficher en tête. Reprend le diagnostic de `firstFailure`,
     /// ou constate que tout est vert.
     public var headline: String
-    /// Vrai seulement si **tous** les maillons sondés sont `up`. Un maillon
-    /// `unknown` ne compte pas pour vert : on ne sauvegarde pas sur une
-    /// ignorance.
+    /// Vrai seulement si **aucun** maillon n'est `down`, `unknown` ni
+    /// `connecting` : on ne sauvegarde pas sur une ignorance. Un maillon
+    /// `degraded` — une ligne lente, mesurée lente — est le seul état non vert
+    /// qui laisse passer.
+    ///
+    /// La formulation précédente disait « tous les maillons sont `up` », et ce
+    /// n'était pas seulement imprécis : `ChainEvaluator` ne regardait que le
+    /// premier maillon non vert, de sorte qu'un `degraded` en amont rendait
+    /// vrai ce champ sans que personne ne voie un `unknown` en aval. La
+    /// documentation décrivait l'intention, le code faisait autre chose.
     public var canBackUp: Bool
 
     public init(
