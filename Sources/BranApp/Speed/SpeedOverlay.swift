@@ -236,6 +236,10 @@ private struct SpeedPanel: View {
     /// une fermeture `Sendable`, hors de l'acteur principal où vit `View`.
     private nonisolated static let space = "speed.panel"
 
+    /// La dernière phrase annoncée, pour ne pas la répéter. Même mémoire, et
+    /// même raison, que `AttentionOverlay.announce`.
+    @State private var lastAnnouncement = ""
+
     var body: some View {
         VStack(spacing: Space.small) {
             header
@@ -281,6 +285,38 @@ private struct SpeedPanel: View {
         // ceux pour qui un panneau surgissant est le plus coûteux à subir.
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilitySummary)
+        // **Le panneau est hors du parcours VoiceOver, et les attributs
+        // ci-dessus ne suffisent donc pas.**
+        //
+        // `OverlayPanel.make` construit un `NSPanel` `[.borderless,
+        // .nonactivatingPanel]` : il ne devient jamais fenêtre clé, et le
+        // curseur d'accessibilité ne le rejoint pas. Quelqu'un qui lance un test
+        // depuis le menu voit l'aiguille tourner pendant neuf secondes ; à
+        // VoiceOver, il ne se passe rien du tout — ni le début, ni le résultat,
+        // ni l'échec.
+        //
+        // Le remède est celui qu'`AttentionOverlay` a déjà payé pour la pilule
+        // du veilleur : une annonce système, qui ne demande pas que la fenêtre
+        // soit atteignable. Elle est accrochée à la **phase** et non à
+        // l'aiguille : celle-ci change plusieurs fois par seconde, et l'annoncer
+        // couvrirait la voix de tout le reste du système.
+        .onAppear { announce() }
+        .onChange(of: controller.phase) { _, _ in announce() }
+    }
+
+    /// Dit où en est la mesure, une fois par changement de phase.
+    private func announce() {
+        let text = "\(accessibilitySummary). Le panneau flotte : ouvrez bran, section Débit, pour l'arrêter."
+        guard text != lastAnnouncement else { return }
+        lastAnnouncement = text
+        NSAccessibility.post(
+            element: NSApp as Any,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: text,
+                .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+            ]
+        )
     }
 
     private var header: some View {
