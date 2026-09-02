@@ -1047,6 +1047,28 @@ private final class OutputCollector: @unchecked Sendable {
     func appendStderr(_ data: Data) {
         stderr.append(data)
 
+        // **Le chien de garde se réarme sur toute sortie, jamais sur les
+        // seules lignes que le lecteur a su décoder.**
+        //
+        // Deux fois déjà, un run parfaitement sain a été tué parce qu'une
+        // ligne de progression avait changé de forme sans que rien ne
+        // s'arrête : d'abord l'unité `TB` absente du `switch`, puis le
+        // suffixe `(127 errors ignored)` accolé au champ `uploaded`. Dans les
+        // deux cas Kopia écrivait, travaillait, envoyait des gigaoctets — et
+        // `lastProgress` restait figé parce que `parse(line:)` rendait `nil`.
+        // Lier la preuve de vie à la fidélité du parseur, c'est faire d'un
+        // défaut d'affichage une panne de sauvegarde.
+        //
+        // Ce que le contrat dit vraiment, et qui ne dépend d'aucun format :
+        // « le silence ne dit jamais "c'est juste lent", il dit "plus rien
+        // n'avance" ». Un octet reçu sur stderr est une preuve de vie ; sa
+        // lisibilité est une autre question, qui a le droit d'échouer sans
+        // tuer le run. `lastProgress` mesure donc désormais le silence, ce
+        // qu'il aurait toujours dû mesurer.
+        lock.lock()
+        lastProgress = Date()
+        lock.unlock()
+
         guard let onProgress else { return }
         // Décodage indulgent, uniquement pour cette lecture en direct : un
         // paquet peut couper une séquence UTF-8 multi-octets en plein milieu
@@ -1060,7 +1082,6 @@ private final class OutputCollector: @unchecked Sendable {
         let chunkText = String(decoding: data, as: UTF8.self)
         lock.lock()
         let progresses = progressReader.accept(chunkText)
-        if !progresses.isEmpty { lastProgress = Date() }
         lock.unlock()
         for progress in progresses { onProgress(progress) }
     }
