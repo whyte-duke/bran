@@ -1128,4 +1128,329 @@ struct ClipboardStoreTests {
         #expect(store.pinnedBlobBytes == taille)
         #expect(store.blobBytes == taille)
     }
+
+    // MARK: - Un sidecar hostile
+
+    /// **`hash` est un champ JSON, pas une empreinte.** Rien n'oblige un fichier
+    /// posé dans la bibliothèque à contenir les 64 chiffres que le magasin
+    /// écrit ; `blobURL` composait ce champ dans le dossier du jour sans le
+    /// relire, et `../../../secret` en sortait — le panneau lisait alors un
+    /// fichier personnel et le mettait dans le presse-papiers.
+    ///
+    /// Le fichier visé est écrit **hors** de la bibliothèque, exactement là où
+    /// le nom hostile pointe. Le test vérifie d'abord que l'entrée a bien été
+    /// relue : sans cette vérification, un sidecar mal encodé ferait passer le
+    /// test sur une liste vide.
+    @Test("Un contenu dont le nom sort de la bibliothèque ne se résout pas")
+    func nomDeContenuQuiSortDeLaBibliotheque() async throws {
+        let root = try makeRoot()
+        let victime = root.appending(path: "secret.png")
+        try Data("mot de passe".utf8).write(to: victime)
+
+        let hostile = ClipboardEntry(
+            copiedAt: Self.noon,
+            kind: .image,
+            text: "image",
+            blobs: [ClipboardBlobRef(hash: "../../../secret", ext: "png", bytes: 12)]
+        )
+        try await ClipboardStore.writeSidecar(hostile, in: dossierDuJour(root, Self.noon))
+
+        let store = makeStore(at: root)
+        await store.load()
+
+        // D'abord : le scénario a bien été chargé. Un test qui échoue à relire
+        // son entrée vérifierait la sûreté d'une liste vide.
+        let relue = try #require(store.recent.first { $0.id == hostile.id })
+        let reference = try #require(relue.blobs?.first)
+        #expect(reference.hash == "../../../secret")
+
+        #expect(store.blobURL(for: reference, of: relue) == nil)
+        #expect(FileManager.default.fileExists(atPath: victime.path(percentEncoded: false)))
+    }
+
+    /// Un nom peut aussi sortir par son extension : `fileName` colle `hash`,
+    /// un point et `ext`, et c'est la seconde moitié qui portait le chemin.
+    @Test("Une extension qui porte un chemin ne se résout pas non plus")
+    func extensionQuiPorteUnChemin() async throws {
+        let root = try makeRoot()
+        let empreinte = String(repeating: "a1", count: 32)
+        let hostile = ClipboardEntry(
+            copiedAt: Self.noon,
+            kind: .image,
+            text: "image",
+            blobs: [ClipboardBlobRef(hash: empreinte, ext: "png/../../../secret.png", bytes: 12)]
+        )
+        try await ClipboardStore.writeSidecar(hostile, in: dossierDuJour(root, Self.noon))
+
+        let store = makeStore(at: root)
+        await store.load()
+        let relue = try #require(store.recent.first { $0.id == hostile.id })
+        let reference = try #require(relue.blobs?.first)
+
+        #expect(store.blobURL(for: reference, of: relue) == nil)
+    }
+
+    /// L'autre moitié : le refus ne doit pas emporter les noms légitimes.
+    @Test("Un contenu écrit par le magasin se résout toujours")
+    func nomDeContenuLegitimeSeResout() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+
+        let entree = await store.save(text("image"), payloads: [payload("des octets")])
+        let reference = try #require(entree.blobs?.first)
+        let url = try #require(store.blobURL(for: reference, of: entree))
+        #expect(FileManager.default.fileExists(atPath: url.path(percentEncoded: false)))
+    }
+
+    /// L'épinglage est l'autre bout du même champ : il **lit** le fichier visé
+    /// et le **récrit** ailleurs. Un nom qui sort du dossier doit faire échouer
+    /// l'épinglage, pas recopier un fichier personnel dans la bibliothèque.
+    @Test("Épingler refuse un contenu dont le nom sort de la bibliothèque")
+    func epinglerRefuseUnNomQuiSort() async throws {
+        let root = try makeRoot()
+        let victime = root.appending(path: "secret.png")
+        try Data("mot de passe".utf8).write(to: victime)
+
+        let hostile = ClipboardEntry(
+            copiedAt: Self.noon,
+            kind: .image,
+            text: "image",
+            blobs: [ClipboardBlobRef(hash: "../../../secret", ext: "png", bytes: 12)]
+        )
+        try await ClipboardStore.writeSidecar(hostile, in: dossierDuJour(root, Self.noon))
+
+        let store = makeStore(at: root)
+        await store.load()
+        let relue = try #require(store.recent.first { $0.id == hostile.id })
+
+        #expect(await store.pin(relue, at: Self.noon) == nil)
+        #expect(names(in: store.pinnedBlobsFolder).isEmpty)
+    }
+
+    // MARK: - La fin du texte
+
+    /// Le pendant sur disque de `ClipboardRetentionTests` : le dossier-jour
+    /// entier s'en va, index et contenus compris, et l'entrée quitte l'écran en
+    /// même temps que le fichier.
+    @Test("Un jour plus vieux que la rétention du texte disparaît en entier")
+    func jourTropVieuxDisparait() async throws {
+        let root = try makeRoot()
+        let politique = ClipboardRetention(blobDays: 30, textDays: 365)
+        let store = makeStore(at: root, retention: politique)
+        let vieux = Self.noon.addingTimeInterval(-400 * Self.day)
+
+        await store.save(text("un jeton d'API", at: vieux), payloads: [payload("image")])
+        await store.save(text("copiée aujourd'hui"))
+        #expect(store.recent.count == 2)
+
+        _ = await store.purgeExpired(now: Self.noon)
+
+        #expect(store.recent.count == 1)
+        #expect(store.recent.first?.preview == "copiée aujourd'hui")
+        #expect(names(in: store.folder).contains(dayKey(vieux)) == false)
+
+        // Et le redémarrage dit la même chose.
+        let relu = makeStore(at: root, retention: politique)
+        #expect(await relu.load() == 1)
+    }
+
+    /// **L'épingle est ce qui rend cette purge acceptable.** Une entrée
+    /// épinglée garde son sidecar, donc son dossier, donc son texte ; les
+    /// voisines du même jour partent quand même.
+    @Test("Une entrée épinglée survit à la rétention du texte, ses voisines non")
+    func epingleeSurvitALaRetentionDuTexte() async throws {
+        let root = try makeRoot()
+        let politique = ClipboardRetention(blobDays: 30, textDays: 365)
+        let store = makeStore(at: root, retention: politique)
+        let vieux = Self.noon.addingTimeInterval(-400 * Self.day)
+
+        let gardee = await store.save(text("à garder", at: vieux))
+        await store.save(text("à oublier", at: vieux.addingTimeInterval(1)))
+        _ = try #require(await store.pin(gardee, at: vieux))
+
+        _ = await store.purgeExpired(now: Self.noon)
+
+        let relu = makeStore(at: root, retention: politique)
+        #expect(await relu.load() == 1)
+        #expect(relu.recent.first?.id == gardee.id)
+        #expect(relu.recent.first?.isPinned == true)
+    }
+
+    /// Un `.json` qu'on n'a pas su lire interdit le `rm` du dossier entier : il
+    /// est peut-être récupérable à la main, et c'est déjà ce que le dépôt dit du
+    /// même cas ailleurs. Les entrées lisibles partent quand même.
+    @Test("Un sidecar illisible reste, et n'empêche pas les autres de partir")
+    func sidecarIllisibleResteALEffacement() async throws {
+        let root = try makeRoot()
+        let politique = ClipboardRetention(blobDays: 30, textDays: 365)
+        let store = makeStore(at: root, retention: politique)
+        let vieux = Self.noon.addingTimeInterval(-400 * Self.day)
+
+        await store.save(text("lisible", at: vieux))
+        let jour = dossierDuJour(root, vieux)
+        let abime = "\(UUID().uuidString).json"
+        try Data("{ pas du JSON".utf8).write(to: jour.appending(path: abime))
+
+        _ = await store.purgeExpired(now: Self.noon)
+
+        #expect(names(in: jour).contains(abime))
+        #expect(names(in: jour).filter { $0.hasSuffix(".json") } == [abime])
+    }
+
+    /// La purge immédiate : « j'ai copié un jeton, efface-moi ça maintenant ».
+    @Test("La purge immédiate efface tout sauf les épingles")
+    func purgeImmediate() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+
+        let gardee = await store.save(text("à garder"))
+        await store.save(text("un mot de passe", at: Self.noon.addingTimeInterval(1)))
+        await store.save(text("un jeton", at: Self.noon.addingTimeInterval(-Self.day)))
+        _ = try #require(await store.pin(gardee, at: Self.noon))
+
+        #expect(await store.eraseUnpinned() == 2)
+        #expect(store.recent.map(\.id) == [gardee.id])
+
+        let relu = makeStore(at: root)
+        #expect(await relu.load() == 1)
+    }
+
+    // MARK: - Un fichier trop gros
+
+    /// **Lire puis refuser, c'est avoir déjà payé.** `Data(contentsOf:)`
+    /// matérialise le fichier entier et `JSONDecoder` ne peut dire non
+    /// qu'ensuite : un `<uuid>.json` de 2 Gio déposé dans un dossier-jour
+    /// faisait réclamer 2 Gio à l'ouverture du panneau.
+    ///
+    /// Le sidecar de ce test est **valide** et se décoderait sans le plafond —
+    /// c'est ce qui prouve que c'est bien la taille qui le refuse, et non un
+    /// JSON abîmé.
+    @Test("Un sidecar plus gros que le plafond n'est pas même lu")
+    func sidecarTropGrosNestPasLu() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        await store.save(text("celle qui reste"))
+
+        let enorme = ClipboardEntry(
+            copiedAt: Self.noon,
+            kind: .text,
+            preview: "a",
+            plainText: String(repeating: "a", count: ClipboardEntry.maximumSidecarBytes + 1)
+        )
+        try await ClipboardStore.writeSidecar(enorme, in: dossierDuJour(root, Self.noon))
+
+        let relu = makeStore(at: root)
+        #expect(await relu.load() == 1)
+        #expect(relu.recent.contains { $0.id == enorme.id } == false)
+
+        // Et il est toujours là : on refuse de le lire, jamais de le garder.
+        #expect(names(in: dossierDuJour(root, Self.noon)).contains("\(enorme.id.uuidString).json"))
+    }
+
+    // MARK: - Ce que l'écran promet doit survivre au redémarrage
+
+    /// **Le disque a dit non, et la ligne était là quand même.** L'entrée était
+    /// insérée dans la fenêtre après le `catch`, donc une copie faite sur un
+    /// volume plein s'affichait comme conservée ; au redémarrage, elle n'y était
+    /// plus. Le bandeau disait bien quelque chose, mais la liste le contredisait
+    /// juste en dessous, et c'est la liste qu'on croit.
+    @Test("Une entrée que le disque a refusée n'est pas montrée comme conservée")
+    func entreeRefuseeNestPasMontree() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        let manager = FileManager.default
+
+        // Un premier enregistrement crée le dossier du jour ; c'est lui qu'on
+        // ferme ensuite à l'écriture.
+        await store.save(text("celle qui passe"))
+        let jour = dossierDuJour(root, Self.noon)
+        try manager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: jour.path)
+        defer { try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: jour.path) }
+
+        let refusee = await store.save(text("celle qui échoue", at: Self.noon.addingTimeInterval(1)))
+
+        #expect(store.recent.contains { $0.id == refusee.id } == false)
+        #expect(store.problem != nil)
+
+        // Et le redémarrage dit la même chose que l'écran, ce qui est tout
+        // l'enjeu.
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: jour.path)
+        let relu = makeStore(at: root)
+        await relu.load()
+        #expect(relu.recent.contains { $0.id == refusee.id } == false)
+        #expect(relu.recent.count == 1)
+    }
+
+    /// L'index, lui, est **dérivé** : il se reconstruit depuis les sidecars. Son
+    /// échec ne doit donc pas faire disparaître de l'écran une entrée qui est
+    /// bel et bien sur le disque — sinon le correctif ci-dessus perdrait des
+    /// copies au lieu d'en sauver.
+    @Test("Une entrée écrite dont l'index a échoué reste montrée")
+    func entreeEcriteAvecIndexEnEchecResteMontree() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        let manager = FileManager.default
+
+        await store.save(text("la première"))
+
+        // Un dossier à la place de l'index : le sidecar s'écrit, la ligne
+        // d'index non.
+        let jour = dossierDuJour(root, Self.noon)
+        let index = jour.appending(path: ClipboardStore.indexFileName)
+        try manager.removeItem(at: index)
+        try manager.createDirectory(at: index, withIntermediateDirectories: true)
+
+        let ecrite = await store.save(text("la seconde", at: Self.noon.addingTimeInterval(1)))
+        #expect(store.recent.contains { $0.id == ecrite.id })
+
+        try manager.removeItem(at: index)
+        let relu = makeStore(at: root)
+        await relu.load()
+        #expect(relu.recent.contains { $0.id == ecrite.id })
+    }
+
+    /// **La suppression qui échoue retirait quand même la ligne de l'écran.**
+    /// Le sidecar restait sur le disque, donc l'entrée revenait au lancement
+    /// suivant — et une suppression qu'on croit faite est pire qu'une
+    /// suppression refusée, parce qu'on ne la refait pas.
+    @Test("Une suppression que le disque refuse ne retire pas la ligne")
+    func suppressionRefuseeNeRetirePasLaLigne() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        let manager = FileManager.default
+
+        let entree = await store.save(text("à supprimer"))
+        let jour = dossierDuJour(root, Self.noon)
+        try manager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: jour.path)
+        defer { try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: jour.path) }
+
+        await store.delete(entree)
+
+        #expect(store.recent.contains { $0.id == entree.id })
+        #expect(store.problem != nil)
+
+        // Le sidecar est toujours là : c'est ce que l'écran doit dire.
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: jour.path)
+        let relu = makeStore(at: root)
+        await relu.load()
+        #expect(relu.recent.contains { $0.id == entree.id })
+    }
+
+    @Test("Une suppression qui aboutit retire bien la ligne")
+    func suppressionQuiAboutitRetireLaLigne() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+
+        let entree = await store.save(text("à supprimer"))
+        await store.delete(entree)
+
+        #expect(store.recent.isEmpty)
+        #expect(store.problem == nil)
+    }
+
+    private func dossierDuJour(_ root: URL, _ date: Date) -> URL {
+        root
+            .appending(path: ClipboardStore.folderName, directoryHint: .isDirectory)
+            .appending(path: dayKey(date), directoryHint: .isDirectory)
+    }
 }

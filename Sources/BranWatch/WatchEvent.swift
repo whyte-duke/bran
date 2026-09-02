@@ -96,6 +96,68 @@ public struct WatchEvent: Equatable, Sendable, Codable {
         self.branch = branch
     }
 
+    /// **Le plafond d'une durée d'intervalle : 366 jours.**
+    ///
+    /// Ce n'est pas une borne de vraisemblance mais une borne de sûreté, et elle
+    /// est volontairement très au-delà de tout ce que les deux journaux
+    /// écrivent : un intervalle de voie est fermé à chaque changement de jour,
+    /// et la plus longue absence imaginable est un Mac refermé pendant des
+    /// vacances. Ce qu'elle refuse est ce qu'aucune horloge ne produit.
+    public static let durationCeiling: TimeInterval = 366 * 86_400
+
+    /// Cette durée peut-elle sortir d'une horloge ?
+    ///
+    /// Un `Double` de JSON accepte `1e308`, `-1`, `nan` et `inf` ; aucun n'est
+    /// une durée mesurée, et tous font tomber la conversion en entier que
+    /// l'affichage fait ensuite.
+    static func isPlausibleDuration(_ value: TimeInterval) -> Bool {
+        value.isFinite && value >= 0 && value <= durationCeiling
+    }
+
+    /// **Refuse au décodage ce qui ferait tomber le panneau.**
+    ///
+    /// `d` était un `Double` que rien ne validait. Mesuré : la ligne
+    /// `{"v":1,"lane":"win:x",…,"d":1e308,…}` se décode sans un mot, puis
+    /// l'affichage la convertit en entier et tue le processus — « Double value
+    /// cannot be converted to Int because the result would be greater than
+    /// Int.max ». La panne n'était pas une ligne perdue : c'était le panneau du
+    /// veilleur devenu impossible à ouvrir, tous les jours, tant que la ligne
+    /// restait dans le journal du jour.
+    ///
+    /// **Refuser plutôt que ramener à zéro** : une durée est ce qui fonde les
+    /// totaux de la journée et de la semaine, et un zéro inventé se
+    /// mélangerait aux vraies mesures sans plus jamais pouvoir s'en distinguer.
+    /// Le magasin sait déjà compter une ligne illisible et le dire ; c'est là
+    /// que celle-ci va.
+    ///
+    /// Le reste du décodage est celui que Swift synthétisait, à la lettre :
+    /// `decodeIfPresent` pour chaque champ optionnel, sans quoi un journal
+    /// antérieur à `fg` cesserait de se lire — la panne que la documentation de
+    /// ce champ décrit.
+    public init(from decoder: any Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        let duration = try box.decode(TimeInterval.self, forKey: .d)
+        guard Self.isPlausibleDuration(duration) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .d, in: box, debugDescription: "durée impossible (\(duration))"
+            )
+        }
+
+        self.v = try box.decode(Int.self, forKey: .v)
+        self.lane = try box.decode(String.self, forKey: .lane)
+        self.name = try box.decode(String.self, forKey: .name)
+        self.p = try box.decode(Int.self, forKey: .p)
+        self.state = try box.decode(LaneState.self, forKey: .state)
+        self.from = try box.decode(Date.self, forKey: .from)
+        self.to = try box.decode(Date.self, forKey: .to)
+        self.d = duration
+        self.src = try box.decode(Source.self, forKey: .src)
+        self.why = try box.decode(String.self, forKey: .why)
+        self.cwd = try box.decodeIfPresent(String.self, forKey: .cwd)
+        self.branch = try box.decodeIfPresent(String.self, forKey: .branch)
+        self.fg = try box.decodeIfPresent(Bool.self, forKey: .fg)
+    }
+
     mutating func extend(to instant: Date, by elapsed: TimeInterval, foreground: Bool) {
         to = instant
         d += elapsed

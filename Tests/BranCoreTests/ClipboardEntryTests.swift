@@ -649,4 +649,26 @@ struct ClipboardEntryTests {
         #expect(entry.fileTitle == "bran")
         #expect(entry.fileTypeName == nil)
     }
+
+    // MARK: - Les plafonds tiennent ensemble
+
+    /// Le budget d'une lecture du presse-papiers est ce qui empêche une image
+    /// promise de plusieurs gigaoctets d'être matérialisée trois fois. Il doit
+    /// donc laisser passer la plus grosse entrée que le magasin puisse écrire —
+    /// un texte enrichi range trois contenus, chacun jusqu'au plafond — sinon
+    /// le garde-fou coupe une copie légitime au lieu d'arrêter une copie
+    /// impossible.
+    @Test("Le budget de lecture laisse passer la plus grosse entrée écrivable")
+    func leBudgetDeLectureLaissePasserLaPlusGrosseEntree() {
+        #expect(ClipboardEntry.maximumReadingBytes >= 3 * ClipboardEntry.maximumBlobBytes)
+    }
+
+    /// Le plafond d'un sidecar doit couvrir le pire encodage JSON du plus long
+    /// texte qu'une entrée range en ligne : chaque caractère échappé en
+    /// `\uXXXX`, soit six octets.
+    @Test("Le plafond d'un sidecar couvre le pire encodage du texte en ligne")
+    func lePlafondDunSidecarCouvreLeTexteEnLigne() {
+        #expect(ClipboardEntry.maximumSidecarBytes >= 6 * ClipboardEntry.inlineTextLimit)
+        #expect(ClipboardEntry.maximumIndexBytes > ClipboardEntry.maximumSidecarBytes)
+    }
 }

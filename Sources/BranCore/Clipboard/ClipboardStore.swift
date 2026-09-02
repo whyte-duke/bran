@@ -46,6 +46,29 @@ public struct ClipboardBlobPayload: Sendable, Equatable {
     }
 }
 
+/// Ce contenu-là ne sera pas écrit, et voici laquelle des deux raisons.
+///
+/// Levée par les deux seules écritures qui composent un nom de contenu — poser
+/// les blobs d'une nouvelle entrée, recopier ceux d'une entrée épinglée. Les
+/// deux appelants savent déjà quoi en faire : ils rendent l'entrée sans ses
+/// contenus, ou refusent l'épinglage, en écrivant le message dans le bandeau.
+enum BlobRefused: LocalizedError {
+
+    /// Le nom ne désigne pas un enfant du dossier des contenus lourds — voir
+    /// `ClipboardStore.containedBlobName`.
+    case name(String)
+
+    /// Le fichier n'a pas pu être lu, ou pèse plus que ce que le magasin écrit.
+    case unreadable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .name(let name): "nom de contenu refusé (\(name))"
+        case .unreadable(let name): "contenu illisible ou trop gros (\(name))"
+        }
+    }
+}
+
 // MARK: - Le magasin
 
 /// L'historique du presse-papiers sur le disque : un dossier par jour, un
@@ -353,12 +376,6 @@ public final class ClipboardStore {
     /// l'épinglage achète.
     public func blobURL(for ref: ClipboardBlobRef, of entry: ClipboardEntry) -> URL? {
         guard entry.blobsArePurged == false else { return nil }
-        // Le nom vient d'un sidecar, donc de personne en particulier : voir
-        // `containedBlobName`. C'est le seul entonnoir de lecture — la vignette,
-        // le collage, le panneau et le cache passent tous par ici — mais il est
-        // doublé devant les deux autres effets, la copie d'épinglage et le test
-        // d'existence, parce qu'une garde unique ne tient que tant que personne
-        // n'ajoute un second chemin.
         guard let name = Self.containedBlobName(ref) else { return nil }
         if entry.isPinned {
             return pinnedBlobsFolder.appending(path: name)
@@ -632,16 +649,38 @@ public final class ClipboardStore {
             }
         }
 
+        // **Les deux écritures sont séparées parce qu'elles ne pèsent pas le
+        // même poids.** Le sidecar *est* l'entrée : s'il n'est pas posé, il n'y
+        // a rien sur le disque, et l'insérer dans la fenêtre afficherait une
+        // ligne que le redémarrage effacerait. L'index, lui, est dérivé — il se
+        // reconstruit depuis les sidecars à la première relecture qui le trouve
+        // en désaccord —, donc son échec est une gêne, pas une perte.
+        //
+        // La panne exacte que ça répare : sur un volume plein, la copie
+        // apparaissait dans le panneau comme conservée. Le bandeau disait bien
+        // qu'une écriture avait échoué, mais la liste le contredisait juste en
+        // dessous, et c'est la liste qu'on croit. Au lancement suivant, l'entrée
+        // n'était plus là.
+        var sidecarWritten = true
         do {
             try await Self.writeSidecar(stored, in: target)
-            try await Self.appendIndexLine(stored, in: target)
         } catch {
+            sidecarWritten = false
             everythingWritten = false
             writeFailure = "Écriture impossible : \(error.localizedDescription)"
         }
 
+        if sidecarWritten {
+            do {
+                try await Self.appendIndexLine(stored, in: target)
+            } catch {
+                everythingWritten = false
+                writeFailure = "Index non mis à jour : \(error.localizedDescription)"
+            }
+        }
+
         if everythingWritten { writeFailure = nil }
-        insert(stored)
+        if sidecarWritten { insert(stored) }
         return stored
     }
 
@@ -829,9 +868,9 @@ public final class ClipboardStore {
     nonisolated static func allBlobsExist(_ refs: [ClipboardBlobRef], in folder: URL) async -> Bool {
         let manager = FileManager.default
         return refs.allSatisfy { reference in
-            // Un nom que ce magasin n'aurait pas pu écrire compte comme absent :
-            // l'entrée se marque purgée, ce qui est exactement ce qu'on veut
-            // d'une référence qu'on refuse de suivre.
+            // Un nom que nous n'aurions pas pu écrire compte comme absent : la
+            // question posée ici est « l'entrée peut-elle encore promettre ce
+            // contenu ? », et un chemin qui sort du dossier ne se promet pas.
             guard let name = containedBlobName(reference) else { return false }
             return manager.fileExists(
                 atPath: folder.appending(path: name).path(percentEncoded: false)
@@ -861,16 +900,37 @@ public final class ClipboardStore {
         let day = entry.dayFolderName()
         let target = dayFolder(day)
 
+        // **La ligne ne quitte l'écran que si le sidecar a quitté le disque.**
+        //
+        // Elle était retirée dans tous les cas, y compris quand `removeItem`
+        // avait échoué — volume en lecture seule, dossier fermé aux écritures.
+        // L'entrée disparaissait donc du panneau et revenait au lancement
+        // suivant. Une suppression qu'on croit faite est pire qu'une suppression
+        // refusée : on ne la refait pas, et ce qu'on voulait effacer reste sur
+        // le disque pendant qu'on est certain du contraire.
+        //
+        // L'index, lui, est dérivé : son échec emporte le fichier d'index
+        // (voir `rewriteIndex`) et la lecture suivante le reconstruit. Le
+        // sidecar étant parti, l'entrée est bel et bien supprimée, et elle doit
+        // quitter la fenêtre.
+        var sidecarRemoved = true
         do {
             try await Self.removeSidecar(entry, in: target)
-            let survivors = Self.ordered(await Self.readSidecars(in: target).entries)
-            try await Self.rewriteIndex(survivors, in: target)
-            writeFailure = nil
         } catch {
-            writeFailure = "Suppression incomplète : \(error.localizedDescription)"
+            sidecarRemoved = false
+            writeFailure = "Suppression impossible : \(error.localizedDescription)"
         }
 
-        recent.removeAll { $0.id == entry.id }
+        if sidecarRemoved {
+            do {
+                let survivors = Self.ordered(await Self.readSidecars(in: target).entries)
+                try await Self.rewriteIndex(survivors, in: target)
+                writeFailure = nil
+            } catch {
+                writeFailure = "Index non mis à jour : \(error.localizedDescription)"
+            }
+            recent.removeAll { $0.id == entry.id }
+        }
     }
 
     // MARK: - Purge
@@ -909,7 +969,8 @@ public final class ClipboardStore {
         let names = await Self.dayFolderNames(in: base)
         let today = ClipboardRetention.dayKey(for: now)
         let doomed = retention.dayFoldersToPurge(from: names, today: today)
-        guard doomed.isEmpty == false else { return 0 }
+        let obsolete = retention.dayFoldersToDelete(from: names, today: today)
+        guard doomed.isEmpty == false || obsolete.isEmpty == false else { return 0 }
 
         var marked = 0
         for day in doomed {
@@ -977,8 +1038,92 @@ public final class ClipboardStore {
             }
         }
 
+        await erase(days: obsolete, in: base)
+
         await refreshBlobBytes(in: base, days: names)
         return marked
+    }
+
+    /// Efface tout de suite tout ce qui n'est pas épinglé, sans attendre aucune
+    /// échéance.
+    ///
+    /// **Le geste qui manquait, et pourquoi il manquait à ce point.** Un
+    /// presse-papiers ne contient pas que des adresses et des bouts de code : il
+    /// contient des jetons d'API, des mots de passe collés depuis un
+    /// gestionnaire, des clés privées. Le marqueur `ConcealedType` qui devrait
+    /// les tenir hors de l'historique n'est qu'une convention, que le Terminal
+    /// n'applique pas. Quand quelqu'un s'aperçoit qu'un secret est parti dans
+    /// l'historique, la seule réponse acceptable est « maintenant », pas « dans
+    /// 365 jours » — et jusqu'ici la seule réponse possible était d'aller
+    /// supprimer des dossiers dans le Finder.
+    ///
+    /// Les entrées épinglées survivent : l'épingle est une décision explicite,
+    /// et c'est justement ce qui rend cette purge utilisable sans hésiter.
+    ///
+    /// - Returns: le nombre d'entrées effacées.
+    @discardableResult
+    public func eraseUnpinned() async -> Int {
+        await serialized {
+            let base = self.folder
+            let erased = await self.erase(days: await Self.dayFolderNames(in: base), in: base)
+            await self.refreshBlobBytes(in: base, days: await Self.dayFolderNames(in: base))
+            return erased
+        }
+    }
+
+    /// Efface le texte de ces jours-là, **en épargnant ce qu'on a promis de
+    /// garder et ce qu'on n'a pas su lire.**
+    ///
+    /// Trois refus, et chacun a sa raison :
+    ///
+    /// - un dossier **illisible** ne conclut rien. C'est la leçon de
+    ///   `listing(of:)` : « je n'ai pas pu voir la liste » et « la liste est
+    ///   vide » sont deux phrases différentes, et seule la seconde autorise une
+    ///   suppression ;
+    /// - une entrée **épinglée** reste, avec son sidecar. Supprimer le dossier
+    ///   emporterait son texte en laissant son contenu lourd dans
+    ///   `Pinned/blobs/` — une entrée effacée **et** un fichier orphelin ;
+    /// - un sidecar **illisible** interdit de supprimer le dossier en entier.
+    ///   Un `.json` abîmé est peut-être récupérable à la main, et c'est déjà ce
+    ///   que `SidecarFault` dit du même cas ailleurs. Les entrées lisibles
+    ///   partent une par une, le fichier abîmé reste.
+    ///
+    /// Le `rm` du dossier entier n'a donc lieu que dans le cas majoritaire —
+    /// tout est lisible, rien n'est épinglé — et c'est celui qui compte, parce
+    /// que c'est le seul qui emporte aussi l'index et le `blobs/` d'un coup.
+    @discardableResult
+    private func erase(days: [String], in base: URL) async -> Int {
+        var erased = 0
+
+        for day in days {
+            let target = base.appending(path: day, directoryHint: .isDirectory)
+            let read = await Self.readSidecars(in: target)
+            guard read.unreadable == false else { continue }
+
+            let kept = read.entries.filter(\.isPinned)
+            let removable = read.entries.filter { $0.isPinned == false }
+            guard removable.isEmpty == false else { continue }
+
+            do {
+                if kept.isEmpty, read.faults == 0 {
+                    try await Self.removeDayFolder(target)
+                } else {
+                    await Self.invalidateIndex(in: target)
+                    for entry in removable { try await Self.removeSidecar(entry, in: target) }
+                    try await Self.rewriteIndex(Self.ordered(kept), in: target)
+                }
+                let gone = Set(removable.map(\.id))
+                recent.removeAll { gone.contains($0.id) }
+                erased += removable.count
+            } catch {
+                writeFailure = "Historique du \(day) non effacé : \(error.localizedDescription)"
+            }
+        }
+
+        if erased > 0 {
+            clipboardLog.notice("\(erased, privacy: .public) entrée(s) effacée(s) par la rétention du texte")
+        }
+        return erased
     }
 
     /// Recompte les deux chiffres des réglages, jours et épinglés.
@@ -1287,6 +1432,35 @@ public final class ClipboardStore {
         return DayRead(entries: sorted, faults: truth.faults, rebuilt: worthRewriting)
     }
 
+    /// Les octets d'un fichier, **si sa taille a été demandée d'abord**.
+    ///
+    /// `Data(contentsOf:)` matérialise ce qu'on lui donne, et un `JSONDecoder`
+    /// ne peut refuser qu'après : lire puis refuser, c'est avoir déjà payé. Un
+    /// `<uuid>.json` de 2 Gio déposé dans un dossier-jour faisait donc réclamer
+    /// 2 Gio à l'ouverture du panneau — et la bibliothèque est justement un
+    /// dossier ordinaire, qu'on invite à ouvrir, à copier d'un Mac à l'autre et
+    /// à restaurer d'une sauvegarde.
+    ///
+    /// La taille est lue par `resourceValues`, qui est un `stat` : elle ne
+    /// touche pas au contenu. Un chemin qui n'est pas un fichier régulier est
+    /// refusé au passage — un dossier nommé `index.jsonl` se lit autrement, et
+    /// pas comme des octets.
+    ///
+    /// `nil` veut dire « non lisible », ce que les deux appelants savent déjà
+    /// traiter : le sidecar est compté comme une panne, l'index — qui est
+    /// dérivé — est reconstruit depuis les sidecars.
+    nonisolated static func readable(_ url: URL, upTo ceiling: Int) -> Data? {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+        guard values?.isRegularFile == true, let size = values?.fileSize else { return nil }
+        guard size <= ceiling else {
+            clipboardLog.error(
+                "Fichier trop gros pour être lu : \(url.lastPathComponent, privacy: .public) (\(size, privacy: .public) octets)"
+            )
+            return nil
+        }
+        return try? Data(contentsOf: url)
+    }
+
     /// Le contenu d'un dossier, en distinguant « vide » de « illisible ».
     ///
     /// **La distinction que `try? … ?? []` efface, et ce qu'elle coûtait.** Un
@@ -1331,7 +1505,7 @@ public final class ClipboardStore {
     /// plutôt qu'un doublon.
     nonisolated static func readIndex(in dayFolder: URL) -> (entries: [ClipboardEntry], faults: Int) {
         let url = dayFolder.appending(path: indexFileName)
-        guard let data = try? Data(contentsOf: url),
+        guard let data = readable(url, upTo: ClipboardEntry.maximumIndexBytes),
               let text = String(data: data, encoding: .utf8)
         else { return ([], 0) }
 
@@ -1384,7 +1558,7 @@ public final class ClipboardStore {
                 continue
             }
             let url = dayFolder.appending(path: name)
-            guard let data = try? Data(contentsOf: url),
+            guard let data = readable(url, upTo: ClipboardEntry.maximumSidecarBytes),
                   let entry = try? decoder.decode(ClipboardEntry.self, from: data)
             else {
                 faults += 1
@@ -1422,7 +1596,8 @@ public final class ClipboardStore {
         var refs: [ClipboardBlobRef] = []
         for payload in payloads {
             let ref = payload.ref
-            let url = blobs.appending(path: ref.fileName)
+            guard let name = containedBlobName(ref) else { throw BlobRefused.name(ref.fileName) }
+            let url = blobs.appending(path: name)
             if manager.fileExists(atPath: url.path(percentEncoded: false)) == false {
                 try payload.data.write(to: url, options: .atomic)
             }
@@ -1461,19 +1636,21 @@ public final class ClipboardStore {
         let source = dayFolder.appending(path: blobsFolderName, directoryHint: .isDirectory)
 
         for ref in refs {
-            // **Le nom est revalidé devant l'écriture, pas seulement devant la
-            // lecture.** C'est le chemin le plus dangereux des trois : un nom
-            // sorti d'un sidecar hostile ferait ici un `write` hors du dossier
-            // épinglé, avec le contenu d'un fichier également choisi par lui. On
-            // lance plutôt qu'on saute : épingler est une promesse de garder des
-            // octets, et une promesse tenue à moitié vaut moins qu'un refus.
-            guard let name = Self.containedBlobName(ref) else {
-                throw ClipboardStoreError.unknownBlobName(ref.fileName)
-            }
+            // Le refus est ici **avant** la lecture, et c'est le point : sans
+            // lui, `source.appending(path:)` composait un nom venu du JSON et
+            // recopiait dans la bibliothèque un fichier pris n'importe où sur le
+            // disque. Épingler est un geste qui écrit ; il refuse en entier.
+            guard let name = containedBlobName(ref) else { throw BlobRefused.name(ref.fileName) }
             let destination = pinnedBlobs.appending(path: name)
             guard manager.fileExists(atPath: destination.path(percentEncoded: false)) == false
             else { continue }
-            let data = try Data(contentsOf: source.appending(path: name))
+            // La taille est demandée avant les octets : le magasin n'écrit
+            // jamais plus de `maximumBlobBytes`, mais une bibliothèque restaurée
+            // ou synchronisée peut contenir n'importe quoi, et épingler ne doit
+            // pas être le geste qui charge 2 Gio en mémoire.
+            guard let data = readable(
+                source.appending(path: name), upTo: ClipboardEntry.maximumBlobBytes
+            ) else { throw BlobRefused.unreadable(name) }
             try data.write(to: destination, options: .atomic)
         }
     }
@@ -1583,9 +1760,26 @@ public final class ClipboardStore {
         try payload.write(to: dayFolder.appending(path: indexFileName), options: .atomic)
     }
 
+    /// Supprime un dossier-jour entier — sidecars, index et `blobs/`.
+    ///
+    /// **Le seul `rm -rf` du magasin qui emporte du texte**, et son appelant est
+    /// unique : `erase(days:in:)`, qui ne l'appelle que lorsqu'il a lu tous les
+    /// sidecars du dossier, qu'aucun n'est épinglé et qu'aucun n'a résisté à la
+    /// lecture. Le chemin, lui, ne vient jamais d'un fichier : il est composé à
+    /// partir d'un nom que `ClipboardRetention.day(from:)` a reconnu comme une
+    /// date, ce qui est la même porte que celle qui protège `Pinned` et
+    /// `.DS_Store` de la purge.
+    nonisolated static func removeDayFolder(_ dayFolder: URL) async throws {
+        guard FileManager.default.fileExists(
+            atPath: dayFolder.path(percentEncoded: false)
+        ) else { return }
+        try FileManager.default.removeItem(at: dayFolder)
+    }
+
     /// Supprime le `blobs/` d'un jour, avec tout ce qu'il contient. C'est le
-    /// `rm -rf` de la purge, et il est cadré au sous-dossier : l'`index.jsonl` et
-    /// les sidecars du jour restent, parce que le texte n'est jamais purgé.
+    /// `rm -rf` de la purge des contenus lourds, et il est cadré au
+    /// sous-dossier : l'`index.jsonl` et les sidecars du jour restent, parce que
+    /// le texte a sa propre échéance — voir `ClipboardRetention.textDays`.
     nonisolated static func removeBlobsFolder(in dayFolder: URL) async throws {
         let url = dayFolder.appending(path: blobsFolderName, directoryHint: .isDirectory)
         guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return }
@@ -1655,57 +1849,49 @@ public final class ClipboardStore {
     /// coûte des octets ; un fichier de tiers supprimé coûte la confiance dans un
     /// dossier qu'on invite justement à ouvrir.
     nonisolated static func isSelfWritten(_ name: String) -> Bool {
-        // **Les séparateurs sont refusés ici, et pas seulement chez l'appelant.**
-        // Le découpage ci-dessous ne coupe qu'au premier point : une extension
-        // valant `png/../../x` laissait donc passer un nom dont l'empreinte est
-        // parfaitement bien formée. C'est la moitié du chemin d'évasion de
-        // `containedBlobName`, et elle se referme au même endroit que le test de
-        // forme plutôt qu'à côté.
-        guard name.contains("/") == false, name.contains("\0") == false else { return false }
         let parts = name.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
         // Une extension vide est possible — `ClipboardBlobRef.fileName` rend
         // alors l'empreinte nue — mais un point suivi de rien ne l'est pas.
         guard parts.count <= 2, parts.count == 1 || parts[1].isEmpty == false else { return false }
         let hash = parts[0]
         guard hash.count == 64 else { return false }
-        return hash.allSatisfy(\.isHexDigit) && hash.allSatisfy { $0.isUppercase == false }
+        guard hash.allSatisfy({ $0.isASCII && $0.isHexDigit && $0.isUppercase == false })
+        else { return false }
+        // L'extension vient de `ClipboardCapture.blobExtensions`, une table
+        // fermée de sept noms courts et minuscules. L'exiger ici est ce qui
+        // interdit à la seconde moitié du nom de porter un chemin : `hash` peut
+        // être irréprochable et `ext` valoir `png/../../secret.png`.
+        guard parts.count == 2 else { return true }
+        return parts[1].count <= 8
+            && parts[1].allSatisfy { $0.isASCII && ($0.isLowercase || $0.isNumber) }
     }
 
-    /// Ce contenu désigne-t-il un fichier **de ce dossier**, et sous quel nom ?
+    /// Le nom de fichier de cette référence, **s'il ne peut désigner qu'un
+    /// enfant direct du dossier des contenus lourds**. `nil` sinon.
     ///
-    /// **Le sidecar est un fichier JSON, et rien ne garantit qui l'a écrit.**
-    /// `ClipboardBlobRef.fileName` concaténait `hash` et `ext` sans jamais les
-    /// relire : un sidecar déposé dans `Clipboard/<jour>/` portant
-    /// `"hash":"../../../../Documents/secret","ext":"png"` résolvait vers
-    /// `~/Documents/secret.png`, et un clic sur « copier » chargeait ce fichier
-    /// dans le presse-papiers comme s'il était le contenu de l'entrée. Le même
-    /// nom passait aussi par `copyBlobsToPinned`, qui **écrit** — donc l'évasion
-    /// marchait dans les deux sens.
+    /// C'est la même question que `isSelfWritten`, posée à l'autre bout du même
+    /// problème — et c'est bien le même prédicat, pas une seconde règle qui
+    /// finirait par diverger. Le ramassage s'en servait pour décider quoi
+    /// **supprimer** parmi les fichiers énumérés ; personne ne le posait sur le
+    /// chemin inverse, celui qui prend un champ JSON et en fabrique une URL.
     ///
-    /// Le critère est celui qui existait déjà pour le ramassage des orphelins,
-    /// `isSelfWritten`, appliqué à l'autre bout du même problème : un nom
-    /// acceptable est un nom que ce magasin **aurait pu écrire**, c'est-à-dire
-    /// 64 caractères hexadécimaux minuscules et une extension non vide. Vérifier
-    /// la forme entière est plus strict que chasser les `..` un par un, et c'est
-    /// ce qui évite d'avoir à deviner quelle graphie exotique reste à couvrir.
+    /// La panne, exactement : un sidecar posé dans `Clipboard/<jour>/` contenant
+    /// `"blobs":[{"hash":"../../../secret","ext":"png","bytes":1}]` décode sans
+    /// broncher — `hash` est une `String`, pas une empreinte —, et
+    /// `blobs/.appending(path:)` rendait alors `…/blobs/../../../secret.png`,
+    /// que le noyau résout hors de la bibliothèque à l'ouverture. Un clic sur
+    /// « copier » chargeait le fichier visé dans le presse-papiers ; l'épinglage
+    /// le lisait et le récrivait ailleurs.
     ///
-    /// Le repli est celui d'un fichier disparu du Finder : l'entrée survit sans
-    /// son contenu lourd et le dit. Perdre une image vaut mieux que lire le
-    /// fichier de quelqu'un d'autre.
+    /// **Rendre `nil` plutôt que lancer**, parce que les appelants du chemin de
+    /// lecture savent déjà dire « il n'y a plus rien à ouvrir » : c'est ce que
+    /// `blobURL` répond pour une entrée purgée, et le bouton se désactive avec
+    /// sa raison au lieu d'échouer au clic. Une référence que nous n'avons pas
+    /// pu écrire est indisponible, pas fatale — l'entrée reste lisible, avec son
+    /// type et sa taille, comme une entrée dont le contenu a été purgé.
     nonisolated static func containedBlobName(_ ref: ClipboardBlobRef) -> String? {
         let name = ref.fileName
-        guard name != ".", name != "..", isSelfWritten(name) else { return nil }
-        return name
-    }
-
-    /// Ce que le magasin refuse de faire.
-    ///
-    /// Un seul cas pour l'instant, et il est volontairement bruyant : un nom de
-    /// contenu qui ne peut pas venir de nous n'est pas une donnée manquante,
-    /// c'est une donnée fabriquée. La lecture, elle, échoue en silence — voir
-    /// `blobURL` — parce qu'elle a un repli honnête à offrir.
-    enum ClipboardStoreError: Error, Equatable {
-        case unknownBlobName(String)
+        return isSelfWritten(name) ? name : nil
     }
 
     /// Le total des octets occupés par les `blobs/`, tous jours confondus.

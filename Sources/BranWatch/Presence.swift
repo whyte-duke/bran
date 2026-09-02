@@ -219,7 +219,19 @@ public struct PresenceEvent: Equatable, Sendable, Codable {
         self.presence = try box.decode(Presence.self, forKey: .presence)
         self.from = try box.decode(Date.self, forKey: .from)
         self.to = try box.decode(Date.self, forKey: .to)
-        self.d = try box.decode(TimeInterval.self, forKey: .d)
+
+        // Même garde que `WatchEvent`, et pour la même panne : `d` est un
+        // `Double` venu du disque, l'affichage le convertit en entier, et
+        // `Int(1e308)` tue le processus au lieu de dessiner une ligne. Une
+        // absence réelle, elle, peut durer des semaines — d'où un plafond à
+        // 366 jours et non à une journée.
+        let duration = try box.decode(TimeInterval.self, forKey: .d)
+        guard WatchEvent.isPlausibleDuration(duration) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .d, in: box, debugDescription: "durée impossible (\(duration))"
+            )
+        }
+        self.d = duration
     }
 
     mutating func extend(to instant: Date, by elapsed: TimeInterval) {

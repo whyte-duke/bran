@@ -132,7 +132,12 @@ struct ClipboardBlobEscapeTests {
 
         // C'est le chemin qui **écrit** : sans garde, ce `copyBlobsToPinned`
         // déposait le fichier hors du dossier épinglé.
-        await #expect(throws: ClipboardStore.ClipboardStoreError.self) {
+        // `BlobRefused` plutôt que l'ancien `ClipboardStoreError` : les deux
+        // lots de correction ont fermé cette traversée en parallèle, et c'est la
+        // version la plus stricte qui a été retenue à la fusion — elle refuse en
+        // plus les empreintes non-ASCII (`Character.isHexDigit` accepte les
+        // chiffres pleine chasse) et les extensions qui portent un chemin.
+        await #expect(throws: BlobRefused.self) {
             try await ClipboardStore.copyBlobsToPinned(
                 [ClipboardBlobRef(hash: "../evasion", ext: "png", bytes: 1)],
                 from: jour,

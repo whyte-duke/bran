@@ -244,6 +244,63 @@ public struct ClipboardEntry: Codable, Identifiable, Equatable, Sendable {
     /// presse-papiers ne doit pas pouvoir remplir un disque.
     public static let maximumBlobBytes = 32 * 1024 * 1024
 
+    /// Ce qu'une seule lecture du presse-papiers a le droit de matérialiser —
+    /// 128 Mio, soit quatre fois le plafond d'un contenu.
+    ///
+    /// **Le plafond de 32 Mio arrivait trop tard.** Il est appliqué à
+    /// l'écriture, donc après que `NSPasteboard.data(forType:)` a rendu les
+    /// octets — et cette fonction matérialise ce qu'on lui demande, y compris
+    /// une représentation *promise* qu'aucune application n'avait encore
+    /// calculée. Une image de deux gigaoctets posée par une autre application
+    /// était donc entièrement construite, puis refusée. Refuser après avoir lu,
+    /// c'est avoir déjà payé.
+    ///
+    /// **Pourquoi quatre fois et non une.** Un texte enrichi range trois
+    /// contenus — sa forme d'origine, son texte brut, son rendu —, chacun
+    /// pouvant aller jusqu'aux 32 Mio. La plus grosse entrée que ce magasin
+    /// puisse écrire pèse donc 96 Mio de lecture, et un budget qui la couperait
+    /// refuserait une copie légitime. Au-delà, la lecture s'arrête : ce qui
+    /// reste à lire ne pourrait de toute façon plus être écrit. Le test
+    /// `leBudgetDeLectureLaissePasserLaPlusGrosseEntree` gèle ce rapport.
+    ///
+    /// **Ce que ce budget ne peut pas faire**, et il faut l'écrire : il ne borne
+    /// pas la *première* représentation. `NSPasteboard` n'offre aucun moyen de
+    /// demander la taille d'une donnée promise avant de la demander, donc rien
+    /// ici n'empêche un seul `data(forType:)` de rendre deux gigaoctets. Ce qui
+    /// est empêché, c'est de le faire une deuxième et une troisième fois pour
+    /// la même copie. La borne réelle demanderait un processus auxiliaire
+    /// plafonné en mémoire, qui est un autre chantier.
+    public static let maximumReadingBytes = 4 * maximumBlobBytes
+
+    /// Au-delà, un `.json` du dossier n'est pas lu du tout — 8 Mio.
+    ///
+    /// **Le plafond porte sur le fichier, avant qu'il soit en mémoire**, et
+    /// c'est tout l'intérêt : `Data(contentsOf:)` matérialise ce qu'on lui
+    /// donne, et un `JSONDecoder` ne peut refuser qu'après. Un `<uuid>.json` de
+    /// 2 Gio déposé dans un dossier-jour — la bibliothèque est un dossier qu'on
+    /// invite à ouvrir, à copier et à restaurer d'une sauvegarde — faisait donc
+    /// réclamer 2 Gio de mémoire à l'ouverture du panneau.
+    ///
+    /// **8 Mio, et voici d'où vient le chiffre.** Le plus gros sidecar que ce
+    /// magasin puisse écrire porte un texte en ligne de `inlineTextLimit`, soit
+    /// 512 Kio. Le pire encodage JSON de ces octets — chaque caractère échappé
+    /// en `\uXXXX` — les multiplie par six, soit 3 Mio ; le reste de l'entrée
+    /// tient en quelques centaines d'octets. 8 Mio laisse donc plus du double de
+    /// marge au-dessus du maximum théorique, et reste trois cents fois sous le
+    /// fichier qu'on refuse.
+    public static let maximumSidecarBytes = 8 * 1024 * 1024
+
+    /// Le même plafond pour l'index d'un jour, qui porte une ligne par entrée —
+    /// 64 Mio, soit huit fois celui d'un sidecar.
+    ///
+    /// L'index est **dérivé** : le refuser ne perd rien, la lecture retombe sur
+    /// les sidecars et le réécrit. C'est la raison pour laquelle il peut se
+    /// permettre un plafond généreux sans que ce soit un risque : au rythme
+    /// mesuré de 53 entrées par jour, une journée d'index pèse quelques dizaines
+    /// de kilo-octets, et 64 Mio couvre une journée de dizaines de milliers
+    /// d'entrées portant chacune un texte en ligne.
+    public static let maximumIndexBytes = 64 * 1024 * 1024
+
     /// La longueur du texte gardé dans l'index du jour — 512 caractères.
     ///
     /// C'est l'affaire de l'index, pas de l'entrée ; mais l'entrée doit savoir

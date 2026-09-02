@@ -1,3 +1,4 @@
+import AppKit
 import BranCore
 import Foundation
 import Observation
@@ -334,6 +335,18 @@ public final class AppModel {
         }
         notifications.configure()
 
+        // **Sparkle ne relance pas bran pendant qu'un fichier s'écrit.**
+        //
+        // `showsSessionBar` et surtout pas `hasOpenSession` : celui-ci est déjà
+        // faux pendant la fusion, la compression et l'extraction de l'audio,
+        // c'est-à-dire pendant la fenêtre où l'on a le plus à perdre.
+        // ScreenCaptureKit écrit 93 % du fichier après `stopCapture()`, et cette
+        // finalisation a duré douze minutes sur une réunion de trente-six. Le
+        // dépôt s'est déjà fait prendre deux fois par cette nuance — la barre de
+        // session, puis `tidyRecordingFolders` —, ce qui suffit à en faire une
+        // règle plutôt qu'un détail.
+        updates.hasSomethingToLose = { [weak self] in self?.showsSessionBar ?? false }
+
         // CR-4 : « une réunion est en cours **ou détectée** ». Le prédicat est
         // volontairement plus large qu'un enregistrement — ce dont il protège,
         // c'est un partage d'écran, et on peut partager son écran sans que bran
@@ -378,6 +391,41 @@ public final class AppModel {
         // suspendre : elle ne fait qu'observer des titres de fenêtres, et une
         // surveillance qu'on oublie d'activer ne sert à rien.
         startWatching()
+
+        watchSystemSettingsChanges()
+    }
+
+    /// Deux réglages qui vivent **hors** de bran sont relus à chaque retour au
+    /// premier plan.
+    ///
+    /// Ce sont les deux seuls que l'utilisateur peut changer dans Réglages
+    /// système sans que rien ne nous le dise, et les deux se lisaient une fois
+    /// pour toutes à l'initialisation :
+    ///
+    /// - l'autorisation de notifier. Elle n'est plus demandée au lancement — une
+    ///   fenêtre système sans contexte se refuse par réflexe, et macOS ne repose
+    ///   jamais la question. Celui qui l'accorde ensuite depuis les Réglages
+    ///   n'était jamais vu comme l'ayant accordée, et les alertes de retard de
+    ///   sauvegarde continuaient de partir dans le vide ;
+    /// - l'élément d'ouverture. Retiré depuis Réglages système › Général ›
+    ///   Ouverture, l'interrupteur de bran restait allumé pour toujours.
+    ///
+    /// Le retour au premier plan est le bon moment parce que c'est celui où
+    /// l'utilisateur revient **de** ces Réglages. Un sondage périodique aurait
+    /// relu les deux toutes les N secondes pour un changement qui arrive deux
+    /// fois dans la vie d'une installation.
+    private func watchSystemSettingsChanges() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.loginItem.refresh()
+                Task { await self.notifications.refresh() }
+            }
+        }
     }
 
     // MARK: - Dictée
@@ -716,6 +764,32 @@ public final class AppModel {
     /// `isActive` est la même question posée à la machine, qui, elle, connaît ses
     /// six états.
     public var hasOpenSession: Bool { engine.state.isActive }
+
+    /// Non `nil` quand quitter maintenant coûterait un fichier — et dit lequel.
+    ///
+    /// **Le chiffre qui rend ce garde-fou nécessaire** : ScreenCaptureKit écrit
+    /// 93 % du fichier **après** `stopCapture()`, et cette finalisation a duré
+    /// douze minutes sur une réunion de trente-six. Quitter dans cette
+    /// fenêtre-là ne perd pas quelques secondes de fin, il perd la réunion — le
+    /// `.mp4` reste au tiers de sa taille et ne s'ouvre pas.
+    ///
+    /// **La question est « y a-t-il un fichier en train de s'écrire », pas
+    /// « enregistre-t-on »**, et c'est ce qui fait qu'elle ne peut pas être
+    /// `isRecording`. Trois moments coûtent un fichier, et deux d'entre eux ne
+    /// ressemblent pas du tout à un enregistrement pour qui regarde l'écran :
+    /// la session ouverte — départ, capture, pause, finalisation, que
+    /// `hasOpenSession` couvre toutes les quatre —, et la chaîne de fin, où la
+    /// fusion et la compression peuvent tourner une demi-heure après que la
+    /// barre a disparu.
+    ///
+    /// La phrase rendue est celle que `SessionProgress` écrit déjà pour la
+    /// barre : elle nomme l'étape, elle est en français, et la reprendre ici
+    /// évite qu'une alerte de fermeture et la barre de progression décrivent le
+    /// même travail avec deux vocabulaires différents.
+    public var quitWouldLose: String? {
+        if let step = currentStep { return step.title }
+        return hasOpenSession ? "Enregistrement en cours…" : nil
+    }
 
     // MARK: - Post-traitement
 
@@ -1435,9 +1509,15 @@ public final class AppModel {
         // Rattachement certain par le code Meet : aucune ambiguïté à lever.
         if let bookingID = recording.metadata.bookingID,
            let booking = directory.bookings.first(where: { $0.booking_id == bookingID }) {
+            // **L'intention change ce qui est admissible, donc elle se
+            // déclare.** Sans elle, un enregistrement déjà lié à un rendez-vous
+            // clos ou déjà transcrit était refusé ici même, alors que
+            // l'auto-envoi est désactivé et que le geste attendu est justement
+            // d'ouvrir la feuille pour laisser l'humain trancher.
             let eligibility = UploadEligibility.evaluate(
                 booking: booking,
-                isConfigured: uploads.configuration.isConfigured
+                isConfigured: uploads.configuration.isConfigured,
+                intent: uploads.configuration.autoUpload ? .automatic : .manual
             )
 
             guard eligibility.canSend else {
@@ -1504,7 +1584,10 @@ public final class AppModel {
 
     func confirmUpload(_ recording: Recording, booking: CRMBooking, complement: String?) {
         pendingUpload = nil
-        uploads.send(recording, to: booking, complement: complement)
+        // Un clic dans la feuille est un geste explicite : sans `.manual`, une
+        // retranscription volontaire était refusée au dernier verrou alors que
+        // la feuille venait de l'annoncer comme permise.
+        uploads.send(recording, to: booking, complement: complement, intent: .manual)
     }
 
     func searchableBookings(forceRefresh: Bool = false) async -> UploadService.SearchResults {

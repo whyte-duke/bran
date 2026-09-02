@@ -93,6 +93,69 @@ struct MeetingFolderTests {
         }
     }
 
+    // MARK: - Ce que le système de fichiers refuse
+
+    /// **Le plafond de 60 *graphèmes* ne protège de rien**, parce que ce n'est
+    /// pas dans cette unité que macOS compte. Mesuré sur APFS (macOS 26.5) :
+    ///
+    /// | nom | graphèmes | unités UTF-16 NFD | `mkdir` |
+    /// |---|---|---|---|
+    /// | 255 × `a` | 255 | 255 | accepté |
+    /// | 256 × `a` | 256 | 256 | refusé (514) |
+    /// | 128 × `é` en NFC | 128 | 256 | refusé (514) |
+    /// | horodatage + 60 × 🙂 | 79 | 139 | accepté |
+    /// | horodatage + 60 × 👨‍👩‍👧‍👦 | 79 | **679** | refusé (514) |
+    /// | horodatage + 60 × `e` à 20 accents | 79 | **1279** | refusé (514) |
+    ///
+    /// La borne est donc 255 unités UTF-16 **de la forme décomposée**, et un
+    /// graphème peut en peser autant qu'il veut. Un titre de réunion vient d'un
+    /// titre de fenêtre, donc de la page web affichée : personne ne choisit ces
+    /// caractères-là.
+    ///
+    /// Le symptôme : `createDirectory` refuse, la réunion reste à plat dans la
+    /// racine ou ses médias ne sont pas renommés, alors que le plafond était
+    /// annoncé comme sûr.
+    @Test("Un titre que le système refuserait est ramené à un nom créable")
+    func titreRamenéÀUnNomCréable() throws {
+        let debut = date(2026, 8, 11, 9, 57)
+        let dossier = URL.temporaryDirectory.appending(path: "MeetingFolderTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dossier, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dossier) }
+
+        let hostiles = [
+            String(repeating: "👨‍👩‍👧‍👦", count: 60),
+            String(repeating: "e" + String(repeating: "\u{0301}", count: 20), count: 60),
+            String(repeating: "é", count: 300),
+            String(repeating: "a", count: 4000),
+        ]
+
+        for titre in hostiles {
+            let nom = MeetingFolder.name(startedAt: debut, title: titre)
+            #expect(nom.hasPrefix("2026-08-11 09h57"))
+
+            // Le dossier se crée, et le média qui reprend son nom aussi — c'est
+            // la marge que le plafond doit garder pour « (2) » et « .mp4 ».
+            let cible = dossier.appending(path: "\(nom) (50)")
+            try FileManager.default.createDirectory(at: cible, withIntermediateDirectories: false)
+            try Data("x".utf8).write(to: cible.appending(path: "\(nom) (50).mp4"))
+        }
+    }
+
+    /// L'autre moitié : la borne ne doit pas rogner ce qui tenait déjà. Un titre
+    /// de réunion réel tient très en dessous.
+    @Test("Un titre ordinaire traverse la borne sans être touché")
+    func titreOrdinaireIntact() {
+        let debut = date(2026, 8, 11, 9, 57)
+        #expect(
+            MeetingFolder.name(startedAt: debut, title: "Closing L'Étoile & Fils")
+                == "2026-08-11 09h57 — Closing L'Étoile & Fils"
+        )
+        // Soixante caractères accentués : 120 unités décomposées, largement sous
+        // la borne, et le plafond de lisibilité ne les touche pas non plus.
+        let soixante = String(repeating: "é", count: 60)
+        #expect(MeetingFolder.name(startedAt: debut, title: soixante).hasSuffix(soixante))
+    }
+
     // MARK: - L'assainissement du titre
 
     @Test("Un séparateur de chemin devient une espace, il ne disparaît pas")
