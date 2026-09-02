@@ -21,6 +21,10 @@ struct BookingPickerSheet: View {
     @State private var wasTruncated = false
     @State private var isSearching = false
 
+    /// Ce qui a empêché la recherche d'aboutir, ou `nil` quand la liste vient
+    /// bien du CRM.
+    @State private var searchProblem: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -99,7 +103,25 @@ struct BookingPickerSheet: View {
 
     @ViewBuilder
     private var list: some View {
-        if visibleBookings.isEmpty {
+        // **Une panne de recherche ne se présente pas comme une liste vide.**
+        //
+        // Toute erreur — ligne coupée, jeton refusé, réponse illisible — était
+        // convertie en succès sans résultat, et cet écran affichait « Aucun
+        // rendez-vous proche ». L'utilisateur en concluait que son rendez-vous
+        // n'existait pas et remettait l'envoi à plus tard, alors que le CRM
+        // était simplement injoignable. Les deux causes n'appellent pas le même
+        // geste : chercher autrement, ou réessayer.
+        if let searchProblem, visibleBookings.isEmpty {
+            ContentUnavailableView(
+                "Rendez-vous non chargés",
+                systemImage: "exclamationmark.icloud",
+                description: Text(
+                    "\(searchProblem)\n\nLa liste n'est pas vide, elle n'a pas pu être lue. "
+                    + "Utilisez « Actualiser » quand la connexion est revenue."
+                )
+            )
+            .frame(maxHeight: .infinity)
+        } else if visibleBookings.isEmpty {
             ContentUnavailableView(
                 query.isEmpty ? "Aucun rendez-vous proche" : "Aucun résultat",
                 systemImage: "calendar.badge.exclamationmark",
@@ -117,6 +139,14 @@ struct BookingPickerSheet: View {
                         BookingRow(booking: booking, recordingStart: recording.metadata.startedAt)
                             .tag(booking)
                     }
+                }
+
+                // La liste affichée est celle d'avant la panne : périmée vaut
+                // mieux que vide, à condition de le dire.
+                if let searchProblem {
+                    Text("\(searchProblem) — liste peut-être périmée.")
+                        .font(Type.meta)
+                        .foregroundStyle(Palette.attention)
                 }
 
                 if wasTruncated, query.isEmpty == false {
@@ -157,6 +187,7 @@ struct BookingPickerSheet: View {
         let results = await model.searchableBookings(forceRefresh: force)
         allBookings = results.bookings
         wasTruncated = results.wasTruncated
+        searchProblem = results.problem
         isSearching = false
     }
 
@@ -198,8 +229,12 @@ struct BookingPickerSheet: View {
 
     // MARK: - Pied
 
+    /// `.manual` : quelqu'un a ouvert cette feuille, lu la ligne d'avertissement
+    /// ci-dessous et choisi le rendez-vous. C'est exactement le geste que les
+    /// gardes de l'envoi automatique — rendez-vous clos, compte-rendu déjà
+    /// déposé — sont là pour ne pas faire à sa place, et pas pour lui interdire.
     private var eligibility: UploadEligibility {
-        .evaluate(booking: selection, isConfigured: true)
+        .evaluate(booking: selection, isConfigured: true, intent: .manual)
     }
 
     private var footer: some View {

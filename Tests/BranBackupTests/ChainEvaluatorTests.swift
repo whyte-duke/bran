@@ -233,4 +233,114 @@ struct ChainEvaluatorTests {
         #expect(verdict.firstFailure == nil)
         #expect(verdict.headline.localizedCaseInsensitiveContains("dégrad"))
     }
+
+    // MARK: - Un dégradé en amont ne couvre pas une ignorance en aval
+
+    /// La panne des 35 jours, reconstruite *à l'intérieur* du verdict écrit
+    /// pour la fermer. `evaluate` ne regardait que le **premier** maillon non
+    /// vert : la santé de MinIO lente (`degraded`, quatrième position) tombait
+    /// sur la branche qui autorise la sauvegarde, et le sixième maillon —
+    /// le dépôt Kopia jamais sondé — n'était jamais examiné.
+    ///
+    /// Un maillon lent ne prouve rien sur un maillon qu'on n'a pas mesuré.
+    @Test("Une santé MinIO lente ne fait pas passer un dépôt jamais sondé pour vert")
+    func degradedUpstreamDoesNotHideUnknownDownstream() {
+        let results = [
+            result(.tailscaleLocal, .up),
+            result(.minioNodeOnline, .up),
+            result(.s3Reachable, .up),
+            result(.minioHealthy, .degraded, diagnostic: "Santé de MinIO partielle, latence 900 ms."),
+            result(.bucketReachable, .up),
+            // Absent de la liste : `completeChain` le complète en `unknown`.
+        ]
+
+        let verdict = ChainEvaluator.evaluate(results, now: Self.now, freshness: Self.freshness)
+
+        #expect(verdict.canBackUp == false)
+        #expect(verdict.headline.localizedCaseInsensitiveContains("jamais sondé"))
+        #expect(verdict.headline.localizedCaseInsensitiveContains("dégrad") == false)
+    }
+
+    /// Même défaut, avec la mesure périmée à la place du maillon absent :
+    /// c'est très exactement le conteneur MinIO arrêté 35 jours pendant qu'une
+    /// vieille mesure verte restait affichée.
+    @Test("Un dégradé en amont ne rattrape pas une mesure périmée en aval")
+    func degradedUpstreamDoesNotHideStaleDownstream() {
+        let stale = Self.now.addingTimeInterval(-(Self.freshness + 60))
+        let results = [
+            result(.tailscaleLocal, .degraded, diagnostic: "Tailscale répond en 1,4 s."),
+            result(.minioNodeOnline, .up),
+            result(.s3Reachable, .up),
+            result(.minioHealthy, .up),
+            result(.bucketReachable, .up),
+            result(.repositoryOpens, .up, diagnostic: "Le dépôt s'ouvre.", measuredAt: stale),
+        ]
+
+        let verdict = ChainEvaluator.evaluate(results, now: Self.now, freshness: Self.freshness)
+
+        #expect(verdict.canBackUp == false)
+        #expect(verdict.headline.localizedCaseInsensitiveContains("périmée"))
+    }
+
+    /// L'autre bloquant mou : une ouverture de dépôt encore en cours reste une
+    /// ignorance, même derrière un maillon simplement lent.
+    @Test("Un dégradé en amont ne rattrape pas une connexion encore en cours en aval")
+    func degradedUpstreamDoesNotHideConnectingDownstream() {
+        let results = [
+            result(.tailscaleLocal, .up),
+            result(.minioNodeOnline, .degraded, diagnostic: "Le pair répond en 1,1 s."),
+            result(.s3Reachable, .up),
+            result(.minioHealthy, .up),
+            result(.bucketReachable, .up),
+            result(.repositoryOpens, .connecting, diagnostic: "Ouverture du dépôt en cours."),
+        ]
+
+        let verdict = ChainEvaluator.evaluate(results, now: Self.now, freshness: Self.freshness)
+
+        #expect(verdict.canBackUp == false)
+        #expect(verdict.headline.localizedCaseInsensitiveContains("connexion en cours"))
+    }
+
+    /// La contrepartie à ne pas casser : une chaîne composée uniquement de
+    /// verts et de lents reste utilisable, y compris quand le dégradé est en
+    /// dernière position.
+    @Test("Une chaîne faite de verts et de lents seulement sauvegarde toujours")
+    func onlyUpAndDegradedStillAllows() {
+        let results = [
+            result(.tailscaleLocal, .degraded, diagnostic: "Tailscale répond en 1,4 s."),
+            result(.minioNodeOnline, .up),
+            result(.s3Reachable, .up),
+            result(.minioHealthy, .up),
+            result(.bucketReachable, .up),
+            result(.repositoryOpens, .degraded, diagnostic: "Le dépôt s'ouvre en 11 s."),
+        ]
+
+        let verdict = ChainEvaluator.evaluate(results, now: Self.now, freshness: Self.freshness)
+
+        #expect(verdict.canBackUp)
+        #expect(verdict.headline.localizedCaseInsensitiveContains("dégrad"))
+        // Le premier des dégradés commente, comme avant : l'ordre de la
+        // chaîne continue de désigner lequel, à l'intérieur de sa catégorie.
+        #expect(verdict.headline.localizedCaseInsensitiveContains("Tailscale"))
+    }
+
+    /// Un `down`, lui, garde la priorité absolue : il affirme un fait, là où
+    /// `unknown` n'affirme qu'une absence de fait.
+    @Test("Un maillon en panne accuse toujours, même derrière un maillon inconnu")
+    func downStillOutranksUnknown() {
+        let results = [
+            result(.tailscaleLocal, .up),
+            result(.minioNodeOnline, .unknown, diagnostic: "Le pair MinIO — jamais sondé."),
+            result(.s3Reachable, .down, diagnostic: "Le port 9000 refuse la connexion."),
+            result(.minioHealthy, .up),
+            result(.bucketReachable, .up),
+            result(.repositoryOpens, .up),
+        ]
+
+        let verdict = ChainEvaluator.evaluate(results, now: Self.now, freshness: Self.freshness)
+
+        #expect(verdict.firstFailure == .s3Reachable)
+        #expect(verdict.canBackUp == false)
+        #expect(verdict.headline == "Le port 9000 refuse la connexion.")
+    }
 }

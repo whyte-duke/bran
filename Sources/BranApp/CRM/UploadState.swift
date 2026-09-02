@@ -38,12 +38,19 @@ enum UploadState: Equatable, Sendable {
 
     /// Fraction pour une barre de progression, `nil` quand il n'y a rien de
     /// mesurable à montrer.
+    ///
+    /// **Bornée à 0…1 en sortie**, en plus du contrôle fait à la réception de la
+    /// réponse du CRM. Deux gardes pour la même valeur, et ce n'est pas de la
+    /// redondance : celui d'en amont dit « le serveur a répondu n'importe
+    /// quoi », celui-ci dit « aucune barre de cette application ne se remplit
+    /// deux fois ». Le second protège aussi la fraction d'envoi, qui vient d'un
+    /// compteur d'octets local et non du CRM.
     var fraction: Double? {
         switch self {
         case .extractingAudio: nil
-        case .uploading(let value): value
+        case .uploading(let value): min(max(value, 0), 1)
         case .starting: nil
-        case .processing(_, let progress, _): Double(progress) / 100
+        case .processing(_, let progress, _): min(max(Double(progress) / 100, 0), 1)
         case .ready: 1
         case .failed: nil
         }

@@ -269,11 +269,23 @@ public enum ChainLink: String, Codable, Sendable, Hashable, CaseIterable, Compar
     case s3Reachable
     /// `/minio/health/live` puis `/ready`.
     case minioHealthy
-    /// Le seau existe et les identifiants sont valides. Un `GET` sur le seau
-    /// **doit** rendre 403 : c'est la preuve qu'on parle à une API S3 qui
-    /// connaît ce seau et refuse une lecture anonyme. Un 404 dirait « seau
-    /// absent », un 200 dirait « seau public », et une erreur de transport
+    /// L'API S3 répond sur ce seau et refuse la lecture anonyme. Un `GET`
+    /// **anonyme** sur le seau doit rendre 403 : un 404 dirait « seau absent »
+    /// sur ce MinIO, un 200 dirait « seau public » — une faute de
+    /// configuration, pas une preuve de santé —, et une erreur de transport
     /// dirait qu'on n'a jamais atteint S3.
+    ///
+    /// **Ce maillon ne dit rien des identifiants, et sa documentation
+    /// affirmait le contraire.** Elle disait « le seau existe et les
+    /// identifiants sont valides » ; la sonde n'envoie aucune clé S3. Des clés
+    /// Kopia expirées, avec un MinIO qui refuse correctement l'accès anonyme,
+    /// donnaient donc un maillon « Seau » vert et une chaîne dont l'échec
+    /// n'apparaissait qu'au maillon suivant — avec, entre les deux, un
+    /// diagnostic qui accusait le mauvais endroit.
+    ///
+    /// **Seul ``repositoryOpens`` prouve les identifiants**, parce que lui
+    /// seul ouvre le dépôt avec eux. C'est aussi pour ça qu'il est le dernier
+    /// de la chaîne, et le plus cher.
     case bucketReachable
     /// `kopia repository status` s'ouvre. La vérité, et la plus chère.
     case repositoryOpens
@@ -346,9 +358,16 @@ public struct ChainVerdict: Codable, Sendable, Hashable {
     /// Le message à afficher en tête. Reprend le diagnostic de `firstFailure`,
     /// ou constate que tout est vert.
     public var headline: String
-    /// Vrai seulement si **tous** les maillons sondés sont `up`. Un maillon
-    /// `unknown` ne compte pas pour vert : on ne sauvegarde pas sur une
-    /// ignorance.
+    /// Vrai seulement si **aucun** maillon n'est `down`, `unknown` ni
+    /// `connecting` : on ne sauvegarde pas sur une ignorance. Un maillon
+    /// `degraded` — une ligne lente, mesurée lente — est le seul état non vert
+    /// qui laisse passer.
+    ///
+    /// La formulation précédente disait « tous les maillons sont `up` », et ce
+    /// n'était pas seulement imprécis : `ChainEvaluator` ne regardait que le
+    /// premier maillon non vert, de sorte qu'un `degraded` en amont rendait
+    /// vrai ce champ sans que personne ne voie un `unknown` en aval. La
+    /// documentation décrivait l'intention, le code faisait autre chose.
     public var canBackUp: Bool
 
     public init(

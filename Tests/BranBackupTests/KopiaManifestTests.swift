@@ -326,6 +326,44 @@ struct KopiaManifestTests {
         #expect(proof.rootObjectID == "k348b268a5c35490f1cbaae28a7eb5588")
     }
 
+    /// **Le repli savait retirer le bruit d'avant, jamais celui d'après.** Il
+    /// reconstruisait `lines[startIndex...]` jusqu'à la fin de la sortie, donc
+    /// tout texte placé après le JSON restait dans le payload et faisait
+    /// échouer `JSONDecoder`. Un dépôt sain et vide ressortait « JSON
+    /// tronqué », donc `.unparseable`, donc un rouge sur un écran où rien
+    /// n'est cassé — exactement la confusion que `emptyRepositoryIsNotAnError`
+    /// existe pour empêcher, remise en place par le chemin d'à côté.
+    @Test("Un message de maintenance après le JSON ne le rend pas tronqué")
+    func trailingNoiseAfterJSONIsDropped() throws {
+        let snapshots = try KopiaManifest.decodeSnapshotList(Data("[]\nFinished maintenance.\n".utf8))
+        #expect(snapshots.isEmpty)
+    }
+
+    @Test("Un message après un manifeste complet ne l'empêche pas d'être lu")
+    func trailingNoiseAfterACreateManifestIsDropped() throws {
+        let noisy = Data(
+            (String(decoding: createJSON, as: UTF8.self) + "\nFinished maintenance.\n").utf8
+        )
+        let proof = try KopiaManifest.decodeCreatedSnapshot(noisy)
+        #expect(proof.id == "8145671624282e64839f6e3a98678616")
+    }
+
+    /// Le piège de l'isolation par balayage : un `]` ou un `}` **dans une
+    /// chaîne** n'est pas un délimiteur. S'arrêter dessus couperait le JSON en
+    /// plein milieu, c'est-à-dire reproduirait dans l'autre sens le défaut
+    /// qu'on vient de fermer. Le chemin de source ci-dessous en porte un,
+    /// échappé qui plus est.
+    @Test("Un crochet à l'intérieur d'un nom de dossier ne coupe pas le manifeste")
+    func bracketsInsideStringsDoNotEndTheJSON() throws {
+        let json = Data(#"""
+        [{"id":"x","source":{"host":"h","userName":"u","path":"/p/dossier [bis] \"cité\"/fin"},"startTime":"2026-09-02T12:43:37Z","endTime":"2026-09-02T12:43:37Z","stats":{"errorCount":0,"ignoredErrorCount":0},"rootEntry":{"obj":"k1","summ":{"size":10,"files":1,"dirs":1,"numFailed":0}}}]
+        Finished maintenance.
+        """#.utf8)
+        let proofs = try KopiaManifest.decodeSnapshotList(json)
+        #expect(proofs.count == 1)
+        #expect(proofs.first?.sourcePath == #"/p/dossier [bis] "cité"/fin"#)
+    }
+
     @Test("Une sortie qui ne contient aucun JSON échoue proprement, sans deviner")
     func noJSONAtAllFails() throws {
         // Une vraie ligne d'erreur de kopia, sans aucun JSON — le mauvais mot
@@ -399,5 +437,260 @@ struct FileCountSourceTests {
         #expect(proof.errorCount == 0)
         #expect(proof.ignoredErrorCount == 0)
         #expect(proof.isTrustworthy)
+    }
+}
+
+// MARK: - Les compteurs qui ne comptent rien
+
+/// **Ce que ce fichier protège** : que le diagnostic d'un snapshot incomplet
+/// ne tue pas l'application au moment précis où il allait servir.
+///
+/// `SnapshotProof.missingFileCount` vaut `errorCount + ignoredErrorCount`,
+/// avec l'addition piégeante de Swift. Les deux compteurs venaient tels quels
+/// d'un JSON où `Int64` accepte `9223372036854775807` sans broncher. Un
+/// manifeste de `snapshot list` portant cette valeur deux fois décodait donc
+/// sans erreur, puis arrêtait le processus dès que quelqu'un demandait de
+/// combien de fichiers le snapshot était troué.
+@Suite("Les compteurs d'un manifeste, quand ils ne décrivent aucun snapshot réel")
+struct KopiaManifestCounterTests {
+
+    private func listJSON(errorCount: String, ignoredErrorCount: String) -> Data {
+        Data("""
+        [{"id":"x","source":{"host":"h","userName":"u","path":"/p"},\
+        "startTime":"2026-09-02T12:43:37Z","endTime":"2026-09-02T12:43:37Z",\
+        "stats":{"errorCount":\(errorCount),"ignoredErrorCount":\(ignoredErrorCount)},\
+        "rootEntry":{"obj":"k1","summ":{"size":10,"files":1,"dirs":1,"numFailed":0}}}]
+        """.utf8)
+    }
+
+    @Test("Deux compteurs d'erreur à Int64.max sont refusés, au lieu de faire déborder l'addition")
+    func overflowingErrorCountSumIsRefused() throws {
+        let json = listJSON(
+            errorCount: "9223372036854775807", ignoredErrorCount: "9223372036854775807"
+        )
+        do {
+            _ = try KopiaManifest.decodeSnapshotList(json)
+            Issue.record("aurait dû échouer : la somme des compteurs déborde")
+        } catch let failure as KopiaDecodingFailure {
+            guard case .implausibleCounter(let path, _, _) = failure else {
+                Issue.record("mauvais cas : \(failure)")
+                return
+            }
+            #expect(path == "stats.errorCount + stats.ignoredErrorCount")
+        }
+    }
+
+    @Test("Un compteur d'erreur négatif est refusé, au lieu d'annoncer moins zéro fichier manquant")
+    func negativeErrorCountIsRefused() throws {
+        do {
+            _ = try KopiaManifest.decodeSnapshotList(listJSON(errorCount: "-1", ignoredErrorCount: "0"))
+            Issue.record("aurait dû échouer : compteur négatif")
+        } catch let failure as KopiaDecodingFailure {
+            guard case .implausibleCounter(let path, _, _) = failure else {
+                Issue.record("mauvais cas : \(failure)")
+                return
+            }
+            #expect(path == "stats.errorCount")
+        }
+    }
+
+    /// Sur le chemin `create`, le compteur d'erreurs vient d'ailleurs — le
+    /// refus doit nommer le champ que l'utilisateur peut réellement aller
+    /// regarder dans la sortie, pas celui de l'autre commande.
+    @Test("Sur un manifeste de create, le refus nomme rootEntry.summ.numFailed")
+    func createPathNamesItsOwnField() throws {
+        let json = Data(#"""
+        {"id":"x","source":{"host":"h","userName":"u","path":"/p"},"startTime":"2026-09-02T12:43:37Z","endTime":"2026-09-02T12:43:37Z","rootEntry":{"obj":"k1","summ":{"size":10,"files":1,"dirs":1,"numFailed":-2}}}
+        """#.utf8)
+        do {
+            _ = try KopiaManifest.decodeCreatedSnapshot(json)
+            Issue.record("aurait dû échouer : numFailed négatif")
+        } catch let failure as KopiaDecodingFailure {
+            guard case .implausibleCounter(let path, _, _) = failure else {
+                Issue.record("mauvais cas : \(failure)")
+                return
+            }
+            #expect(path == "rootEntry.summ.numFailed")
+        }
+    }
+
+    @Test("Une taille négative est refusée, au lieu de descendre jusqu'à l'affichage")
+    func negativeSizeIsRefused() throws {
+        let json = Data(#"""
+        {"id":"x","source":{"host":"h","userName":"u","path":"/p"},"startTime":"2026-09-02T12:43:37Z","endTime":"2026-09-02T12:43:37Z","rootEntry":{"obj":"k1","summ":{"size":-1,"files":1,"dirs":1,"numFailed":0}}}
+        """#.utf8)
+        do {
+            _ = try KopiaManifest.decodeCreatedSnapshot(json)
+            Issue.record("aurait dû échouer : taille négative")
+        } catch let failure as KopiaDecodingFailure {
+            guard case .implausibleCounter(let path, _, _) = failure else {
+                Issue.record("mauvais cas : \(failure)")
+                return
+            }
+            #expect(path == "rootEntry.summ.size")
+        }
+    }
+
+    /// La contrepartie à ne pas casser : un compteur grand mais plausible —
+    /// dix mille fichiers verrouillés, cas réel de la politique « ignore read
+    /// errors » de ce dépôt — doit continuer à passer, et à rendre le snapshot
+    /// incomplet plutôt qu'illisible.
+    @Test("Dix mille fichiers ignorés restent lisibles, et rendent le snapshot incomplet")
+    func plausibleLargeCounterStillDecodes() throws {
+        let proofs = try KopiaManifest.decodeSnapshotList(
+            listJSON(errorCount: "0", ignoredErrorCount: "10000")
+        )
+        let proof = try #require(proofs.first)
+        #expect(proof.ignoredErrorCount == 10_000)
+        #expect(proof.missingFileCount == 10_000)
+        #expect(proof.isComplete == false)
+    }
+}
+
+// MARK: - Les garde-fous jamais exercés
+
+/// **Ce que ce fichier protège** : que chaque champ déclaré obligatoire le
+/// reste, et le dise avec son chemin exact.
+///
+/// Les tests de champ absent ne couvraient que `rootEntry.summ.size` et `id`.
+/// Le scénario que ça laisse ouvert : un jour, quelqu'un remplace
+/// `stats.ignoredErrorCount` par un `?? 0` — pour « simplifier » —, kopia omet
+/// ce champ après avoir ignoré des fichiers, la preuve devient « complète », et
+/// **tous les tests restent verts**. C'est la panne des 143 Go pour zéro
+/// snapshot avec un compteur de plus : un vert qui ne prouve rien.
+///
+/// On ne fige donc pas les champs pour la beauté du tableau, mais ceux dont
+/// l'absence changerait une décision : ce que l'écran affiche, ce que
+/// `isComplete` conclut, et à quel dépôt on croit parler.
+@Suite("Chaque champ obligatoire absent nomme son propre chemin")
+struct KopiaManifestRequiredFieldTests {
+
+    /// Un manifeste de `snapshot list` complet, dont chaque test retire une
+    /// clé. Volontairement minimal : ce qui n'y figure pas n'est pas
+    /// obligatoire, et le tableau ci-dessous le dit par construction.
+    private static let completeListEntry = #"""
+    [{"id":"x","source":{"host":"h","userName":"u","path":"/p"},"startTime":"2026-09-02T12:43:37Z","endTime":"2026-09-02T12:43:38Z","stats":{"errorCount":0,"ignoredErrorCount":0},"rootEntry":{"obj":"k1","summ":{"size":10,"files":1,"dirs":1,"numFailed":0}}}]
+    """#
+
+    /// Chaque paire : le fragment JSON à retirer, et le chemin que le refus
+    /// doit nommer.
+    @Test("Retirer une clé obligatoire d'un manifeste de liste nomme exactement ce champ", arguments: [
+        (#""id":"x","#, "id"),
+        (#""source":{"host":"h","userName":"u","path":"/p"},"#, "source"),
+        (#""host":"h","#, "source.host"),
+        (#""userName":"u","#, "source.userName"),
+        (#""path":"/p""#, "source.path"),
+        (#""startTime":"2026-09-02T12:43:37Z","#, "startTime"),
+        (#""endTime":"2026-09-02T12:43:38Z","#, "endTime"),
+        (#""errorCount":0,"#, "stats.errorCount"),
+        (#""ignoredErrorCount":0"#, "stats.ignoredErrorCount"),
+        (#""obj":"k1","#, "rootEntry.obj"),
+        (#""summ":{"size":10,"files":1,"dirs":1,"numFailed":0}"#, "rootEntry.summ"),
+        (#""size":10,"#, "rootEntry.summ.size"),
+        (#""files":1,"#, "rootEntry.summ.files"),
+        (#""dirs":1,"#, "rootEntry.summ.dirs"),
+    ])
+    func removingARequiredListFieldNamesIt(fragment: String, expectedPath: String) throws {
+        let mutilated = Self.completeListEntry.replacingOccurrences(of: fragment, with: "")
+        // Le fragment doit vraiment avoir disparu, sans quoi le test
+        // vérifierait le décodage d'un manifeste intact.
+        #expect(mutilated != Self.completeListEntry)
+        do {
+            _ = try KopiaManifest.decodeSnapshotList(Data(mutilated.utf8))
+            Issue.record("aurait dû échouer : « \(expectedPath) » est absent")
+        } catch let failure as KopiaDecodingFailure {
+            guard case .missingField(let path, _) = failure else {
+                Issue.record("mauvais cas pour « \(expectedPath) » : \(failure)")
+                return
+            }
+            #expect(path == expectedPath)
+        }
+    }
+
+    /// `snapshot create` n'a pas de bloc `stats` : c'est `numFailed` qui porte
+    /// le compteur d'erreurs, et son absence doit être aussi fatale que celle
+    /// d'`errorCount` de l'autre côté. C'est le garde-fou dont la disparition
+    /// laisserait un snapshot troué se présenter comme complet.
+    @Test("Retirer une clé obligatoire d'un manifeste de create nomme exactement ce champ", arguments: [
+        (#""rootEntry":{"obj":"k1","summ":{"size":10,"files":1,"dirs":1,"numFailed":0}}"#, "rootEntry"),
+        (#""numFailed":0"#, "rootEntry.summ.numFailed"),
+        (#""summ":{"size":10,"files":1,"dirs":1,"numFailed":0}"#, "rootEntry.summ"),
+    ])
+    func removingARequiredCreateFieldNamesIt(fragment: String, expectedPath: String) throws {
+        let complete = #"""
+        {"id":"x","source":{"host":"h","userName":"u","path":"/p"},"startTime":"2026-09-02T12:43:37Z","endTime":"2026-09-02T12:43:38Z","rootEntry":{"obj":"k1","summ":{"size":10,"files":1,"dirs":1,"numFailed":0}}}
+        """#
+        let mutilated = complete.replacingOccurrences(of: fragment, with: "")
+        #expect(mutilated != complete)
+        do {
+            _ = try KopiaManifest.decodeCreatedSnapshot(Data(mutilated.utf8))
+            Issue.record("aurait dû échouer : « \(expectedPath) » est absent")
+        } catch let failure as KopiaDecodingFailure {
+            guard case .missingField(let path, _) = failure else {
+                Issue.record("mauvais cas pour « \(expectedPath) » : \(failure)")
+                return
+            }
+            #expect(path == expectedPath)
+        }
+    }
+
+    /// Le statut du dépôt décide de ce à quoi on croit parler : le seau,
+    /// l'endpoint, et surtout l'identité de la machine, dont `SourceCoverage`
+    /// se sert pour filtrer les preuves. Un champ manquant qui se replierait
+    /// sur une valeur par défaut ferait comparer les snapshots d'un autre Mac
+    /// aux dossiers de celui-ci.
+    @Test("Retirer une clé obligatoire du statut du dépôt nomme exactement ce champ", arguments: [
+        (#""uniqueIDHex":"ac29","#, "uniqueIDHex"),
+        (#""hostname":"h","#, "clientOptions.hostname"),
+        (#""username":"u""#, "clientOptions.username"),
+        (#""bucket":"seau","#, "storage.config.bucket"),
+        (#""endpoint":"h:9000""#, "storage.config.endpoint"),
+        (#""type":"s3","#, "storage.type"),
+        (#""encryption":"AES256-GCM-HMAC-SHA256","#, "contentFormat.encryption"),
+        (#""hash":"BLAKE2B-256-128""#, "contentFormat.hash"),
+        (#""clientOptions":{"hostname":"h","username":"u"},"#, "clientOptions"),
+        (#""contentFormat":{"encryption":"AES256-GCM-HMAC-SHA256","hash":"BLAKE2B-256-128"}"#, "contentFormat"),
+    ])
+    func removingARequiredStatusFieldNamesIt(fragment: String, expectedPath: String) throws {
+        let complete = #"""
+        {"uniqueIDHex":"ac29","clientOptions":{"hostname":"h","username":"u"},"storage":{"type":"s3","config":{"bucket":"seau","endpoint":"h:9000"}},"contentFormat":{"encryption":"AES256-GCM-HMAC-SHA256","hash":"BLAKE2B-256-128"}}
+        """#
+        let mutilated = complete.replacingOccurrences(of: fragment, with: "")
+        #expect(mutilated != complete)
+        do {
+            _ = try KopiaManifest.decodeRepositoryStatus(Data(mutilated.utf8))
+            Issue.record("aurait dû échouer : « \(expectedPath) » est absent")
+        } catch let failure as KopiaDecodingFailure {
+            guard case .missingField(let path, _) = failure else {
+                Issue.record("mauvais cas pour « \(expectedPath) » : \(failure)")
+                return
+            }
+            #expect(path == expectedPath)
+        }
+    }
+
+    /// Les dates ne sont pas seulement obligatoires, elles doivent être
+    /// lisibles : une date remplacée par `Date()` afficherait dans l'historique
+    /// une heure qui n'est jamais arrivée.
+    @Test("Une date présente mais illisible est un refus nommé, jamais une date inventée", arguments: [
+        (#""startTime":"2026-09-02T12:43:37Z""#, #""startTime":"hier matin""#, "startTime"),
+        (#""endTime":"2026-09-02T12:43:38Z""#, #""endTime":"hier soir""#, "endTime"),
+    ])
+    func unreadableTimestampIsNamed(original: String, replacement: String, expectedPath: String) throws {
+        let complete = #"""
+        {"id":"x","source":{"host":"h","userName":"u","path":"/p"},"startTime":"2026-09-02T12:43:37Z","endTime":"2026-09-02T12:43:38Z","rootEntry":{"obj":"k1","summ":{"size":10,"files":1,"dirs":1,"numFailed":0}}}
+        """#
+        let mutilated = complete.replacingOccurrences(of: original, with: replacement)
+        #expect(mutilated != complete)
+        do {
+            _ = try KopiaManifest.decodeCreatedSnapshot(Data(mutilated.utf8))
+            Issue.record("aurait dû échouer : « \(expectedPath) » est illisible")
+        } catch let failure as KopiaDecodingFailure {
+            guard case .unparsableTimestamp(let path, _) = failure else {
+                Issue.record("mauvais cas pour « \(expectedPath) » : \(failure)")
+                return
+            }
+            #expect(path == expectedPath)
+        }
     }
 }

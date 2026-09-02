@@ -37,8 +37,27 @@ public enum ChainEvaluator {
         // Ici, plus aucun `down` : ce qui reste de non vert est mou par
         // nature (en cours, inconnu, dégradé), donc c'est l'ordre de la
         // chaîne — et lui seul — qui choisit lequel commenter.
-        if let firstIssue = chain.first(where: { $0.state != .up }) {
-            switch firstIssue.state {
+        //
+        // **Mais tous les états mous ne donnent pas le même droit.** `degraded`
+        // autorise la sauvegarde, `unknown` et `connecting` l'interdisent. Se
+        // contenter du premier non-vert faisait donc dépendre ce droit de
+        // l'ordre d'apparition : sur la chaîne
+        //
+        //     tailscale up · pair up · port up · santé MinIO **degraded**
+        //     · seau up · dépôt Kopia **unknown**
+        //
+        // le `switch` tombait sur `degraded` en quatrième position, rendait
+        // `canBackUp: true`, et personne ne regardait jamais le sixième
+        // maillon — celui qui n'a jamais été sondé, ou dont la mesure est
+        // périmée. C'est la panne des 35 jours reconstruite *à l'intérieur*
+        // du verdict écrit pour la fermer : une ligne lente en amont suffisait
+        // à faire passer une ignorance en aval pour un feu vert.
+        //
+        // On cherche donc d'abord un bloquant dans **toute** la chaîne, et
+        // seulement ensuite un dégradé. L'ordre de la chaîne continue de
+        // choisir lequel commenter, mais à l'intérieur des seuls bloquants.
+        if let blocking = chain.first(where: { $0.state == .unknown || $0.state == .connecting }) {
+            switch blocking.state {
             case .connecting:
                 // Une ouverture de dépôt depuis l'Indonésie peut légitimement
                 // prendre plusieurs dizaines de secondes : coller le mot
@@ -47,7 +66,7 @@ public enum ChainEvaluator {
                 return ChainVerdict(
                     results: chain,
                     firstFailure: nil,
-                    headline: "Connexion en cours — \(firstIssue.diagnostic)",
+                    headline: "Connexion en cours — \(blocking.diagnostic)",
                     canBackUp: false
                 )
             case .unknown:
@@ -59,48 +78,35 @@ public enum ChainEvaluator {
                 return ChainVerdict(
                     results: chain,
                     firstFailure: nil,
-                    headline: firstIssue.diagnostic,
+                    headline: blocking.diagnostic,
                     canBackUp: false
                 )
-            case .degraded:
-                // Seul cas qui autorise `canBackUp` sans que tout soit vert :
-                // une ligne lente sauvegarde quand même, elle met plus de
-                // temps. Le bandeau le dit pour que « dégradé » ne se lise
-                // pas comme « en panne ».
-                return ChainVerdict(
-                    results: chain,
-                    firstFailure: nil,
-                    headline: "Ligne dégradée — \(firstIssue.diagnostic)",
-                    canBackUp: true
-                )
-            case .up, .down:
-                // Inatteignable aujourd'hui — `up` est écarté par le filtre
-                // `!= .up`, et `down` a déjà provoqué un retour plus haut.
-                //
-                // **Et pourtant on ne plante pas ici.** Un `fatalError` y était,
-                // au motif honorable qu'un `default:` silencieux serait pire.
-                // Sauf que cette fonction tourne aussi dans le job launchd, sans
-                // personne devant l'écran : un plantage y devient une
-                // sauvegarde qui ne s'est jamais lancée, sans trace et sans
-                // message. On aurait remplacé un mensonge par un silence, ce
-                // qui est le même défaut sous un autre nom.
-                //
-                // La sortie sûre n'a donc qu'une seule contrainte : elle ne
-                // doit pas pouvoir mentir. Refuser de sauvegarder et le dire
-                // franchement satisfait ça — le jour où un état s'ajoute à
-                // `LinkState` sans passer par ici, l'utilisateur voit une phrase
-                // étrange plutôt qu'un écran vide, et nous un rapport.
-                return ChainVerdict(
-                    results: chain,
-                    firstFailure: nil,
-                    headline: """
-                        État de maillon imprévu (\(firstIssue.state.rawValue)) \
-                        sur « \(firstIssue.link.rawValue) » — par précaution, \
-                        aucune sauvegarde n'est lancée.
-                        """,
-                    canBackUp: false
-                )
+            case .up, .down, .degraded:
+                // Inatteignable : le filtre juste au-dessus ne retient que
+                // `unknown` et `connecting`. Voir plus bas pour la raison
+                // pour laquelle ces branches-là ne plantent pas.
+                return unexpectedState(blocking, chain: chain)
             }
+        }
+
+        // Plus aucun bloquant : un maillon dégradé est le seul cas qui
+        // autorise `canBackUp` sans que tout soit vert. Une ligne lente
+        // sauvegarde quand même, elle met plus de temps. Le bandeau le dit
+        // pour que « dégradé » ne se lise pas comme « en panne ».
+        if let degraded = chain.first(where: { $0.state == .degraded }) {
+            return ChainVerdict(
+                results: chain,
+                firstFailure: nil,
+                headline: "Ligne dégradée — \(degraded.diagnostic)",
+                canBackUp: true
+            )
+        }
+
+        // Inatteignable aujourd'hui : les cinq états de `LinkState` sont tous
+        // traités au-dessus. Cette ligne existe pour le jour où un sixième
+        // s'ajoute sans passer par ici.
+        if let unexpected = chain.first(where: { $0.state != .up }) {
+            return unexpectedState(unexpected, chain: chain)
         }
 
         // Aucun maillon non vert : les six sont mesurés, frais, et bons.
@@ -109,6 +115,37 @@ public enum ChainEvaluator {
             firstFailure: nil,
             headline: "La chaîne est verte : les six maillons répondent.",
             canBackUp: true
+        )
+    }
+
+    /// La sortie de secours quand un maillon porte un état que ce fichier ne
+    /// sait pas classer.
+    ///
+    /// **On ne plante pas.** Un `fatalError` était ici, au motif honorable
+    /// qu'un `default:` silencieux serait pire. Sauf que cette fonction tourne
+    /// aussi dans le job launchd, sans personne devant l'écran : un plantage y
+    /// devient une sauvegarde qui ne s'est jamais lancée, sans trace et sans
+    /// message. On aurait remplacé un mensonge par un silence, ce qui est le
+    /// même défaut sous un autre nom.
+    ///
+    /// La sortie sûre n'a donc qu'une seule contrainte : elle ne doit pas
+    /// pouvoir mentir. Refuser de sauvegarder et le dire franchement satisfait
+    /// ça — le jour où un état s'ajoute à `LinkState` sans passer par ici,
+    /// l'utilisateur voit une phrase étrange plutôt qu'un écran vide, et nous
+    /// un rapport.
+    private static func unexpectedState(
+        _ result: LinkProbeResult,
+        chain: [LinkProbeResult]
+    ) -> ChainVerdict {
+        ChainVerdict(
+            results: chain,
+            firstFailure: nil,
+            headline: """
+                État de maillon imprévu (\(result.state.rawValue)) \
+                sur « \(result.link.rawValue) » — par précaution, \
+                aucune sauvegarde n'est lancée.
+                """,
+            canBackUp: false
         )
     }
 

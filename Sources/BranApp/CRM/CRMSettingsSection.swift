@@ -19,6 +19,22 @@ struct CRMSettingsSection: View {
                 // `CRMConfiguration.loadToken()` pour ce que ça évite.
                 .onAppear { configuration.loadToken() }
 
+            // **Une adresse refusée doit se voir ici, et pas ailleurs.**
+            //
+            // bran n'accepte que HTTPS et un hôte du domaine du CRM : c'est ce
+            // qui empêche une préférence réécrite d'obtenir l'envoi du jeton du
+            // Trousseau à l'hôte de son choix. Sans cette ligne, le refus se
+            // manifesterait par un CRM « non configuré » que rien n'explique —
+            // panneau des rendez-vous non monté, donc jamais rafraîchi, donc
+            // aucun message nulle part. Ce cercle-là, ce dépôt l'a déjà payé
+            // une fois.
+            if let problem = configuration.endpointProblem {
+                Text("Adresse refusée — \(problem) bran n'envoie l'audio de vos clients qu'à des origines connues.")
+                    .font(Type.cardBody)
+                    .foregroundStyle(Palette.broken)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             SecureField("Jeton d'enregistrement", text: $configuration.token, prompt: Text("rec_…"))
                 .textContentType(.password)
 
