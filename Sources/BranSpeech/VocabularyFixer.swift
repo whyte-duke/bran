@@ -88,6 +88,12 @@ public struct VocabularyFixer: Codable, Equatable, Sendable {
     /// n'est pas stable en Swift : deux règles de même longueur pour la même
     /// aiguille rendaient un résultat qui dépendait de l'implémentation du tri.
     /// L'index de déclaration départage.
+    ///
+    /// **Ce que la justesse coûte, mesuré** : sur un texte de 1 848 caractères
+    /// et les onze règles de départ, 3,63 ms contre 1,95 ms pour la version
+    /// fausse — le balayage interroge chaque règle à chaque début de mot au lieu
+    /// de faire onze recherches libres. C'est payé une fois par dictée, après
+    /// une transcription qui dure des secondes, et hors du chemin du collage.
     public func apply(to text: String) -> String {
         let usable = rules.filter(\.isUsable)
         guard usable.isEmpty == false else { return text }
