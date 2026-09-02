@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import UserNotifications
 
 /// Propose, ne décide pas.
@@ -8,6 +9,7 @@ import UserNotifications
 /// faire dans un fichier. La détection sert donc à *proposer*, jamais à
 /// déclencher.
 @MainActor
+@Observable
 final class NotificationService: NSObject {
 
     // `nonisolated` : les callbacks de UNUserNotificationCenterDelegate
@@ -17,8 +19,33 @@ final class NotificationService: NSObject {
     nonisolated static let ignoreAction = "bran.action.ignore"
 
     /// Appelé quand l'utilisateur choisit « Démarrer » depuis la notification.
+    @ObservationIgnored
     var onStartRequested: (@MainActor () -> Void)?
 
+    /// **Ce que personne ne savait, et qui rendait des alertes muettes.**
+    ///
+    /// Le résultat de `requestAuthorization` était jeté (`_ = try? await …`) et
+    /// l'état n'était relu nulle part. Une fois les notifications refusées —
+    /// une seule fois, au premier lancement, souvent par réflexe — bran
+    /// continuait à poster ses propositions de réunion **et ses alertes de
+    /// sauvegarde** dans le vide, sans qu'aucun écran ne le dise.
+    ///
+    /// C'est particulièrement coûteux pour la sauvegarde : l'alerte de retard
+    /// est le seul mécanisme qui doit révéler qu'un Mac n'est plus sauvegardé.
+    /// Une alerte qu'on ne peut pas recevoir ne protège de rien, et son
+    /// silence ressemble exactement à « tout va bien ».
+    enum Authorization: Equatable, Sendable {
+        case granted
+        case denied
+        case notDetermined
+    }
+
+    private(set) var authorization: Authorization = .notDetermined
+
+    /// Vrai quand une notification postée a une chance d'être vue.
+    var canDeliver: Bool { authorization == .granted }
+
+    @ObservationIgnored
     private let center = UNUserNotificationCenter.current()
 
     func configure() {
@@ -42,12 +69,68 @@ final class NotificationService: NSObject {
         )
         center.setNotificationCategories([category])
 
-        Task {
-            _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        // **On ne demande plus l'autorisation au lancement.**
+        //
+        // Elle était réclamée dès le démarrage, avant que quoi que ce soit ne
+        // la justifie : une fenêtre système sans contexte, à laquelle on
+        // répond non par réflexe, et qu'aucun écran ne permettait ensuite de
+        // reprendre. macOS ne repose jamais la question.
+        //
+        // Elle est maintenant demandée au premier moment où elle sert
+        // réellement — voir `requestIfNeeded()` — c'est-à-dire quand une
+        // réunion est proposée ou qu'une alerte de sauvegarde part. À ce
+        // moment-là, la question a une réponse évidente.
+        Task { await refresh() }
+    }
+
+    /// Relit l'état réel auprès du système.
+    ///
+    /// À appeler au retour au premier plan : l'utilisateur peut avoir changé
+    /// d'avis dans les Réglages système, et un état mis en cache pour toujours
+    /// est exactement le défaut qu'on corrige ici.
+    func refresh() async {
+        let settings = await center.notificationSettings()
+        authorization = switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral: .granted
+        case .denied: .denied
+        case .notDetermined: .notDetermined
+        @unknown default: .notDetermined
         }
     }
 
+    /// Demande l'autorisation si — et seulement si — la question n'a jamais
+    /// été posée. Rend `true` quand une notification peut désormais partir.
+    ///
+    /// Après un refus, macOS ne réaffiche rien : il n'y a plus qu'à ouvrir les
+    /// Réglages système, ce que l'écran des autorisations doit proposer. Ce
+    /// n'est pas fait ici, parce qu'ouvrir une fenêtre de Réglages au moment
+    /// où une réunion démarre serait pire que le silence.
+    @discardableResult
+    func requestIfNeeded() async -> Bool {
+        await refresh()
+        guard authorization == .notDetermined else { return authorization == .granted }
+        _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        await refresh()
+        return authorization == .granted
+    }
+
     func proposeRecording(title: String?) {
+        Task { await proposeRecordingAsync(title: title) }
+    }
+
+    private func proposeRecordingAsync(title: String?) async {
+        // La première proposition est le moment où la notification devient
+        // utile : c'est là qu'on demande, pas au lancement.
+        guard await requestIfNeeded() else {
+            // Le silence ne doit pas être silencieux pour nous : sans cette
+            // trace, « bran ne m'a rien proposé » est indiscernable de « bran
+            // n'a pas vu la réunion ».
+            FeatureLog.record(
+                "proposition de réunion non remise — notifications \(authorization == .denied ? "refusées" : "indisponibles")"
+            )
+            return
+        }
+
         let content = UNMutableNotificationContent()
         content.title = "Réunion Meet détectée"
         content.body = title.map { "« \($0) » — enregistrer ?" } ?? "Enregistrer cette réunion ?"
@@ -60,7 +143,7 @@ final class NotificationService: NSObject {
             content: content,
             trigger: nil
         )
-        center.add(request)
+        try? await center.add(request)
     }
 
     func withdrawProposals() {
