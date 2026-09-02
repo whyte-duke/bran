@@ -190,6 +190,12 @@ public enum KopiaManifest {
         let dirCount: Int
         let errorCount: Int
         let ignoredErrorCount: Int
+        // Le chemin JSON d'où vient le compteur d'erreurs diffère selon la
+        // commande : `stats.errorCount` pour `snapshot list`,
+        // `rootEntry.summ.numFailed` pour `snapshot create`. On le retient
+        // pour que le refus plus bas nomme le champ que l'utilisateur peut
+        // effectivement aller regarder.
+        let errorCountPath: String
 
         if let stats = raw.stats {
             // La taille, les fichiers et les dossiers viennent de `summ` — ce
@@ -224,6 +230,7 @@ public enum KopiaManifest {
             dirCount = dirs
             errorCount = errors
             ignoredErrorCount = ignored
+            errorCountPath = "stats.errorCount"
         } else {
             guard let summ = rootEntry.summ else {
                 throw KopiaDecodingFailure.missingField(path: "rootEntry.summ", context: context)
@@ -262,6 +269,46 @@ public enum KopiaManifest {
             // quoi qu'il arrive tant qu'elle n'a pas été relue par `list`, seul
             // chemin qui rapporte ce compteur pour de vrai.
             ignoredErrorCount = 0
+            errorCountPath = "rootEntry.summ.numFailed"
+        }
+
+        // **Le type ne suffit pas, et l'aval en meurt.** `Int64` accepte `-1`
+        // et `Int64.max` sans broncher, mais `SnapshotProof` fait ensuite
+        // `errorCount + ignoredErrorCount` avec l'addition piégeante de Swift
+        // pour rendre `missingFileCount`. Un manifeste de `snapshot list`
+        // portant
+        //
+        //     "stats":{"errorCount":9223372036854775807,
+        //              "ignoredErrorCount":9223372036854775807}
+        //
+        // décodait donc sans erreur, puis arrêtait l'application au moment
+        // exact où `BackupMachine.partialSnapshotSummary` allait annoncer le
+        // snapshot incomplet — c'est-à-dire au seul moment où ce compteur sert
+        // à quelque chose.
+        //
+        // On refuse ici plutôt que de saturer : un compteur négatif ou une
+        // somme qui déborde ne décrit aucun snapshot réel, et le contrat de ce
+        // fichier interdit d'interpréter au bénéfice du doute. Une future
+        // version de kopia qui dépasserait vraiment la borne serait refusée
+        // explicitement, avec le chemin du champ en cause.
+        for (path, value) in [
+            ("rootEntry.summ.size", Int64(totalSize)),
+            ("rootEntry.summ.files", Int64(fileCount)),
+            ("rootEntry.summ.dirs", Int64(dirCount)),
+            (errorCountPath, Int64(errorCount)),
+            ("stats.ignoredErrorCount", Int64(ignoredErrorCount)),
+        ] where value < 0 {
+            throw KopiaDecodingFailure.implausibleCounter(
+                path: path, value: String(value), context: context
+            )
+        }
+        let (_, sumOverflowed) = errorCount.addingReportingOverflow(ignoredErrorCount)
+        if sumOverflowed {
+            throw KopiaDecodingFailure.implausibleCounter(
+                path: "\(errorCountPath) + stats.ignoredErrorCount",
+                value: "\(errorCount) + \(ignoredErrorCount)",
+                context: context
+            )
         }
 
         return SnapshotProof(
@@ -498,6 +545,19 @@ public enum KopiaDecodingFailure: Error, Equatable, Sendable, CustomStringConver
     /// Une date ne suit aucun des formats connus (0 à 9 décimales, suffixe `Z`).
     case unparsableTimestamp(path: String, value: String)
 
+    /// Un compteur ou une taille est du bon type JSON mais désigne une
+    /// quantité qui n'existe pas : un nombre de fichiers négatif, une taille
+    /// négative, ou deux compteurs d'erreur dont la somme déborde `Int`.
+    ///
+    /// **Ce cas existe parce que le type ne suffit pas.** `Int64` accepte
+    /// `-1` et `9223372036854775807` sans broncher ; c'est l'aval qui tombe.
+    /// Un manifeste portant `"errorCount":9223372036854775807` et
+    /// `"ignoredErrorCount":9223372036854775807` décodait sans erreur, puis
+    /// `SnapshotProof.missingFileCount` faisait l'addition et arrêtait
+    /// l'application — au moment précis où elle allait annoncer un snapshot
+    /// incomplet. Refuser ici, une fois, vaut mieux que se défendre partout.
+    case implausibleCounter(path: String, value: String, context: String)
+
     public var description: String {
         switch self {
         case .emptyOutput(let context):
@@ -512,6 +572,9 @@ public enum KopiaDecodingFailure: Error, Equatable, Sendable, CustomStringConver
             "\(context) : le champ « \(path) » est absent ou du mauvais type."
         case .unparsableTimestamp(let path, let value):
             "Date illisible pour « \(path) » : « \(value) »."
+        case .implausibleCounter(let path, let value, let context):
+            "\(context) : le champ « \(path) » annonce « \(value) », "
+                + "qui ne désigne aucune quantité possible."
         }
     }
 
