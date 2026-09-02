@@ -1,3 +1,4 @@
+import BranCore
 import Foundation
 import Observation
 
@@ -23,8 +24,48 @@ final class CRMConfiguration {
         static let token = "recorderToken"
     }
 
+    /// Le compte du Trousseau où vit le jeton de cette adresse.
+    ///
+    /// L'hôte de production garde le compte historique — `recorderToken` — pour
+    /// que les jetons déjà enregistrés continuent d'être trouvés sans que
+    /// personne n'ait à ressaisir quoi que ce soit. Tout autre hôte a le sien.
+    ///
+    /// Une adresse refusée par `CRMOriginPolicy` retombe sur le compte de
+    /// production : elle ne sert de toute façon à rien, `endpoint` est alors
+    /// `nil` et aucun client n'est construit.
+    private static func tokenAccount(for baseURL: String) -> String {
+        guard let host = CRMOriginPolicy.crmBase(baseURL).url?.host()?.lowercased(),
+              host != URL(string: productionBaseURL)?.host()
+        else { return Key.token }
+        return "\(Key.token)@\(host)"
+    }
+
+    /// L'adresse de production. Sert de valeur par défaut **et** de repère pour
+    /// le compte du Trousseau : le jeton déjà enregistré par les versions
+    /// précédentes est celui de cet hôte-là, et il doit le rester.
+    static let productionBaseURL = "https://crm.castral.fr"
+
     var baseURL: String {
-        didSet { UserDefaults.standard.set(baseURL, forKey: Key.baseURL) }
+        didSet {
+            UserDefaults.standard.set(baseURL, forKey: Key.baseURL)
+
+            // **Changer d'hôte change de jeton.** C'est la deuxième moitié du
+            // correctif d'origine, et elle est ici plutôt que dans une
+            // vérification : le jeton est rangé dans le Trousseau sous un compte
+            // qui porte le nom de l'hôte, donc une adresse réécrite ne désigne
+            // plus le même secret. Un processus local qui modifie la préférence
+            // n'obtient pas un envoi du jeton ailleurs, il obtient « pas de
+            // jeton » — et l'utilisateur légitime qui bascule sur une recette
+            // saisit le sien une fois, puis retrouve celui de la production en
+            // revenant.
+            let previous = Self.tokenAccount(for: oldValue)
+            let current = Self.tokenAccount(for: baseURL)
+            guard previous != current else { return }
+            storedToken = ""
+            isLoaded = false
+            tokenProblem = nil
+            tokenIsStored = Keychain.exists(current)
+        }
     }
 
     var author: Author {
@@ -70,7 +111,7 @@ final class CRMConfiguration {
             // Écrire vaut lecture : la valeur en mémoire est désormais celle du
             // Trousseau, et la relire par-dessus n'apprendrait rien.
             isLoaded = true
-            tokenProblem = Keychain.set(newValue, for: Key.token).problem
+            tokenProblem = Keychain.set(newValue, for: Self.tokenAccount(for: baseURL)).problem
             tokenIsStored = newValue.isEmpty == false
         }
     }
@@ -135,7 +176,7 @@ final class CRMConfiguration {
     func loadToken() {
         guard isLoaded == false else { return }
         isLoaded = true
-        let stored = Keychain.get(Key.token)
+        let stored = Keychain.get(Self.tokenAccount(for: baseURL))
 
         // **La lecture qui échoue alors que l'élément existe se dit.**
         //
@@ -166,13 +207,14 @@ final class CRMConfiguration {
 
     init() {
         let defaults = UserDefaults.standard
-        baseURL = defaults.string(forKey: Key.baseURL) ?? "https://crm.castral.fr"
+        let address = defaults.string(forKey: Key.baseURL) ?? Self.productionBaseURL
+        baseURL = address
         author = defaults.string(forKey: Key.author).flatMap(Author.init(rawValue:)) ?? .martial
         maxSpeakers = defaults.object(forKey: Key.maxSpeakers) as? Int ?? 3
         autoUpload = defaults.object(forKey: Key.autoUpload) as? Bool ?? false
         // La seule question posée au Trousseau au lancement, et elle ne réclame
         // aucune autorisation : « y a-t-il un élément ? », jamais « donne-le ».
-        tokenIsStored = Keychain.exists(Key.token)
+        tokenIsStored = Keychain.exists(Self.tokenAccount(for: address))
 
     }
 
@@ -201,13 +243,23 @@ final class CRMConfiguration {
     func logConfiguration() {
         FeatureLog.record(
             "CRM — jeton dans le Trousseau : \(tokenIsStored), adresse : « \(baseURL) », "
-            + "hôte reconnu : \(URL(string: baseURL)?.host != nil), configuré : \(isConfigured)"
+            + "origine autorisée : \(endpointProblem ?? "oui"), configuré : \(isConfigured)"
         )
     }
 
     var isConfigured: Bool {
         let looksUsable = isLoaded ? storedToken.hasPrefix("rec_") : tokenIsStored
-        return looksUsable && URL(string: baseURL)?.host != nil
+        return looksUsable && endpoint != nil
+    }
+
+    /// Pourquoi l'adresse saisie est refusée, ou `nil` si elle convient.
+    ///
+    /// Affiché dans les réglages : une adresse refusée sans phrase pour le dire
+    /// donnerait un CRM « non configuré » que rien n'explique, exactement le
+    /// cercle qu'on a déjà payé une fois — panneau non monté, donc `refresh()`
+    /// jamais appelé, donc message d'erreur jamais affiché.
+    var endpointProblem: String? {
+        CRMOriginPolicy.crmBase(baseURL).refusal?.message
     }
 
     /// **Le seul chemin qui a le droit de réclamer le Trousseau**, avec l'écran
@@ -219,19 +271,26 @@ final class CRMConfiguration {
         return CRMClient(endpoint: endpoint, token: token)
     }
 
+    /// L'adresse du CRM, **si elle fait partie des origines autorisées**.
+    ///
+    /// La validation ne vit pas ici mais dans `CRMOriginPolicy`, avec ses tests,
+    /// et son en-tête raconte l'attaque : `baseURL` est dans les préférences, où
+    /// un processus local écrit sans rien demander ; le jeton est dans le
+    /// Trousseau, où le même processus ne peut pas lire. Il lui suffisait donc
+    /// d'écrire l'adresse de son choix pour que bran lise le secret **pour lui**
+    /// et l'envoie dans `x-castral-recorder-token` à l'hôte indiqué.
+    ///
+    /// Le jeton reste dans le Trousseau et n'est jamais effacé au passage : une
+    /// adresse refusée rend simplement `nil`, donc aucun client, donc aucun
+    /// appel — et remettre la bonne adresse rétablit tout sans avoir à
+    /// ressaisir quoi que ce soit.
     var endpoint: URL? {
-        URL(string: baseURL.trimmingCharacters(in: .whitespaces).trimmingSuffix("/"))
+        CRMOriginPolicy.crmBase(baseURL).url
     }
 
     /// Le CRM ne renvoie `crm_url` que si `NEXT_PUBLIC_APP_URL` est définie côté
     /// serveur — elle ne l'est pas. On reconstruit, comme le contrat le prévoit.
     func dashboardURL(companyID: String) -> URL? {
         endpoint?.appending(path: "sales/dashboard/\(companyID)")
-    }
-}
-
-private extension String {
-    func trimmingSuffix(_ suffix: String) -> String {
-        hasSuffix(suffix) ? String(dropLast(suffix.count)) : self
     }
 }
