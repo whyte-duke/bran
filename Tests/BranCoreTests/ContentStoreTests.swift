@@ -1162,3 +1162,114 @@ struct ContentStoreBlobEscapeTests {
         #expect(relue.blobFileName == nil, "un nom qui s'échappe a été conservé")
     }
 }
+
+// MARK: - Une suppression qui échoue ne ressemble pas à une réussite
+
+/// **Ce que ce fichier protège** : que l'écran ne puisse pas annoncer une
+/// suppression que le disque a refusée.
+///
+/// `delete` faisait `try? FileManager.default.removeItem(…)` puis retirait
+/// l'entrée de `entries` quoi qu'il arrive. Volume externe démonté, droits
+/// retirés, disque en lecture seule : la ligne disparaissait de l'écran, le
+/// fichier restait, et l'entrée revenait à la relecture suivante sans un mot.
+///
+/// Le cas qui donne son poids au défaut : quelqu'un supprime une entrée de
+/// presse-papiers contenant un mot de passe, voit la ligne partir, et croit
+/// l'avoir fait.
+@Suite("Le disque a le dernier mot sur les suppressions")
+@MainActor
+struct ContentStoreFailedDeletionTests {
+
+    private static let epoch = Date(timeIntervalSince1970: 1_700_000_000)
+
+    /// Le nom exact que le magasin compose — `<horodatage>-<UUID>.json`.
+    ///
+    /// Écrire le sidecar sous un autre nom ne casse pas la relecture, qui
+    /// parcourt tous les `.json` du dossier : c'est ce qui a fait passer une
+    /// première version de ce test sur du vide. `delete`, elle, **recompose**
+    /// le nom, ne trouvait rien, et concluait « déjà supprimé ».
+    private func sidecarName(for entry: Note) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd'T'HH-mm-ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return "\(formatter.string(from: entry.createdAt))-\(entry.id.uuidString).json"
+    }
+
+    private func makeStore(root: URL) -> ContentStore<Note> {
+        ContentStore(
+            root: { root },
+            shape: ContentShape(
+                folderName: "Notes",
+                blobExtension: "bin",
+                purge: .wholeEntry,
+                inaccessibleFolderMessage: "Dossier des notes inaccessible",
+                blobFailureMessage: "Fichier non conservé"
+            ),
+            retention: BlobAge(lifetime: 86_400)
+        )
+    }
+
+    /// Le dossier est mis en lecture seule : sous macOS, retirer un fichier
+    /// exige le droit d'écriture sur son **dossier**, pas sur le fichier.
+    @Test("Une suppression refusée par le disque garde l'entrée à l'écran, et le dit")
+    func refusedDeletionKeepsTheEntryAndSaysSo() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "bran-suppr-\(UUID().uuidString)")
+        let notes = root.appending(path: "Notes")
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: notes.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let entree = Note(createdAt: Self.epoch, text: "un secret")
+        let encodeur = JSONEncoder()
+        encodeur.dateEncodingStrategy = .secondsSince1970
+        let sidecar = notes.appending(path: sidecarName(for: entree))
+        try encodeur.encode(entree).write(to: sidecar)
+
+        let store = makeStore(root: root)
+        _ = await store.reload()
+        #expect(await store.entries.count == 1, "l'entrée n'a pas été relue : le test ne prouverait rien")
+
+        // Lecture et exécution seulement : le dossier refuse qu'on en retire
+        // quoi que ce soit.
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: notes.path)
+
+        let supprime = await store.delete(entree)
+
+        #expect(supprime == false, "la suppression a été annoncée réussie")
+        #expect(await store.entries.count == 1, "l'entrée a quitté l'écran alors que le fichier est resté")
+        #expect(
+            FileManager.default.fileExists(atPath: sidecar.path(percentEncoded: false)),
+            "le sidecar aurait dû rester : le test ne mesure pas ce qu'il croit"
+        )
+        #expect(await store.problem != nil, "l'échec n'est dit nulle part")
+    }
+
+    @Test("Un sidecar déjà absent laisse quand même partir l'entrée")
+    func alreadyMissingSidecarStillRemovesTheEntry() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "bran-suppr-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let notes = root.appending(path: "Notes")
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+
+        let entree = Note(createdAt: Self.epoch, text: "x")
+        let encodeur = JSONEncoder()
+        encodeur.dateEncodingStrategy = .secondsSince1970
+        let sidecar = notes.appending(path: sidecarName(for: entree))
+        try encodeur.encode(entree).write(to: sidecar)
+
+        let store = makeStore(root: root)
+        _ = await store.reload()
+        #expect(await store.entries.count == 1)
+
+        // Supprimé dans le Finder entre-temps — le cas de deux clics de suite,
+        // ou d'un dossier que quelqu'un range à la main.
+        try FileManager.default.removeItem(at: sidecar)
+
+        #expect(await store.delete(entree) == true)
+        #expect(await store.entries.isEmpty)
+    }
+}

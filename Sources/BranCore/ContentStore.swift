@@ -625,11 +625,41 @@ public final class ContentStore<Entry: ContentEntry> {
         if write(entry) { writeFailure = nil }
     }
 
-    public func delete(_ entry: Entry) async {
+    /// **Une suppression qui échoue ne doit pas ressembler à une suppression
+    /// qui réussit.**
+    ///
+    /// Le `try?` retirait l'entrée de `entries` quoi qu'il arrive : volume
+    /// externe démonté, droits retirés, disque en lecture seule, et la ligne
+    /// disparaissait de l'écran pendant que le fichier restait sur le disque.
+    /// Elle revenait à la relecture suivante, sans explication, et — c'est le
+    /// cas qui compte — quelqu'un qui vient de supprimer une entrée de
+    /// presse-papiers contenant un mot de passe croyait l'avoir fait.
+    ///
+    /// Le fichier lourd est retiré d'abord, mais c'est le **sidecar** qui
+    /// décide : lui seul porte l'entrée. Tant qu'il est là, l'entrée existe.
+    ///
+    /// La suppression reste définitive plutôt que de passer par la Corbeille.
+    /// Le contraire se défend pour un geste manuel — c'est réversible, et
+    /// c'est la convention macOS — mais pas ici : ce magasin sert aussi
+    /// l'historique du presse-papiers, et déplacer un secret dans la Corbeille
+    /// l'y laisse. Le choix mérite d'être repris avec un vrai arbitrage
+    /// produit, pas glissé dans un correctif.
+    @discardableResult
+    public func delete(_ entry: Entry) async -> Bool {
         removeBlob(of: entry)
-        try? FileManager.default.removeItem(at: sidecarURL(for: entry))
+        do {
+            try FileManager.default.removeItem(at: sidecarURL(for: entry))
+        } catch CocoaError.fileNoSuchFile {
+            // Déjà parti — supprimé dans le Finder, ou deux clics de suite.
+            // L'entrée doit quand même quitter l'écran.
+        } catch {
+            writeFailure = "Suppression impossible : \(error.localizedDescription)"
+            await refreshBlobBytes()
+            return false
+        }
         entries.removeAll { $0.id == entry.id }
         await refreshBlobBytes()
+        return true
     }
 
     /// `nil` quand le fichier lourd n'existe plus. Le bouton qui en dépend se
@@ -681,6 +711,10 @@ public final class ContentStore<Entry: ContentEntry> {
         let expired = retention.entriesToPurge(from: entries, now: now)
         guard expired.isEmpty == false else { return 0 }
 
+        // Compté, pas déduit : `expired.count` annonçait ce qu'on avait
+        // l'intention de faire, pas ce qui a été fait.
+        var purged = 0
+
         for entry in expired {
             removeBlob(of: entry)
             switch shape.purge {
@@ -688,14 +722,28 @@ public final class ContentStore<Entry: ContentEntry> {
                 // `mutate` réécrit le sidecar : l'oubli du fichier doit survivre
                 // au redémarrage, sinon la prochaine lecture le redemanderait.
                 mutate(entry.id) { $0.blobFileName = nil }
+                purged += 1
             case .wholeEntry:
-                try? FileManager.default.removeItem(at: sidecarURL(for: entry))
+                // Même règle qu'à `delete` : ne retirer de l'écran que ce qui
+                // a réellement quitté le disque. Une purge qui annonce des
+                // suppressions qu'elle n'a pas faites est exactement ce que la
+                // rétention est censée empêcher — et le compte rendu qu'elle
+                // rend sert à dire « n contenus libérés ».
+                do {
+                    try FileManager.default.removeItem(at: sidecarURL(for: entry))
+                } catch CocoaError.fileNoSuchFile {
+                    // Absent : rien à supprimer, l'entrée peut partir.
+                } catch {
+                    writeFailure = "Purge incomplète : \(error.localizedDescription)"
+                    continue
+                }
                 entries.removeAll { $0.id == entry.id }
+                purged += 1
             }
         }
 
         await refreshBlobBytes()
-        return expired.count
+        return purged
     }
 
     public func expiryDate(for entry: Entry) -> Date {
