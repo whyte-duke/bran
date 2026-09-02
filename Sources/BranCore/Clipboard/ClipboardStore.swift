@@ -637,16 +637,38 @@ public final class ClipboardStore {
             }
         }
 
+        // **Les deux écritures sont séparées parce qu'elles ne pèsent pas le
+        // même poids.** Le sidecar *est* l'entrée : s'il n'est pas posé, il n'y
+        // a rien sur le disque, et l'insérer dans la fenêtre afficherait une
+        // ligne que le redémarrage effacerait. L'index, lui, est dérivé — il se
+        // reconstruit depuis les sidecars à la première relecture qui le trouve
+        // en désaccord —, donc son échec est une gêne, pas une perte.
+        //
+        // La panne exacte que ça répare : sur un volume plein, la copie
+        // apparaissait dans le panneau comme conservée. Le bandeau disait bien
+        // qu'une écriture avait échoué, mais la liste le contredisait juste en
+        // dessous, et c'est la liste qu'on croit. Au lancement suivant, l'entrée
+        // n'était plus là.
+        var sidecarWritten = true
         do {
             try await Self.writeSidecar(stored, in: target)
-            try await Self.appendIndexLine(stored, in: target)
         } catch {
+            sidecarWritten = false
             everythingWritten = false
             writeFailure = "Écriture impossible : \(error.localizedDescription)"
         }
 
+        if sidecarWritten {
+            do {
+                try await Self.appendIndexLine(stored, in: target)
+            } catch {
+                everythingWritten = false
+                writeFailure = "Index non mis à jour : \(error.localizedDescription)"
+            }
+        }
+
         if everythingWritten { writeFailure = nil }
-        insert(stored)
+        if sidecarWritten { insert(stored) }
         return stored
     }
 
@@ -866,16 +888,37 @@ public final class ClipboardStore {
         let day = entry.dayFolderName()
         let target = dayFolder(day)
 
+        // **La ligne ne quitte l'écran que si le sidecar a quitté le disque.**
+        //
+        // Elle était retirée dans tous les cas, y compris quand `removeItem`
+        // avait échoué — volume en lecture seule, dossier fermé aux écritures.
+        // L'entrée disparaissait donc du panneau et revenait au lancement
+        // suivant. Une suppression qu'on croit faite est pire qu'une suppression
+        // refusée : on ne la refait pas, et ce qu'on voulait effacer reste sur
+        // le disque pendant qu'on est certain du contraire.
+        //
+        // L'index, lui, est dérivé : son échec emporte le fichier d'index
+        // (voir `rewriteIndex`) et la lecture suivante le reconstruit. Le
+        // sidecar étant parti, l'entrée est bel et bien supprimée, et elle doit
+        // quitter la fenêtre.
+        var sidecarRemoved = true
         do {
             try await Self.removeSidecar(entry, in: target)
-            let survivors = Self.ordered(await Self.readSidecars(in: target).entries)
-            try await Self.rewriteIndex(survivors, in: target)
-            writeFailure = nil
         } catch {
-            writeFailure = "Suppression incomplète : \(error.localizedDescription)"
+            sidecarRemoved = false
+            writeFailure = "Suppression impossible : \(error.localizedDescription)"
         }
 
-        recent.removeAll { $0.id == entry.id }
+        if sidecarRemoved {
+            do {
+                let survivors = Self.ordered(await Self.readSidecars(in: target).entries)
+                try await Self.rewriteIndex(survivors, in: target)
+                writeFailure = nil
+            } catch {
+                writeFailure = "Index non mis à jour : \(error.localizedDescription)"
+            }
+            recent.removeAll { $0.id == entry.id }
+        }
     }
 
     // MARK: - Purge

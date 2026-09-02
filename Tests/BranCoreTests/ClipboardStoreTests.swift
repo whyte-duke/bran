@@ -1227,6 +1227,107 @@ struct ClipboardStoreTests {
         #expect(names(in: store.pinnedBlobsFolder).isEmpty)
     }
 
+    // MARK: - Ce que l'écran promet doit survivre au redémarrage
+
+    /// **Le disque a dit non, et la ligne était là quand même.** L'entrée était
+    /// insérée dans la fenêtre après le `catch`, donc une copie faite sur un
+    /// volume plein s'affichait comme conservée ; au redémarrage, elle n'y était
+    /// plus. Le bandeau disait bien quelque chose, mais la liste le contredisait
+    /// juste en dessous, et c'est la liste qu'on croit.
+    @Test("Une entrée que le disque a refusée n'est pas montrée comme conservée")
+    func entreeRefuseeNestPasMontree() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        let manager = FileManager.default
+
+        // Un premier enregistrement crée le dossier du jour ; c'est lui qu'on
+        // ferme ensuite à l'écriture.
+        await store.save(text("celle qui passe"))
+        let jour = dossierDuJour(root, Self.noon)
+        try manager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: jour.path)
+        defer { try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: jour.path) }
+
+        let refusee = await store.save(text("celle qui échoue", at: Self.noon.addingTimeInterval(1)))
+
+        #expect(store.recent.contains { $0.id == refusee.id } == false)
+        #expect(store.problem != nil)
+
+        // Et le redémarrage dit la même chose que l'écran, ce qui est tout
+        // l'enjeu.
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: jour.path)
+        let relu = makeStore(at: root)
+        await relu.load()
+        #expect(relu.recent.contains { $0.id == refusee.id } == false)
+        #expect(relu.recent.count == 1)
+    }
+
+    /// L'index, lui, est **dérivé** : il se reconstruit depuis les sidecars. Son
+    /// échec ne doit donc pas faire disparaître de l'écran une entrée qui est
+    /// bel et bien sur le disque — sinon le correctif ci-dessus perdrait des
+    /// copies au lieu d'en sauver.
+    @Test("Une entrée écrite dont l'index a échoué reste montrée")
+    func entreeEcriteAvecIndexEnEchecResteMontree() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        let manager = FileManager.default
+
+        await store.save(text("la première"))
+
+        // Un dossier à la place de l'index : le sidecar s'écrit, la ligne
+        // d'index non.
+        let jour = dossierDuJour(root, Self.noon)
+        let index = jour.appending(path: ClipboardStore.indexFileName)
+        try manager.removeItem(at: index)
+        try manager.createDirectory(at: index, withIntermediateDirectories: true)
+
+        let ecrite = await store.save(text("la seconde", at: Self.noon.addingTimeInterval(1)))
+        #expect(store.recent.contains { $0.id == ecrite.id })
+
+        try manager.removeItem(at: index)
+        let relu = makeStore(at: root)
+        await relu.load()
+        #expect(relu.recent.contains { $0.id == ecrite.id })
+    }
+
+    /// **La suppression qui échoue retirait quand même la ligne de l'écran.**
+    /// Le sidecar restait sur le disque, donc l'entrée revenait au lancement
+    /// suivant — et une suppression qu'on croit faite est pire qu'une
+    /// suppression refusée, parce qu'on ne la refait pas.
+    @Test("Une suppression que le disque refuse ne retire pas la ligne")
+    func suppressionRefuseeNeRetirePasLaLigne() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+        let manager = FileManager.default
+
+        let entree = await store.save(text("à supprimer"))
+        let jour = dossierDuJour(root, Self.noon)
+        try manager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: jour.path)
+        defer { try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: jour.path) }
+
+        await store.delete(entree)
+
+        #expect(store.recent.contains { $0.id == entree.id })
+        #expect(store.problem != nil)
+
+        // Le sidecar est toujours là : c'est ce que l'écran doit dire.
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: jour.path)
+        let relu = makeStore(at: root)
+        await relu.load()
+        #expect(relu.recent.contains { $0.id == entree.id })
+    }
+
+    @Test("Une suppression qui aboutit retire bien la ligne")
+    func suppressionQuiAboutitRetireLaLigne() async throws {
+        let root = try makeRoot()
+        let store = makeStore(at: root)
+
+        let entree = await store.save(text("à supprimer"))
+        await store.delete(entree)
+
+        #expect(store.recent.isEmpty)
+        #expect(store.problem == nil)
+    }
+
     private func dossierDuJour(_ root: URL, _ date: Date) -> URL {
         root
             .appending(path: ClipboardStore.folderName, directoryHint: .isDirectory)
