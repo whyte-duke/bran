@@ -26,6 +26,28 @@ import IOKit.pwr_mgt
 /// nom : `pmset -g assertions` liste `PreventUserIdleDisplaySleep` avec la
 /// raison ci-dessous et le PID de bran. Une fonction qui prétend tenir le Mac
 /// éveillé doit pouvoir être prise en défaut sans la croire sur parole.
+///
+/// ## Qui relâche l'assertion si personne ne le fait — la question tranchée
+///
+/// L'audit la posait ouverte. Les trois cas, et leur réponse :
+///
+/// - **bran plante, ou est tué.** C'est `powerd` qui relâche, et ce n'est pas
+///   une supposition : mesuré le 02/09/2026, un processus qui prend cette
+///   assertion puis reçoit `SIGKILL` disparaît de `pmset -g assertions` en
+///   moins d'une seconde. Il n'y a donc rien à ajouter ici, et surtout rien à
+///   écrire sur le disque : un fichier « éveil en cours » relu au lancement
+///   suivant serait un état à réconcilier, à purger et à ne pas croire — un
+///   mécanisme entier pour un cas que le noyau couvre déjà.
+/// - **La session se termine anormalement** — déconnexion forcée, redémarrage
+///   brutal. Même mécanisme : l'assertion est attachée au processus, pas à
+///   l'utilisateur ni au disque. Le `deinit` ci-dessous ne sert qu'au cas
+///   ordinaire où l'objet meurt avant le processus.
+/// - **L'utilisateur oublie l'interrupteur allumé.** Celui-là ne se corrige
+///   pas, et c'est délibéré : une session « sans limite » est un choix
+///   explicite, et `AwakeController.menuBarMark` affiche « ∞ » dans la barre de
+///   menus tant qu'elle dure. Un éveil qui s'éteindrait tout seul au bout de
+///   N heures trahirait exactement ce qu'on lui a demandé, et il n'existe aucun
+///   N défendable. Ce qui reste visible n'est pas oublié.
 @MainActor
 final class SleepBlocker {
 
@@ -74,9 +96,9 @@ final class SleepBlocker {
     }
 
     deinit {
-        // Le système libère les assertions d'un processus qui meurt, mais bran
-        // peut vivre longtemps après qu'on a éteint l'éveil : on ne compte pas
-        // là-dessus.
+        // Le système libère les assertions d'un processus qui meurt — mesuré,
+        // voir l'en-tête — mais bran peut vivre des semaines après qu'on a
+        // éteint l'éveil. C'est ce cas-là, et lui seul, que couvre ce `deinit`.
         if let id = assertion { IOPMAssertionRelease(id) }
     }
 }

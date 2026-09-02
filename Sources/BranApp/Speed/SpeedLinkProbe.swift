@@ -45,36 +45,71 @@ enum SpeedLinkProbe {
     /// le test de débit va échouer trois secondes plus tard de toute façon, et
     /// où le faire attendre en plus n'apporterait rien.
     private static let deadline: Duration = .milliseconds(500)
+}
 
+extension Duration {
+    /// L'échéance en secondes, pour `DispatchQueue.asyncAfter`. `Duration` ne
+    /// s'y convertit pas tout seul, et écrire `0.5` à côté d'un
+    /// `.milliseconds(500)` laisserait deux chiffres à garder en accord.
+    fileprivate var seconds: Double {
+        Double(components.seconds) + Double(components.attoseconds) / 1e18
+    }
+}
+
+extension SpeedLinkProbe {
+
+    /// **Une seule continuation, reprise par le premier des deux qui arrive.**
+    ///
+    /// La version précédente mettait en concurrence deux enfants d'un
+    /// `withTaskGroup` : l'un suspendu sur une continuation, l'autre sur un
+    /// `Task.sleep`. Si le délai gagnait, `cancelAll()` **ne reprenait pas** la
+    /// continuation du premier — une continuation n'a rien à voir avec
+    /// l'annulation coopérative — et `monitor.cancel()` supprimait juste après
+    /// la seule chose au monde capable de la reprendre. Or un groupe de tâches
+    /// structuré attend tous ses enfants avant de rendre la main :
+    /// `SpeedLinkProbe.current()` ne revenait donc **jamais**, et
+    /// `SpeedController.measure()` restait suspendu avant même d'afficher
+    /// « sondage » — bouton d'arrêt compris, puisqu'il n'y avait plus personne
+    /// pour le lire. Il fallait quitter l'application.
+    ///
+    /// Le cas se produit exactement quand aucun premier chemin n'arrive en
+    /// 500 ms, c'est-à-dire pendant une transition réseau : le moment précis où
+    /// quelqu'un lance un test de débit.
+    ///
+    /// **Reproduit**, avec un moniteur muet à la place de `NWPathMonitor` : le
+    /// runtime Swift lui-même le dit — `SWIFT TASK CONTINUATION MISUSE:
+    /// leaked its continuation without resuming it` — et la fonction n'est
+    /// jamais revenue, trois secondes puis dix. La version ci-dessous rend la
+    /// main en 530 ms sur le même moniteur muet.
+    ///
+    /// **L'échéance vit sur la file du moniteur**, et ce n'est pas
+    /// décoratif : les deux réponses possibles arrivent alors sur la même file
+    /// série, donc dans un ordre défini. `Once` reste — il coûte un `NSLock` et
+    /// il couvre le rappel répété de `pathUpdateHandler`, qui arrive vraiment
+    /// sur une machine qui vient de s'associer à une borne.
     static func current() async -> Reading? {
         let monitor = NWPathMonitor()
+        let queue = DispatchQueue(label: "bran.speed.link")
+        let once = Once()
 
-        return await withTaskGroup(of: Reading?.self) { group in
-            group.addTask {
-                await withCheckedContinuation { continuation in
-                    let once = Once()
-                    monitor.pathUpdateHandler = { path in
-                        guard once.claim() else { return }
-                        continuation.resume(returning: Self.read(path))
-                    }
-                    monitor.start(queue: DispatchQueue(label: "bran.speed.link"))
-                }
+        let reading: Reading? = await withCheckedContinuation { continuation in
+            monitor.pathUpdateHandler = { path in
+                guard once.claim() else { return }
+                continuation.resume(returning: Self.read(path))
             }
-            group.addTask {
-                try? await Task.sleep(for: Self.deadline)
-                return nil
+            monitor.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + Self.deadline.seconds) {
+                guard once.claim() else { return }
+                continuation.resume(returning: nil)
             }
-
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            // **Après le premier résultat, pas dans le gestionnaire.** Annuler
-            // un moniteur depuis son propre rappel est une invitation à se
-            // désallouer sous ses propres pieds ; et si c'est l'échéance qui a
-            // gagné, il faut l'annuler d'ici, sans quoi il resterait allumé pour
-            // personne.
-            monitor.cancel()
-            return first
         }
+
+        // **Après la reprise, pas dans le gestionnaire.** Annuler un moniteur
+        // depuis son propre rappel est une invitation à se désallouer sous ses
+        // propres pieds ; et si c'est l'échéance qui a gagné, il faut l'annuler
+        // d'ici, sans quoi il resterait allumé pour personne.
+        monitor.cancel()
+        return reading
     }
 
     private static func read(_ path: NWPath) -> Reading {
