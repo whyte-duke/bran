@@ -9,12 +9,21 @@ import Foundation
 /// chaque avancée du hachage. Relevé le 02/09/2026 sur ce Mac : la ligne
 /// mesure de l'ordre de 120 octets et revient plusieurs fois par seconde. Sur
 /// la première sauvegarde de ce Mac — ~600 Go à 5,5 Mo/s, donc de l'ordre de
-/// 30 heures — un accumulateur sans plafond retient tout : à 4 lignes par
-/// seconde, 30 h font 432 000 lignes… mais kopia en émet bien davantage
-/// pendant les phases de hachage local, et l'ordre de grandeur atteint
-/// facilement le gigaoctet résident. Le processus qui doit tourner trente
-/// heures sans surveillance est exactement celui qui n'a pas le droit de
-/// grossir sans borne.
+/// 30 heures — un accumulateur sans plafond retient tout.
+///
+/// Simulé avec ces chiffres (30 h, 4 lignes de 120 octets par seconde,
+/// 432 000 lignes) :
+///
+/// ```
+///   sans plafond : 51 Mo résidents, qui ne redescendent jamais
+///   avec plafond : 256 Kio, et 51 Mo élidés — comptés, jamais tus
+/// ```
+///
+/// 51 Mo est le **plancher** : kopia émet bien plus souvent que 4 fois par
+/// seconde pendant les phases de hachage local, et la maintenance qui se
+/// déclenche en cours de route écrit ses propres lignes. Le processus qui doit
+/// tourner trente heures sans surveillance est exactement celui qui n'a pas le
+/// droit de grossir sans borne.
 ///
 /// ## Pourquoi la tête **et** la queue, jamais une troncature aveugle
 ///
