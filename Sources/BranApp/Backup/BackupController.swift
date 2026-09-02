@@ -1159,20 +1159,76 @@ enum BackupRunLock {
         }
     }
 
-    /// Rend `nil` quand quelqu'un d'autre l'a déjà — jamais une erreur : « une
-    /// sauvegarde tourne déjà » est une information, pas une panne.
-    static func acquire() -> Held? {
+    /// Ce qu'une tentative de prise du verrou a appris — **trois issues, pas
+    /// deux**.
+    ///
+    /// **Ce que l'ancien `Held?` confondait.** Il rendait `nil` aussi bien
+    /// quand une autre sauvegarde tenait le verrou que quand `open()` ou
+    /// `flock()` avaient échoué pour une tout autre raison : droits retirés sur
+    /// `~/Library/Application Support/bran/backup`, disque plein, volume monté
+    /// en lecture seule, dossier remplacé par un fichier. L'appelant écrivait
+    /// alors « sauvegarde déjà en cours ailleurs » dans le journal système et
+    /// ne tentait rien — silencieusement, à chaque échéance, indéfiniment. Une
+    /// panne de disque déguisée en contention normale est exactement la
+    /// famille de mensonge que ce module combat : la sauvegarde s'arrête, et
+    /// le seul message dit que tout va bien.
+    ///
+    /// `EWOULDBLOCK` (`EAGAIN` sur Darwin) est le **seul** code que `flock` en
+    /// mode `LOCK_NB` rend pour une contention. Tout le reste est une panne.
+    enum Outcome {
+        case acquired(Held)
+        /// Un autre processus — l'interface ou le job launchd — tient le
+        /// verrou. Ce n'est pas une panne : c'est une information.
+        case heldByAnotherProcess
+        /// Le verrou n'a pas pu être **tenté** : `errno` dit pourquoi.
+        case failed(operation: String, errno: Int32)
+    }
+
+    static func acquire() -> Outcome {
         let directory = BackupJournal.directory
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return .failed(operation: "création du dossier du verrou", errno: (error as NSError).code == NSFileWriteNoPermissionError ? EACCES : EIO)
+        }
         let url = directory.appending(path: "run.lock", directoryHint: .notDirectory)
         let fd = open(url.path(percentEncoded: false), O_RDWR | O_CREAT, 0o644)
-        guard fd >= 0 else { return nil }
+        guard fd >= 0 else {
+            return .failed(operation: "ouverture du fichier de verrou", errno: errno)
+        }
         // `LOCK_NB` : on ne veut pas attendre. Un run peut durer des heures, et
         // un bouton qui reste enfoncé tout ce temps ne serait pas un bouton.
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            let code = errno
             close(fd)
-            return nil
+            if code == EWOULDBLOCK { return .heldByAnotherProcess }
+            return .failed(operation: "pose du verrou", errno: code)
         }
-        return Held(fileDescriptor: fd)
+        return .acquired(Held(fileDescriptor: fd))
+    }
+
+    /// Vrai quand une sauvegarde tourne **dans un autre processus** — le job
+    /// launchd, typiquement, pendant que la fenêtre est ouverte.
+    ///
+    /// Sert à ne pas recharger le `LaunchAgent` sous les pieds d'un run en
+    /// cours : `launchctl bootout` tuerait le processus que launchd a démarré,
+    /// donc le `kopia snapshot create` qu'il tient. La mesure est fatalement
+    /// datée d'un instant — un run peut démarrer juste après —, mais combinée
+    /// au fait qu'on ne recharge plus **que** si la définition a changé, la
+    /// fenêtre de course se réduit à un cas qui demande de modifier un réglage
+    /// à la milliseconde près où un run démarre.
+    static func isHeldByAnotherProcess() -> Bool {
+        switch acquire() {
+        case .acquired(let held):
+            held.release()
+            return false
+        case .heldByAnotherProcess:
+            return true
+        case .failed:
+            // On ne sait pas. Répondre « occupé » diffère une resynchronisation
+            // du job ; répondre « libre » risque de couper une sauvegarde. Le
+            // premier tort se rattrape au tour suivant, le second non.
+            return true
+        }
     }
 }

@@ -154,6 +154,10 @@ public enum KopiaDriverFailure: Error, Sendable, CustomStringConvertible {
     /// `currentProcess` ne peut désigner qu'un seul processus kopia à la
     /// fois. Voir la réservation de `isRunning` dans `run(...)`.
     case alreadyRunning
+    /// La commande n'a pas rendu la main dans le délai total qui lui était
+    /// accordé, et a été terminée. **Ne concerne jamais `snapshot create`**,
+    /// qui n'a pas de délai total — voir la note dans `createSnapshot`.
+    case timedOut(command: String, seconds: TimeInterval)
     case backup(BackupFailure)
 
     public var description: String {
@@ -163,6 +167,8 @@ public enum KopiaDriverFailure: Error, Sendable, CustomStringConvertible {
         case .noSourcePaths: "Aucun dossier à sauvegarder n'a été fourni."
         case .emptyVersionOutput: "« kopia --version » n'a rien écrit."
         case .alreadyRunning: "Une commande kopia est déjà en cours sur ce pilote."
+        case .timedOut(let command, let seconds):
+            "« kopia \(command) » n'a pas répondu en \(Int(seconds)) s et a été arrêté."
         case .backup(let failure): failure.summary
         }
     }
@@ -208,6 +214,14 @@ public enum KopiaDriverFailure: Error, Sendable, CustomStringConvertible {
                 suggestedAction: nil,
                 rawOutput: ""
             )
+        case .timedOut(let command, let seconds):
+            BackupFailure(
+                kind: .network,
+                summary: description,
+                suggestedAction: "Vérifier la chaîne réseau, ou allonger « Ouverture du dépôt » dans les "
+                    + "réglages de sauvegarde si la ligne est légitimement lente.",
+                rawOutput: "commande « \(command) », délai total \(Int(seconds)) s"
+            )
         }
     }
 }
@@ -240,6 +254,9 @@ public actor KopiaDriver {
     /// Vrai quand c'est le détecteur de blocage, et non l'utilisateur, qui a
     /// mis fin au run. Distingue le message qu'affichera `createSnapshot`.
     private var stallDetected = false
+    /// Vrai quand c'est le **délai total** — et non l'absence de progression,
+    /// ni l'utilisateur — qui a mis fin au run. Voir ``run(arguments:needsPassword:totalTimeout:stallThreshold:onProgress:)``.
+    private var totalTimeoutExpired = false
 
     /// La version pour laquelle ce pilote a été écrit et vérifié le
     /// 02/09/2026. Un écart n'empêche jamais de continuer — rien ici ne
@@ -263,6 +280,27 @@ public actor KopiaDriver {
     /// tout en repérant un blocage bien avant qu'un humain ne perde patience.
     public static let defaultProgressStallThreshold: TimeInterval = 600
 
+    /// Le délai **total** accordé aux commandes courtes — celles qui n'ont
+    /// aucune progression à publier, donc que ``defaultProgressStallThreshold``
+    /// ne protège pas.
+    ///
+    /// **Le trou que ce chiffre bouche.** Le chien de garde d'absence de
+    /// progression ne s'arme que `if let stallThreshold, onProgress != nil` :
+    /// il ne couvre donc que `snapshot create`. `repository status`, lui,
+    /// n'écrit aucune progression — un dépôt qui n'accuse jamais réception
+    /// (pair Tailscale endormi en plein handshake, MinIO qui accepte la
+    /// connexion TCP puis se tait) laissait le `Process` suspendu **pour
+    /// toujours** : l'interface reste sur « vérification de la chaîne… » et le
+    /// job planifié tient le verrou de simultanéité indéfiniment, ce qui
+    /// empêche aussi toutes les sauvegardes suivantes. Une seule ouverture de
+    /// dépôt bloquée suffisait à arrêter la sauvegarde de ce Mac sans qu'aucun
+    /// écran ne dise pourquoi.
+    ///
+    /// Ce défaut n'est qu'un filet : l'appelant passe normalement
+    /// `BackupConfiguration.repositoryTimeout`, le réglage que l'écran affiche
+    /// — et qui, jusqu'ici, n'était lu par personne.
+    public static let defaultTotalTimeout: TimeInterval = 45
+
     public init(
         executable: KopiaExecutable,
         configFileURL: URL? = nil,
@@ -276,14 +314,46 @@ public actor KopiaDriver {
     // MARK: - La version
 
     /// La sortie brute de `kopia --version` — `"0.23.1 build: … from: "`.
-    public func version() async throws -> String {
-        let result = try await run(arguments: ["--version"], needsPassword: false)
+    ///
+    /// Le délai est court à dessein : `--version` ne touche ni le réseau ni le
+    /// dépôt. S'il ne répond pas en dix secondes, ce n'est pas une ligne lente,
+    /// c'est un binaire qui ne va pas.
+    public func version(timeout: TimeInterval = 10) async throws -> String {
+        let result = try await run(
+            arguments: ["--version"], needsPassword: false, totalTimeout: timeout)
         guard let text = String(data: result.stdout, encoding: .utf8),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
             throw KopiaDriverFailure.emptyVersionOutput
         }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Ce que la version installée vaut par rapport à celle contre laquelle ce
+    /// pilote a été écrit — **trois réponses, jamais deux**.
+    ///
+    /// « Version non validée » et « version incompatible connue » ne se
+    /// confondent pas : la première dit qu'on n'a pas éprouvé ce binaire-là et
+    /// que le format de sortie pourrait avoir bougé ; la seconde dirait qu'on
+    /// sait qu'il ne marchera pas. bran ne connaît aujourd'hui aucune version
+    /// *incompatible* — il n'en a mesuré qu'une, `expectedVersionPrefix` — donc
+    /// ce type ne rend jamais `.incompatible` de lui-même. Le cas existe pour
+    /// que le jour où une version cassée est identifiée, elle se dise
+    /// autrement qu'un simple « pas la même », et pour que l'écran n'ait pas à
+    /// inventer cette nuance.
+    public enum VersionStanding: Sendable, Equatable {
+        /// Le binaire annonce exactement la version éprouvée.
+        case matchesExpected(String)
+        /// Une autre version. Rien ne prouve qu'elle est cassée — kopia garde
+        /// une compatibilité de dépôt ascendante — mais rien ne prouve non
+        /// plus que le format de ses sorties est celui que les décodeurs de
+        /// `BranBackup` savent lire.
+        case unvalidated(found: String, expected: String)
+        /// Une version dont on sait qu'elle ne marche pas avec ce pilote.
+        case incompatible(found: String, reason: String)
+        /// La version n'a pas pu être lue du tout : binaire absent, non
+        /// exécutable, ou muet. Distinct des trois ci-dessus — on ne sait pas.
+        case unreadable(String)
     }
 
     /// Vrai quand la version installée correspond à celle attendue. Ne lève
@@ -293,14 +363,42 @@ public actor KopiaDriver {
         try await version().hasPrefix(Self.expectedVersionPrefix)
     }
 
+    /// La même mesure, mais qui ne lève jamais et qui **nomme** ce qu'elle a
+    /// trouvé. C'est celle que l'application appelle : un pilote qui lève au
+    /// démarrage parce que le binaire n'est pas là empêcherait d'afficher
+    /// l'écran qui explique justement que le binaire n'est pas là.
+    public func versionStanding() async -> VersionStanding {
+        do {
+            let found = try await version()
+            if found.hasPrefix(Self.expectedVersionPrefix) {
+                return .matchesExpected(found)
+            }
+            return .unvalidated(found: found, expected: Self.expectedVersionPrefix)
+        } catch {
+            return .unreadable(String(describing: error))
+        }
+    }
+
     // MARK: - Le statut du dépôt
 
-    public func repositoryStatus() async throws -> RepositoryStatus {
+    /// - Parameter timeout: le délai **total** au-delà duquel la commande est
+    ///   arrêtée. Vient normalement de `BackupConfiguration.repositoryTimeout`
+    ///   — voir ``defaultTotalTimeout`` pour ce que son absence coûtait.
+    public func repositoryStatus(
+        timeout: TimeInterval = KopiaDriver.defaultTotalTimeout
+    ) async throws -> RepositoryStatus {
         let result = try await run(
             arguments: ["repository", "status", "--json", "--no-progress"],
-            needsPassword: true
+            needsPassword: true,
+            totalTimeout: timeout
         )
+        if result.totalTimeoutExpired {
+            throw KopiaDriverFailure.timedOut(command: "repository status", seconds: timeout)
+        }
         if let failure = classifiedFailure(from: result) {
+            throw KopiaDriverFailure.backup(failure)
+        }
+        if let failure = overflowFailure(result, command: "repository status") {
             throw KopiaDriverFailure.backup(failure)
         }
         // Le garde-fou qui referme le piège du mot de passe invalide : kopia
@@ -325,12 +423,21 @@ public actor KopiaDriver {
 
     // MARK: - La liste des snapshots
 
-    public func listSnapshots() async throws -> [SnapshotProof] {
+    public func listSnapshots(
+        timeout: TimeInterval = KopiaDriver.defaultTotalTimeout
+    ) async throws -> [SnapshotProof] {
         let result = try await run(
             arguments: ["snapshot", "list", "--all", "--json", "--no-progress"],
-            needsPassword: true
+            needsPassword: true,
+            totalTimeout: timeout
         )
+        if result.totalTimeoutExpired {
+            throw KopiaDriverFailure.timedOut(command: "snapshot list", seconds: timeout)
+        }
         if let failure = classifiedFailure(from: result) {
+            throw KopiaDriverFailure.backup(failure)
+        }
+        if let failure = overflowFailure(result, command: "snapshot list") {
             throw KopiaDriverFailure.backup(failure)
         }
         // **Pas de garde « stdout vide = échec » ici.** Un dépôt sain sans
@@ -343,6 +450,82 @@ public actor KopiaDriver {
             return try KopiaManifest.decodeSnapshotList(result.stdout)
         } catch let decodingFailure as KopiaDecodingFailure {
             throw KopiaDriverFailure.backup(decodingFailure.asBackupFailure(rawOutput: maskedStdoutText(result)))
+        }
+    }
+
+    // MARK: - Les règles d'exclusion
+
+    /// Écrit les règles d'exclusion de la configuration dans la **politique
+    /// kopia** de chaque source, avant de sauvegarder.
+    ///
+    /// ## Pourquoi ça ne peut pas être un drapeau de `snapshot create`
+    ///
+    /// `kopia snapshot create` n'en a aucun : mesuré dans l'aide de kopia
+    /// 0.23.1, l'exclusion se règle exclusivement par la politique du dépôt
+    /// (`kopia policy set <source> --add-ignore=…`). Tant que personne ne
+    /// l'appelait, `BackupConfiguration.ignoreRules` était un réglage
+    /// **mort** : l'écran le proposait, le disque le conservait, et
+    /// `createSnapshot` construisait `["snapshot", "create", "--json",
+    /// "--progress"] + paths` sans jamais le lire. Un dossier explicitement
+    /// exclu partait quand même dans le dépôt — et un utilisateur qui exclut
+    /// un dossier a en général une raison qui n'est pas la place disque.
+    ///
+    /// ## Pourquoi `--clear-ignore` d'abord, à chaque fois
+    ///
+    /// La politique kopia est **persistante dans le dépôt**, pas dans
+    /// `config.json` : elle survit à une désinstallation de bran. Sans remise à
+    /// zéro, une règle retirée de l'écran resterait active pour toujours dans
+    /// le dépôt, et l'écran mentirait dans l'autre sens — il n'afficherait plus
+    /// une exclusion qui, elle, s'appliquerait encore. `--clear-ignore` puis
+    /// les `--add-ignore` de la configuration font que la politique du dépôt
+    /// est, à chaque run, exactement ce que l'écran montre.
+    ///
+    /// ## Pourquoi un échec ici arrête le run
+    ///
+    /// Cette fonction lève, et son appelant ne rattrape pas. Sauvegarder
+    /// quand même, avec une politique qu'on n'a pas su écrire, enverrait dans
+    /// le dépôt les dossiers que l'utilisateur avait demandé d'en tenir
+    /// dehors — une fuite silencieuse, pas une simple imprécision.
+    public func applyIgnoreRules(
+        _ rules: [String],
+        to paths: [String],
+        timeout: TimeInterval = KopiaDriver.defaultTotalTimeout
+    ) async throws {
+        guard !paths.isEmpty else { return }
+        // Les motifs vides sont écartés ici plutôt qu'envoyés à kopia : un
+        // `--add-ignore=` sans valeur est accepté par kingpin et poserait une
+        // règle vide dans la politique du dépôt, invisible dans l'écran qui
+        // filtre déjà les lignes vides.
+        let patterns = rules.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+
+        for path in paths {
+            var arguments = ["policy", "set", "--no-progress", "--clear-ignore"]
+            arguments += patterns.map { "--add-ignore=\($0)" }
+            arguments.append(path)
+
+            let result = try await run(
+                arguments: arguments, needsPassword: true, totalTimeout: timeout)
+            if result.totalTimeoutExpired {
+                throw KopiaDriverFailure.timedOut(command: "policy set", seconds: timeout)
+            }
+            if let failure = classifiedFailure(from: result) {
+                throw KopiaDriverFailure.backup(failure)
+            }
+            // Le code de sortie ne fait pas foi ailleurs dans ce fichier, et
+            // pas davantage ici — mais un code non nul que le classifieur n'a
+            // pas su nommer reste un échec : on ne sauvegarde pas sur une
+            // politique dont rien ne dit qu'elle a été écrite.
+            guard result.exitCode == 0 else {
+                throw KopiaDriverFailure.backup(BackupFailure(
+                    kind: .unparseable,
+                    summary: "Les règles d'exclusion n'ont pas pu être appliquées à « \(path) » "
+                        + "(kopia est sorti avec le code \(result.exitCode)).",
+                    suggestedAction: "Corriger ou vider les règles d'exclusion dans les réglages de "
+                        + "sauvegarde : bran refuse de sauvegarder tant qu'il n'est pas sûr que ce qui "
+                        + "doit être exclu le sera.",
+                    rawOutput: KopiaFailureClassifier.maskSecrets(in: result.stderr)
+                ))
+            }
         }
     }
 
@@ -405,6 +588,9 @@ public actor KopiaDriver {
         if let failure = classifiedFailure(from: result) {
             throw KopiaDriverFailure.backup(failure)
         }
+        if let failure = overflowFailure(result, command: "snapshot create") {
+            throw KopiaDriverFailure.backup(failure)
+        }
         guard !result.stdout.isEmpty else {
             throw KopiaDriverFailure.backup(emptyStdoutFailure(
                 summary: "kopia s'est terminé sans erreur reconnue, mais sans manifeste de snapshot sur stdout.",
@@ -446,11 +632,21 @@ public actor KopiaDriver {
     /// bruit inoffensif (`isIgnorable`, préfixes `"Processed "` /
     /// `"Finished processing "`), est le texte qu'on obtient sans lui. Suivre
     /// le relevé réel plutôt que l'aide de la commande.
-    public func verify() async throws -> String {
+    /// - Parameter timeout: le délai **total**. Beaucoup plus large que celui
+    ///   d'une ouverture de dépôt : `snapshot verify` relit les métadonnées de
+    ///   tous les snapshots, ce qui se compte en minutes sur un dépôt fourni,
+    ///   pas en secondes. Mais borné quand même — sans borne, cette commande
+    ///   n'a aucune progression à publier et rejouerait exactement le blocage
+    ///   décrit dans ``defaultTotalTimeout``.
+    public func verify(timeout: TimeInterval = 900) async throws -> String {
         let result = try await run(
             arguments: ["snapshot", "verify", "--no-progress"],
-            needsPassword: true
+            needsPassword: true,
+            totalTimeout: timeout
         )
+        if result.totalTimeoutExpired {
+            throw KopiaDriverFailure.timedOut(command: "snapshot verify", seconds: timeout)
+        }
         if let failure = classifiedFailure(from: result) {
             throw KopiaDriverFailure.backup(failure)
         }
@@ -501,6 +697,16 @@ public actor KopiaDriver {
         await terminateGracefully(process)
     }
 
+    /// Le délai total est écoulé : on arrête, en le distinguant d'une
+    /// annulation utilisateur et d'un blocage sans progression, parce que les
+    /// trois n'appellent pas le même message.
+    private func markTotalTimeout(process: Process) async {
+        guard process.isRunning else { return }
+        totalTimeoutExpired = true
+        cancellationRequested = true
+        await terminateGracefully(process)
+    }
+
     // MARK: - Le classement d'un résultat
 
     private func classifiedFailure(from result: ProcessResult) -> BackupFailure? {
@@ -509,6 +715,23 @@ public actor KopiaDriver {
             exitCode: result.exitCode,
             wasCancelled: result.wasCancelled,
             signal: result.signal
+        )
+    }
+
+    /// stdout a dépassé son plafond : les octets reçus sont un préfixe, pas un
+    /// document. Les décoder rendrait au mieux une erreur de syntaxe, au pire
+    /// un objet partiel qu'un décodeur indulgent accepterait — c'est-à-dire
+    /// une preuve fabriquée sur une sortie qu'on n'a pas lue en entier. On
+    /// refuse à la place.
+    private func overflowFailure(_ result: ProcessResult, command: String) -> BackupFailure? {
+        guard result.stdoutOverflowed else { return nil }
+        return BackupFailure(
+            kind: .unparseable,
+            summary: "« kopia \(command) » a écrit plus de "
+                + "\(BoundedOutputBuffer.defaultStdoutLimit / (1024 * 1024)) Mo sur sa sortie standard : "
+                + "bran a cessé de l'accumuler et refuse de décoder un document tronqué.",
+            suggestedAction: "Vérifier que le binaire kopia utilisé est bien celui du paquet de bran.",
+            rawOutput: KopiaFailureClassifier.maskSecrets(in: result.stderr)
         )
     }
 
@@ -547,6 +770,11 @@ public actor KopiaDriver {
         var wasCancelled: Bool
         var signal: Int32?
         var stallDetected: Bool
+        var totalTimeoutExpired: Bool
+        /// Vrai quand stdout a dépassé le plafond de `BoundedOutputBuffer` :
+        /// les octets rendus sont alors **incomplets**, et aucun décodeur ne
+        /// doit les lire comme s'ils étaient entiers.
+        var stdoutOverflowed: Bool
     }
 
     /// Construit les arguments, l'environnement, lance `kopia`, et attend —
@@ -557,9 +785,19 @@ public actor KopiaDriver {
     /// attendre les trois signaux (fin de process, EOF stdout, EOF stderr)
     /// avant de rendre la main est ce qui garantit qu'aucune ligne n'est
     /// perdue dans cette course.
+    ///
+    /// - Parameter totalTimeout: le délai au-delà duquel la commande est
+    ///   arrêtée quoi qu'il arrive. **Jamais passé par `createSnapshot`** —
+    ///   voir la note dans cette fonction : au débit mesuré vers ce MinIO
+    ///   (5,5 Mo/s), ~600 Go durent une trentaine d'heures, et un délai fondé
+    ///   sur la durée transformerait cette lenteur normale en fausse panne.
+    ///   Pour toutes les autres commandes, à l'inverse, il n'existe **aucune**
+    ///   autre protection : `stallThreshold` ne s'arme que si `onProgress` est
+    ///   fourni, ce qu'elles ne font pas.
     private func run(
         arguments: [String],
         needsPassword: Bool,
+        totalTimeout: TimeInterval? = nil,
         stallThreshold: TimeInterval? = nil,
         onProgress: (@Sendable (BackupProgress) -> Void)? = nil
     ) async throws -> ProcessResult {
@@ -586,6 +824,7 @@ public actor KopiaDriver {
 
         cancellationRequested = false
         stallDetected = false
+        totalTimeoutExpired = false
 
         var fullArguments: [String] = []
         if let configFileURL {
@@ -693,6 +932,27 @@ public actor KopiaDriver {
         }
         defer { watchdogTask?.cancel() }
 
+        // Le délai total, pour les commandes que le détecteur de blocage ne
+        // couvre pas. Une tâche distincte de celle du blocage, et pas un
+        // paramètre de plus sur la même : les deux mesurent des choses
+        // différentes (une horloge absolue contre un silence de progression)
+        // et peuvent parfaitement coexister sur une commande qui aurait les
+        // deux — ce qui n'est le cas d'aucune aujourd'hui, mais le jour où ça
+        // arrivera, rien ne sera à démêler.
+        let deadlineTask: Task<Void, Never>?
+        if let totalTimeout {
+            let processBox = ProcessBox(process)
+            deadlineTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, totalTimeout) * 1_000_000_000))
+                if Task.isCancelled { return }
+                guard let self else { return }
+                await self.markTotalTimeout(process: processBox.process)
+            }
+        } else {
+            deadlineTask = nil
+        }
+        defer { deadlineTask?.cancel() }
+
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             group.notify(queue: .global()) { continuation.resume() }
         }
@@ -700,8 +960,10 @@ public actor KopiaDriver {
         let signal = terminationBox.reason == .uncaughtSignal ? terminationBox.exitCode : nil
         let wasCancelled = cancellationRequested
         let wasStalled = stallDetected
+        let didTimeOut = totalTimeoutExpired
         cancellationRequested = false
         stallDetected = false
+        totalTimeoutExpired = false
 
         return ProcessResult(
             exitCode: terminationBox.exitCode,
@@ -709,7 +971,9 @@ public actor KopiaDriver {
             stderr: collector.stderrText,
             wasCancelled: wasCancelled,
             signal: signal,
-            stallDetected: wasStalled
+            stallDetected: wasStalled,
+            totalTimeoutExpired: didTimeOut,
+            stdoutOverflowed: collector.stdoutOverflowed
         )
     }
 }
@@ -747,10 +1011,15 @@ private final class ProcessBox: @unchecked Sendable {
 /// ordre pour recoller une ligne coupée en plein milieu. Un verrou simple,
 /// tenu le temps d'un `append`, ne pose pas ce problème parce qu'il ne
 /// réordonne rien — il protège seulement les octets accumulés.
+///
+/// **Les deux tampons sont plafonnés** — voir `BoundedOutputBuffer` pour le
+/// chiffre et pour la panne : un `snapshot create` de trente heures écrit
+/// assez de lignes de progression sur stderr pour que « tout garder » se
+/// compte en gigaoctets résidents.
 private final class OutputCollector: @unchecked Sendable {
     private let lock = NSLock()
-    private var stdout = Data()
-    private var stderr = Data()
+    private let stdout = BoundedOutputBuffer.stdout()
+    private let stderr = BoundedOutputBuffer.stderr()
     private var progressReader = KopiaProgressReader()
     private var lastProgress = Date()
     private let onProgress: (@Sendable (BackupProgress) -> Void)?
@@ -760,15 +1029,11 @@ private final class OutputCollector: @unchecked Sendable {
     }
 
     func appendStdout(_ data: Data) {
-        lock.lock()
         stdout.append(data)
-        lock.unlock()
     }
 
     func appendStderr(_ data: Data) {
-        lock.lock()
         stderr.append(data)
-        lock.unlock()
 
         guard let onProgress else { return }
         // Décodage indulgent, uniquement pour cette lecture en direct : un
@@ -789,8 +1054,11 @@ private final class OutputCollector: @unchecked Sendable {
     }
 
     var stdoutData: Data {
-        lock.lock(); defer { lock.unlock() }
-        return stdout
+        stdout.snapshot()
+    }
+
+    var stdoutOverflowed: Bool {
+        stdout.didOverflow
     }
 
     /// Décodé une seule fois, depuis les octets complets — jamais recollé à
@@ -799,9 +1067,7 @@ private final class OutputCollector: @unchecked Sendable {
     /// jamais un décodage silencieusement approximatif pour ce qui alimente
     /// `KopiaFailureClassifier` et peut finir affiché comme diagnostic.
     var stderrText: String {
-        lock.lock(); defer { lock.unlock() }
-        return String(data: stderr, encoding: .utf8)
-            ?? "<stderr non-UTF8, \(stderr.count) octets>"
+        stderr.text()
     }
 
     var lastProgressAt: Date {
