@@ -196,6 +196,13 @@ public enum KopiaRestoreFailure: Error, Sendable, CustomStringConvertible {
     /// geste à faire est d'attendre.
     case repositoryBusy
 
+    /// Le verrou de simultanéité n'a pas pu être **tenté** — pas « quelqu'un
+    /// d'autre l'a », mais « on n'a pas pu poser la question » : droits
+    /// retirés sur le dossier du journal, disque plein, volume en lecture
+    /// seule. Distinct de ``repositoryBusy`` parce que le geste à faire n'est
+    /// pas le même : attendre ne répare rien ici.
+    case lockUnavailable(operation: String, errno: Int32)
+
     case binary(KopiaBinaryFailure)
     case launchFailed(underlying: String)
     case alreadyRunning
@@ -216,6 +223,10 @@ public enum KopiaRestoreFailure: Error, Sendable, CustomStringConvertible {
         case .repositoryBusy:
             "Le dépôt est occupé par une sauvegarde en cours. La restauration "
                 + "démarrera dès qu'elle sera terminée ou annulée."
+        case .lockUnavailable(let operation, let code):
+            "Le verrou de simultanéité n'a pas pu être posé (\(operation), errno \(code)) : "
+                + "ce n'est pas une sauvegarde concurrente, c'est le dossier du journal qui est "
+                + "inaccessible."
         case .destinationInvalid(let problems):
             "Destination refusée : " + problems.map(\.description).joined(separator: " ")
         case .decodingFailed(let failure, _): failure.description
@@ -239,6 +250,13 @@ public enum KopiaRestoreFailure: Error, Sendable, CustomStringConvertible {
                 summary: "Le dépôt est occupé par une sauvegarde en cours.",
                 suggestedAction: "Attendre la fin de la sauvegarde, ou l'annuler, puis relancer la restauration.",
                 rawOutput: "")
+        case .lockUnavailable(let operation, let code):
+            BackupFailure(
+                kind: .storage,
+                summary: description,
+                suggestedAction: "Vérifier les droits et la place disponible sur "
+                    + "« ~/Library/Application Support/bran/backup ».",
+                rawOutput: "\(operation) : errno \(code)")
         case .restore(let failure):
             failure
         case .binary(let failure):
@@ -494,8 +512,22 @@ public actor KopiaRestoreDriver {
         // `flock` et non un témoin : le noyau le rend à la mort du processus,
         // quelle qu'en soit la cause. Une restauration interrompue par une
         // panne de courant ne laisse pas le dépôt verrouillé pour toujours.
-        guard let lock = BackupRunLock.acquire() else {
+        //
+        // **Trois issues, pas deux.** `BackupRunLock.acquire()` distingue
+        // désormais « quelqu'un d'autre l'a » d'« on n'a pas pu essayer » :
+        // droits retirés sur le dossier du journal, disque plein, volume
+        // remonté en lecture seule. Les confondre annonçait « une sauvegarde
+        // est en cours, attendez » sur une panne de disque qui ne se
+        // résoudrait jamais toute seule — un message qui invite à patienter
+        // devant un mur.
+        let lock: BackupRunLock.Held
+        switch BackupRunLock.acquire() {
+        case .acquired(let held):
+            lock = held
+        case .heldByAnotherProcess:
             throw KopiaRestoreFailure.repositoryBusy
+        case .failed(let operation, let code):
+            throw KopiaRestoreFailure.lockUnavailable(operation: operation, errno: code)
         }
         defer { lock.release() }
 

@@ -150,6 +150,57 @@ final class BackupController {
     /// est le cas normal ; autre chose mérite d'être dit, pas caché.
     private(set) var unreadableJournalLines = 0
 
+    /// Pourquoi le journal n'a pas pu être **lu du tout**, quand c'est le
+    /// cas — `nil` autrement.
+    ///
+    /// **Distinct d'un journal absent, et c'est tout l'enjeu.** Un Mac qui n'a
+    /// jamais tenté de sauvegarde n'a pas de journal : `history` vide est alors
+    /// la vérité. Un journal présent mais illisible — droits retirés, disque
+    /// en panne — donnait exactement le même `history` vide, donc le même
+    /// « aucune sauvegarde consignée », donc la même absence d'alerte. Tout
+    /// l'historique de ce Mac pouvait disparaître de l'écran sans qu'une seule
+    /// ligne ne le dise.
+    private(set) var journalReadFailure: String?
+
+    /// Ce que vaut le binaire kopia trouvé, par rapport à celui contre lequel
+    /// ce pilote a été écrit. `nil` tant que la question n'a pas été posée.
+    ///
+    /// **Mesuré au démarrage, et jamais jusqu'ici.** `matchesExpectedVersion()`
+    /// existait, documentée, et n'était appelée nulle part dans tout le dépôt :
+    /// un `brew upgrade kopia` sous les pieds de bran, ou un binaire de paquet
+    /// mal copié, ne se serait découvert qu'au milieu d'une vraie sauvegarde,
+    /// sous la forme d'un décodage qui échoue.
+    private(set) var kopiaVersion: KopiaDriver.VersionStanding?
+
+    /// Ce que la dernière vérification d'intégrité (`kopia snapshot verify`) a
+    /// donné — `nil` tant qu'aucune n'a été lancée.
+    ///
+    /// **Ce champ existe pour que l'écran cesse de promettre plus qu'il n'a
+    /// vérifié.** « Vos fichiers sont à l'abri » ne reposait que sur la
+    /// couverture des sources : un snapshot relu dans le dépôt, sans qu'aucun
+    /// `snapshot verify` ni aucune restauration n'ait jamais eu lieu. C'est
+    /// déjà beaucoup plus qu'un « create a réussi », mais ce n'est pas la
+    /// même promesse.
+    private(set) var lastIntegrityCheck: IntegrityCheck?
+
+    /// Ce qu'une vérification d'intégrité a appris, et quand.
+    struct IntegrityCheck: Equatable {
+        let at: Date
+        /// `nil` quand la vérification a réussi ; le résumé de l'échec sinon.
+        let failure: BackupFailure?
+        var succeeded: Bool { failure == nil }
+    }
+
+    /// Vrai pendant qu'un `kopia snapshot verify` tourne.
+    private(set) var isVerifyingIntegrity = false
+
+    /// Est-ce que bran a l'Accès complet au disque — voir
+    /// `FullDiskAccessProbe` pour ce que son absence coûte à une sauvegarde du
+    /// dossier personnel. Mesuré une fois au démarrage : la réponse ne peut
+    /// changer qu'après un redémarrage du processus, macOS n'appliquant une
+    /// autorisation nouvellement accordée qu'au prochain lancement.
+    private(set) var fullDiskAccess: FullDiskAccessProbe.Standing = .unknown
+
     /// Les secrets présents au trousseau, relus rarement — voir
     /// ``hasStoredSecret(_:)``.
     private(set) var storedSecrets: Set<BackupSecrets.Secret> = []
@@ -176,6 +227,18 @@ final class BackupController {
     private var runTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var sleepObservers: [NSObjectProtocol] = []
+
+    /// La resynchronisation du `LaunchAgent` en attente, regroupée — voir
+    /// ``syncLaunchAgent()``.
+    private var launchAgentSyncTask: Task<Void, Never>?
+    /// Vrai quand une resynchronisation a été demandée mais différée parce
+    /// qu'une sauvegarde tournait. `pollLoop` la rejoue.
+    private var launchAgentSyncPending = false
+
+    /// Vrai pendant qu'un sondage de chaîne est en vol — voir
+    /// ``probeChain(includingRepository:)`` pour les deux pannes que ce
+    /// drapeau ferme.
+    private var isProbingChain = false
 
     /// Le pilote du run en cours, le temps qu'il tourne — et seulement ce
     /// temps-là.
@@ -278,6 +341,15 @@ final class BackupController {
     /// sondes réseau.
     private static let launchAgentVerifyInterval: TimeInterval = 600
 
+    /// Le temps de calme avant qu'une écriture de configuration ne déclenche
+    /// réellement une resynchronisation du job launchd.
+    ///
+    /// Trois quarts de seconde : plus long que l'intervalle entre deux frappes
+    /// d'une saisie continue (mesuré autour de 150 ms pour une frappe
+    /// ordinaire), assez court pour qu'un changement d'activation prenne effet
+    /// avant que l'utilisateur n'ait le temps de refermer la fenêtre.
+    private static let launchAgentSyncDebounce: TimeInterval = 0.75
+
     // MARK: - Naissance
 
     /// L'initialiseur complet, celui dont les prévisualisations se servent.
@@ -337,6 +409,13 @@ final class BackupController {
     func start() {
         reloadJournal()
         refreshStoredSecrets()
+        refreshKopiaVersion()
+        // Une seule mesure, hors du fil principal : trois `open()` au pire, et
+        // la réponse ne peut pas changer pendant la vie du processus.
+        Task { [weak self] in
+            let standing = await Task.detached(priority: .utility) { FullDiskAccessProbe.measure() }.value
+            self?.fullDiskAccess = standing
+        }
         syncLaunchAgent()
         observeSleepAndWake()
         pollTask = Task { [weak self] in await self?.pollLoop() }
@@ -358,9 +437,58 @@ final class BackupController {
     /// et que rien n'exécute. Réécrire le plist coûte quelques millisecondes ;
     /// ne pas le faire coûte de ne jamais s'en apercevoir.
     private func syncLaunchAgent() {
-        guard configuration.isEnabled else {
+        // **Regroupé et différé, jamais exécuté sur la frappe.**
+        //
+        // `persistConfiguration()` est appelé à **chaque** écriture de
+        // `configuration`, donc à chaque caractère tapé dans « Seau » ou
+        // « Point d'accès S3 ». Cette fonction lançait alors, de façon
+        // synchrone et sur le `MainActor`, jusqu'à trois processus
+        // `launchctl` (`bootout`, `bootstrap`, `print`) — mesuré à plusieurs
+        // dizaines de millisecondes chacun, chaîne réseau au repos. Une
+        // fenêtre qui gèle un dixième de seconde par touche n'est pas une
+        // fenêtre.
+        //
+        // Une tâche annulable, redémarrée à chaque appel, ne laisse partir que
+        // la dernière : taper vingt caractères produit une resynchronisation,
+        // pas vingt.
+        launchAgentSyncTask?.cancel()
+        let enabled = configuration.isEnabled
+        launchAgentSyncTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.launchAgentSyncDebounce))
+            guard !Task.isCancelled, let self else { return }
+            await self.performLaunchAgentSync(enabled: enabled)
+        }
+    }
+
+    /// Le travail réel, **hors du `MainActor`** pour les trois `launchctl`
+    /// qu'il peut lancer, et jamais pendant qu'une sauvegarde tourne.
+    private func performLaunchAgentSync(enabled: Bool) async {
+        // **Ne jamais recharger sous les pieds d'un run.** `launchctl bootout`
+        // ne décharge pas seulement la définition du job : il tue le processus
+        // que launchd a démarré, donc le `bran --backup-run` en cours et son
+        // `kopia snapshot create`. Sur la première sauvegarde de ce Mac — de
+        // l'ordre de trente heures — ouvrir la fenêtre ou toucher un réglage
+        // suffisait à couper le transfert. La reprise reste bon marché grâce à
+        // la déduplication, mais une coupure par frappe fait un transfert qui
+        // n'avance plus jamais.
+        //
+        // La mesure est faite hors du fil principal : elle prend le verrou de
+        // simultanéité et le rend aussitôt.
+        let lockHeldElsewhere = await Task.detached(priority: .utility) {
+            BackupRunLock.isHeldByAnotherProcess()
+        }.value
+        if phase.isBusy || lockHeldElsewhere {
+            // On ne perd pas la demande : `pollLoop` repasse par ici, et le
+            // plist non conforme sera écrit dès que le run sera fini.
+            launchAgentSyncPending = true
+            log.notice("resynchronisation du LaunchAgent différée : une sauvegarde est en cours")
+            return
+        }
+        launchAgentSyncPending = false
+
+        guard enabled else {
             do {
-                try BackupAgentInstaller.uninstall()
+                try await Task.detached(priority: .utility) { try BackupAgentInstaller.uninstall() }.value
             } catch {
                 log.error("LaunchAgent de sauvegarde (retrait) : \(String(describing: error), privacy: .public)")
                 // Un retrait raté laisse un job actif alors que l'écran va
@@ -373,8 +501,12 @@ final class BackupController {
             launchAgentStatus = .notApplicable
             return
         }
+
+        let outcome: BackupAgentInstaller.InstallOutcome
         do {
-            try BackupAgentInstaller.install()
+            outcome = try await Task.detached(priority: .utility) {
+                try BackupAgentInstaller.install()
+            }.value
         } catch {
             // **Le cœur du correctif.** `log.error` seul est invisible hors
             // de Console.app : l'écran continuait à dire « activée » alors
@@ -385,10 +517,17 @@ final class BackupController {
             launchAgentStatus = .installFailed(String(describing: error))
             return
         }
+        if case .alreadyCurrent = outcome {
+            // `install()` a déjà relu `launchctl print` pour conclure ça : le
+            // job est chargé, et resonder une deuxième fois ne coûterait qu'un
+            // processus de plus pour la même réponse.
+            launchAgentStatus = .running
+            return
+        }
         // L'écriture du plist n'est pas une preuve que le job tourne — voir
         // la documentation de `launchAgentStatus`. On relit tout de suite,
         // pas seulement au prochain passage de `pollLoop`.
-        verifyLaunchAgent()
+        await verifyLaunchAgent()
     }
 
     /// Relit l'état réel du job auprès de `launchd`, jamais une supposition
@@ -399,12 +538,17 @@ final class BackupController {
     /// `launchctl bootstrap` réussissant à l'installation ne garantit rien
     /// sur l'instant présent — c'est pour ça que `pollLoop` rappelle cette
     /// fonction de temps en temps plutôt que de ne la lancer qu'une fois.
-    private func verifyLaunchAgent() {
+    private func verifyLaunchAgent() async {
         guard configuration.isEnabled else {
             launchAgentStatus = .notApplicable
             return
         }
-        let result = BackupAgentInstaller.verifyInstalled()
+        // Hors du fil principal : `launchctl print` est un `Process`, et un
+        // `Process` synchrone sur le `MainActor` est un gel de fenêtre en
+        // puissance — voir le tube qu'il fallait vider dans `runLaunchctl`.
+        let result = await Task.detached(priority: .utility) {
+            BackupAgentInstaller.verifyInstalled()
+        }.value
         launchAgentStatus = result.isLoaded ? .running : .notLoaded(result.rawOutput)
     }
 
@@ -419,6 +563,7 @@ final class BackupController {
     func stop() {
         pollTask?.cancel()
         runTask?.cancel()
+        launchAgentSyncTask?.cancel()
         for observer in sleepObservers {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
@@ -466,8 +611,15 @@ final class BackupController {
                 if needsRepository { lastRepositoryProbe = Date() }
             }
 
-            if Date().timeIntervalSince(lastLaunchAgentVerify) >= Self.launchAgentVerifyInterval {
-                verifyLaunchAgent()
+            // Une resynchronisation différée parce qu'un run tournait se
+            // rejoue ici : sans ça, un réglage modifié pendant une sauvegarde
+            // de trente heures ne serait jamais porté au job launchd, et
+            // l'écran dirait encore une chose que le système ne ferait pas.
+            if launchAgentSyncPending, !phase.isBusy {
+                await performLaunchAgentSync(enabled: configuration.isEnabled)
+                lastLaunchAgentVerify = Date()
+            } else if Date().timeIntervalSince(lastLaunchAgentVerify) >= Self.launchAgentVerifyInterval {
+                await verifyLaunchAgent()
                 lastLaunchAgentVerify = Date()
             }
 
@@ -490,12 +642,49 @@ final class BackupController {
     /// chaque mesure** et rétrograde tout seul ce qui a dépassé la fraîcheur —
     /// on ne rejoue donc jamais une vérité périmée en la faisant passer pour
     /// fraîche.
-    private func probeChain(includingRepository: Bool) async {
-        guard configuration.isEnabled else { return }
+    ///
+    /// ## Pourquoi cette fonction se sérialise elle-même
+    ///
+    /// Trois appelants la déclenchent sans se connaître : `pollLoop` toutes
+    /// les 45 s, `verifyChainNow()` au clic du bouton « Tester la chaîne » et
+    /// après chaque écriture de secret, et le réveil de veille. Rien ne les
+    /// empêchait de se chevaucher, et deux conséquences en découlaient :
+    ///
+    /// 1. **Un verdict périmé écrasait un verdict frais.** Deux sondages en
+    ///    vol se terminent dans l'ordre où le réseau répond, pas dans celui où
+    ///    ils sont partis : un sondage lancé avant, mais qui traîne sur un
+    ///    maillon lent, publiait sa mesure *après* celle d'un sondage plus
+    ///    récent. L'écran affichait alors une chaîne rouge qui ne l'était
+    ///    plus, jusqu'au tour suivant.
+    /// 2. **Deux `kopia repository status` sur le même dépôt.** Le maillon 6
+    ///    lance un vrai processus ; deux en même temps se disputent le cache
+    ///    local, et l'un des deux échoue sur un verrou qui n'a rien à voir
+    ///    avec l'état du dépôt — un faux rouge fabriqué par la sonde
+    ///    elle-même.
+    ///
+    /// Un simple drapeau suffit : cette fonction est isolée `@MainActor`, donc
+    /// le test et la pose du drapeau ne peuvent pas s'entrelacer. Un sondage
+    /// demandé pendant qu'un autre tourne est **abandonné**, pas mis en file :
+    /// celui qui est en vol répondra à la même question, quelques secondes
+    /// plus tard, avec une mesure plus fraîche.
+    @discardableResult
+    private func probeChain(includingRepository: Bool) async -> Bool {
+        guard configuration.isEnabled else { return false }
+        guard !isProbingChain else {
+            log.debug("sondage de chaîne déjà en cours — celui-ci est abandonné")
+            return false
+        }
+        isProbingChain = true
+        defer { isProbingChain = false }
 
         var results = await probeFastLinks()
 
-        if includingRepository {
+        // Le maillon 6 ouvre réellement le dépôt : jamais pendant qu'un
+        // `kopia snapshot create` le tient. `performRun` appelle pourtant
+        // cette fonction avec `includingRepository: true` — mais avant
+        // d'entrer en `.running`, ce qui est exactement le moment où c'est
+        // légitime.
+        if includingRepository, !isRunningSnapshot {
             results.append(await probeRepository())
         } else if let previous = chainVerdict?.results.first(where: { $0.link == .repositoryOpens }) {
             results.append(previous)
@@ -503,6 +692,17 @@ final class BackupController {
 
         chainVerdict = ChainEvaluator.evaluate(
             results, now: Date(), freshness: Self.chainFreshness)
+        return true
+    }
+
+    /// Vrai seulement pendant qu'un `kopia snapshot create` tient le dépôt —
+    /// distinct de `phase.isBusy`, qui couvre aussi le sondage de chaîne, au
+    /// cours duquel ouvrir le dépôt est justement ce qu'on veut faire.
+    private var isRunningSnapshot: Bool {
+        switch phase {
+        case .running, .verifying: true
+        default: false
+        }
     }
 
     /// Les cinq maillons rapides, et rien de plus.
@@ -537,8 +737,19 @@ final class BackupController {
     /// connaît même pas.
     private func probeRepository() async -> LinkProbeResult {
         let start = Date()
+        // **`repositoryTimeout` est lu ici, et c'est le seul endroit du
+        // programme qui le lisait jusqu'ici : nulle part.** L'écran proposait
+        // un curseur « Ouverture du dépôt : N s », le disque le conservait, et
+        // aucune commande ne s'en servait — `repositoryStatus()` partait sans
+        // aucun délai, et le chien de garde d'absence de progression ne s'arme
+        // que pour `snapshot create`. Un dépôt qui accepte la connexion puis
+        // se tait figeait la fenêtre sur « vérification de la chaîne… » sans
+        // fin, et le job planifié gardait le verrou de simultanéité pour
+        // toujours — donc aucune sauvegarde, jamais plus, sans un mot
+        // d'explication.
+        let timeout = configuration.repositoryTimeout
         do {
-            let status = try await BackupEngine.driver().repositoryStatus()
+            let status = try await BackupEngine.driver().repositoryStatus(timeout: timeout)
             repositoryStatus = status
             return LinkProbeResult(
                 link: .repositoryOpens,
@@ -798,8 +1009,40 @@ final class BackupController {
         // Le verrou ensuite. Le job launchd peut être en train de sauvegarder :
         // deux `kopia` sur le même dépôt, c'est un conflit de verrou côté
         // dépôt, et potentiellement une réparation à la main.
-        guard let lock = BackupRunLock.acquire() else {
+        //
+        // **Trois issues, pas deux.** L'ancien `Held?` rendait `nil` aussi bien
+        // sur une contention normale que sur une panne d'entrée-sortie, et le
+        // seul message écrit était « sauvegarde déjà en cours ailleurs ». Un
+        // dossier `~/Library/Application Support/bran/backup` devenu
+        // inaccessible — droits, disque plein, volume en lecture seule —
+        // arrêtait donc toutes les sauvegardes de ce Mac, à chaque échéance,
+        // sous un message qui disait que tout allait bien. C'est la panne
+        // fondatrice du projet une case plus loin : plus « OK sans données »,
+        // mais « occupé sans personne ». Une panne de verrou s'écrit au
+        // journal comme un échec, pour qu'elle apparaisse à l'écran et dans
+        // l'alerte.
+        let lock: BackupRunLock.Held
+        switch BackupRunLock.acquire() {
+        case .acquired(let held):
+            lock = held
+        case .heldByAnotherProcess:
             log.info("sauvegarde déjà en cours ailleurs — le bouton ne fait rien")
+            return
+        case .failed(let operation, let code):
+            let failure = BackupFailure(
+                kind: .storage,
+                summary: "Le verrou de simultanéité n'a pas pu être posé (\(operation), errno \(code)) : "
+                    + "ce n'est pas une sauvegarde concurrente, c'est le dossier du journal qui est "
+                    + "inaccessible. Aucune sauvegarde ne peut partir tant que ce n'est pas levé.",
+                suggestedAction: "Vérifier les droits et la place disponible sur "
+                    + "« ~/Library/Application Support/bran/backup ».",
+                rawOutput: "\(operation) : errno \(code)")
+            log.error("verrou de sauvegarde impossible : \(operation, privacy: .public) errno \(code)")
+            machine.failed(failure)
+            phase = machine.phase
+            record(BackupAttempt(
+                id: UUID(), startedAt: Date(), finishedAt: Date(),
+                trigger: trigger, failure: failure))
             return
         }
         defer { lock.release() }
@@ -825,7 +1068,21 @@ final class BackupController {
         //    c'est avant de lancer qu'il faut savoir.
         machine.chainCheckStarted()
         phase = machine.phase
-        await probeChain(includingRepository: true)
+        // **Insiste, plutôt que d'abandonner sur un sondage déjà en vol.**
+        // `probeChain` refuse désormais de se dédoubler (voir sa
+        // documentation) : sans cette boucle, cliquer « Sauvegarder
+        // maintenant » pile pendant le sondage de `pollLoop` ferait repartir
+        // `performRun` sur un verdict périmé, ou pas de verdict du tout. Cinq
+        // secondes couvrent très largement un sondage complet — les cinq
+        // maillons rapides coûtent ~0,4 s mesuré, le sixième 1,2 s à cache
+        // chaud.
+        var probed = await probeChain(includingRepository: true)
+        var waits = 0
+        while !probed, waits < 10 {
+            try? await Task.sleep(for: .milliseconds(500))
+            waits += 1
+            probed = await probeChain(includingRepository: true)
+        }
 
         guard let verdict = chainVerdict else {
             // Ne devrait plus arriver maintenant que `isEnabled` est vérifié
@@ -881,7 +1138,21 @@ final class BackupController {
                 activeDriver = nil
             }
 
-            // 2. Le run. La progression est publiée au compte-gouttes.
+            // 2. Les règles d'exclusion, **avant** le run et jamais après.
+            //    `snapshot create` n'a aucun drapeau d'exclusion : tout passe
+            //    par la politique du dépôt. Tant que personne n'écrivait cette
+            //    politique, `configuration.ignoreRules` était un réglage mort —
+            //    saisi, persisté, et jamais transmis à kopia, donc un dossier
+            //    explicitement exclu partait quand même. Un échec ici arrête le
+            //    run : sauvegarder sur une politique qu'on n'a pas su écrire
+            //    enverrait dans le dépôt ce que l'utilisateur avait demandé
+            //    d'en tenir dehors.
+            try await driver.applyIgnoreRules(
+                configuration.ignoreRules,
+                to: configuration.sourcePaths,
+                timeout: configuration.repositoryTimeout)
+
+            // 3. Le run. La progression est publiée au compte-gouttes.
             let reported = try await driver.createSnapshot(
                 paths: configuration.sourcePaths,
                 onProgress: { [weak self] progress in
@@ -889,14 +1160,21 @@ final class BackupController {
                 })
             uploaded = max(uploaded, 0)
 
-            // 3. **L'étape qu'un pilote naïf saute.** Ce que `create` a rendu
+            // 4. **L'étape qu'un pilote naïf saute.** Ce que `create` a rendu
             //    n'est que la parole du processus qui vient de finir. On relit
             //    le dépôt, et c'est la machine — pas ce fichier — qui décide si
             //    l'identifiant s'y trouve.
             machine.createReturned(reported)
             phase = machine.phase
 
-            let confirmed = try await driver.listSnapshots()
+            // Quatre fois le budget d'une ouverture de dépôt : `snapshot list
+            // --all` relit les manifestes de tous les snapshots, pas seulement
+            // l'en-tête du dépôt. Dérivé du même réglage plutôt qu'un second
+            // chiffre à régler — l'utilisateur n'a qu'un curseur, et allonger
+            // l'un doit allonger l'autre. Borné quand même : sans délai, cette
+            // étape-ci hérite exactement du blocage que `repositoryTimeout`
+            // existe pour fermer.
+            let confirmed = try await driver.listSnapshots(timeout: configuration.repositoryTimeout * 4)
             machine.repositoryConfirmed(confirmed)
             phase = machine.phase
 
@@ -1039,6 +1317,76 @@ final class BackupController {
         let result = BackupJournal.readAll()
         history = result.attempts
         unreadableJournalLines = result.unreadableLineCount
+        journalReadFailure = result.readFailure
+        if let readFailure = result.readFailure {
+            log.error("journal de sauvegarde illisible : \(readFailure, privacy: .public)")
+        }
+    }
+
+    // MARK: - L'intégrité du dépôt
+
+    /// Lance `kopia snapshot verify` et retient ce qu'il a répondu.
+    ///
+    /// **Pourquoi ce n'est pas automatique.** `snapshot verify` relit les
+    /// métadonnées de tous les snapshots du dépôt : c'est la commande la plus
+    /// chère de toute la fonctionnalité, et l'exécuter à chaque rafraîchissement
+    /// d'écran ferait tourner un `kopia` en permanence pour une réponse qui ne
+    /// change qu'après une sauvegarde. Elle est donc à la demande — et le
+    /// résultat, lui, est **affiché** : c'est ce qui distingue « un snapshot
+    /// existe dans le dépôt » de « bran a relu ce que le dépôt contient ».
+    func verifyRepositoryIntegrity() {
+        guard !isVerifyingIntegrity, !phase.isBusy else { return }
+        isVerifyingIntegrity = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isVerifyingIntegrity = false }
+            // Le même verrou que la sauvegarde : `snapshot verify` ouvre le
+            // dépôt, et deux kopia sur le même dépôt se disputent son cache
+            // local.
+            let lock: BackupRunLock.Held
+            switch BackupRunLock.acquire() {
+            case .acquired(let held):
+                lock = held
+            case .heldByAnotherProcess:
+                self.lastIntegrityCheck = IntegrityCheck(at: Date(), failure: BackupFailure(
+                    kind: .interrupted,
+                    summary: "Une sauvegarde est en cours : la vérification d'intégrité attendra qu'elle soit finie.",
+                    rawOutput: ""))
+                return
+            case .failed(let operation, let code):
+                self.lastIntegrityCheck = IntegrityCheck(at: Date(), failure: BackupFailure(
+                    kind: .storage,
+                    summary: "Le verrou de simultanéité n'a pas pu être posé (\(operation), errno \(code)).",
+                    rawOutput: "\(operation) : errno \(code)"))
+                return
+            }
+            defer { lock.release() }
+
+            do {
+                let driver = try BackupEngine.driver()
+                _ = try await driver.verify()
+                self.lastIntegrityCheck = IntegrityCheck(at: Date(), failure: nil)
+            } catch {
+                self.lastIntegrityCheck = IntegrityCheck(at: Date(), failure: Self.classify(error))
+            }
+        }
+    }
+
+    // MARK: - La version de kopia
+
+    /// Mesure la version du binaire kopia et publie le verdict. Ne lève
+    /// jamais : un binaire absent est une réponse, pas une exception qui
+    /// empêcherait l'écran de s'afficher.
+    private func refreshKopiaVersion() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let driver = try BackupEngine.driver()
+                self.kopiaVersion = await driver.versionStanding()
+            } catch {
+                self.kopiaVersion = .unreadable(String(describing: error))
+            }
+        }
     }
 
     // MARK: - Les secrets

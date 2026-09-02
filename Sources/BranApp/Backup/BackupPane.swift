@@ -132,9 +132,11 @@ struct BackupPane: View {
         let verdict = BackupHeroVerdict.evaluate(
             scheduleDecision: backup.scheduleDecision,
             hasAllSecrets: hasAllSecrets,
+            launchAgentStatus: backup.launchAgentStatus,
             phase: backup.phase,
             chainVerdict: backup.chainVerdict,
-            coverage: coverage
+            coverage: coverage,
+            lastIntegrityCheck: backup.lastIntegrityCheck
         )
 
         VStack(spacing: 0) {
@@ -215,6 +217,15 @@ struct BackupPane: View {
     @ViewBuilder
     private var notices: some View {
         VStack(spacing: 0) {
+            if let journalNotice {
+                NoticeRow(text: journalNotice, symbol: "doc.badge.exclamationmark", tint: Palette.broken)
+            }
+            if let fullDiskAccessNotice {
+                NoticeRow(text: fullDiskAccessNotice, symbol: "lock.slash.fill", tint: Palette.attention)
+            }
+            if let kopiaVersionNotice {
+                NoticeRow(text: kopiaVersionNotice, symbol: "shippingbox.badge.arrow.up", tint: Palette.attention)
+            }
             if let interruptedNotice {
                 NoticeRow(text: interruptedNotice, symbol: "pause.circle.fill", tint: Palette.machine)
             }
@@ -223,6 +234,70 @@ struct BackupPane: View {
             }
         }
         .branAnimation(Motion.enter, value: backup.phase)
+    }
+
+    /// **Le journal illisible, dit franchement.** Un journal absent est
+    /// normal ; un journal présent qu'on ne sait pas lire fait disparaître
+    /// tout l'historique de l'écran — donc le dernier succès, donc la
+    /// couverture, donc l'alerte — sans que rien ne le signale. Rouge, parce
+    /// que c'est la mémoire du dispositif qui manque, pas une sauvegarde.
+    private var journalNotice: String? {
+        if let failure = backup.journalReadFailure {
+            return "Le journal des sauvegardes n'a pas pu être lu — l'historique affiché est "
+                + "incomplet ou vide, et ce n'est pas parce que rien n'a eu lieu. \(failure)"
+        }
+        guard backup.unreadableJournalLines > 0 else { return nil }
+        let lines = backup.unreadableJournalLines
+        return "\(lines) ligne\(lines > 1 ? "s" : "") du journal \(lines > 1 ? "sont illisibles" : "est illisible") "
+            + "et \(lines > 1 ? "ont" : "a") été ignorée\(lines > 1 ? "s" : "") — une extinction pendant une "
+            + "écriture laisse cette trace. L'historique affiché est donc incomplet d'autant."
+    }
+
+    /// **L'Accès complet au disque, et ce que son absence cache.**
+    ///
+    /// Sans lui, kopia lit une fraction du dossier personnel — `~/Library/Mail`,
+    /// `~/Library/Messages`, `~/Library/Safari` et les conteneurs
+    /// d'applications lui sont refusés — et la politique du dépôt porte
+    /// `Ignore file read errors: true` : les fichiers refusés incrémentent
+    /// `ignoredErrorCount` sans changer le code de sortie. Une sauvegarde peut
+    /// donc se déclarer réussie en ayant sauté ce qu'on lui avait demandé.
+    /// N'apparaît que si une source contient réellement le dossier personnel :
+    /// quelqu'un qui ne sauvegarde que `~/Documents` n'a rien à corriger.
+    private var fullDiskAccessNotice: String? {
+        guard backup.configuration.isEnabled else { return nil }
+        guard backup.fullDiskAccess == .denied else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
+        let coversHome = backup.configuration.sourcePaths.contains { home.hasPrefix($0) || $0 == home }
+        guard coversHome else { return nil }
+        return """
+            bran n'a pas l'Accès complet au disque : les dossiers protégés par macOS \
+            (Mail, Messages, Safari, les conteneurs d'applications) seront **sautés en silence** — \
+            kopia les compte comme « ignorés », pas comme des erreurs, et la sauvegarde se déclarera \
+            réussie sans eux. Accordez-le dans Réglages système › Confidentialité et sécurité › \
+            Accès complet au disque, puis relancez bran.
+            """
+    }
+
+    /// **La version de kopia, mesurée au démarrage.** Distingue « pas la
+    /// version éprouvée » (on ne sait pas) de « version connue comme
+    /// incompatible » (on sait) et de « version illisible » (le binaire
+    /// manque). Aucune ne bloque quoi que ce soit : elles disent seulement ce
+    /// qui n'a pas été vérifié.
+    private var kopiaVersionNotice: String? {
+        switch backup.kopiaVersion {
+        case .none, .some(.matchesExpected):
+            return nil
+        case .some(.unvalidated(let found, let expected)):
+            return "Le binaire kopia installé annonce « \(found) », alors que bran a été éprouvé "
+                + "contre \(expected). Rien ne dit qu'il est cassé — kopia garde une compatibilité de "
+                + "dépôt ascendante — mais rien ne dit non plus que bran sait encore lire ses sorties."
+        case .some(.incompatible(let found, let reason)):
+            return "Le binaire kopia installé (« \(found) ») est connu comme incompatible avec bran : "
+                + "\(reason)"
+        case .some(.unreadable(let reason)):
+            return "La version de kopia n'a pas pu être lue : \(reason) Aucune sauvegarde ne partira "
+                + "tant que le binaire n'est pas joignable."
+        }
     }
 
     /// **Une interruption n'est pas un échec, et ne doit pas en avoir la
@@ -265,20 +340,44 @@ struct BackupPane: View {
             Image(systemName: verdict.symbol)
                 .foregroundStyle(verdict.tint)
                 .font(Type.cardTitle)
-            VStack(alignment: .leading, spacing: Space.tight) {
-                Text(verdict.title)
-                    .font(Type.cardTitle)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let detail = verdict.detail {
-                    Text(detail)
-                        .font(Type.cardBody)
-                        .foregroundStyle(.secondary)
+            // **`fixedSize(vertical:)` hors d'un `ScrollView` bloque la hauteur
+            // de la fenêtre, et c'est mesuré.** Voir `NoticeRow` dans
+            // `DictationPane.swift` pour le relevé complet : à largeur quasi
+            // nulle — la taille que macOS propose à la vue racine pour calculer
+            // le plancher de redimensionnement — un texte en hauteur idéale
+            // s'enroule en centaines de lignes d'un caractère, et cette hauteur
+            // remonte telle quelle jusqu'à la fenêtre (3 832 pt contre 112 pt
+            // sur le bandeau le plus long de l'application). Le héros et la
+            // ligne d'action vivent **hors** du `ScrollView` de cet écran : ils
+            // rejouaient donc exactement ce défaut, dans le neuvième écran
+            // après les sept déjà corrigés.
+            //
+            // `TextWidthFloor` compose le texte à 320 pt au minimum tout en ne
+            // rapportant que la largeur proposée : au-dessus de 400 pt, la
+            // disposition est identique au point près ; en dessous, la vue
+            // rogne au lieu de recomposer — franc, et sans conséquence à une
+            // largeur où la fenêtre n'est de toute façon pas utilisable.
+            TextWidthFloor(floorWidth: Self.heroTextFloorWidth) {
+                VStack(alignment: .leading, spacing: Space.tight) {
+                    Text(verdict.title)
+                        .font(Type.cardTitle)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let detail = verdict.detail {
+                        Text(detail)
+                            .font(Type.cardBody)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
+            .clipped()
         }
         .accessibilityElement(children: .combine)
     }
+
+    /// Le plancher de composition des textes hors `ScrollView` — même valeur
+    /// que `NoticeRow`, pour la même raison et avec la même mesure derrière.
+    private static let heroTextFloorWidth: CGFloat = 320
 
     /// **L'unique bouton primaire, toujours au même endroit.**
     ///
@@ -310,11 +409,16 @@ struct BackupPane: View {
         }
     }
 
+    /// Même plancher de largeur que le héros, et pour la même raison : cette
+    /// ligne vit elle aussi hors du `ScrollView`.
     private var scheduleText: some View {
-        Text(Self.scheduleText(backup.scheduleDecision))
-            .font(Type.cardBody)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+        TextWidthFloor(floorWidth: Self.heroTextFloorWidth) {
+            Text(Self.scheduleText(backup.scheduleDecision))
+                .font(Type.cardBody)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .clipped()
     }
 
     private var actionButton: some View {
@@ -669,11 +773,18 @@ struct BackupPane: View {
                         }
                     }
 
+                    integrityLine
+
                     HStack {
                         Spacer()
                         Button("Vérifier maintenant") { backup.verifyChainNow() }
                             .disabled(backup.phase.isBusy)
                             .help("Resonde les six maillons, dépôt compris — le plus cher, et le plus vrai.")
+                        Button("Vérifier l'intégrité") { backup.verifyRepositoryIntegrity() }
+                            .disabled(backup.phase.isBusy || backup.isVerifyingIntegrity)
+                            .help("Lance « kopia snapshot verify » : relit ce que le dépôt contient "
+                                + "réellement, snapshot par snapshot. C'est la commande la plus chère de "
+                                + "tout l'écran — plusieurs minutes sur un dépôt fourni.")
                     }
                 }
             } else {
@@ -688,6 +799,39 @@ struct BackupPane: View {
                     }
                 }
             }
+        }
+    }
+
+    /// **Ce qui distingue « le dépôt dit qu'il l'a » de « bran l'a relu ».**
+    /// `KopiaDriver.verify()` existait, complet et documenté, et n'était appelé
+    /// nulle part dans le dépôt : rien, sur cet écran, ne reposait sur une
+    /// relecture réelle du contenu.
+    @ViewBuilder
+    private var integrityLine: some View {
+        if backup.isVerifyingIntegrity {
+            HStack(spacing: Space.small) {
+                ProgressView().controlSize(.small)
+                Text("Relecture du dépôt en cours — « kopia snapshot verify ».")
+                    .font(Type.metaFaint)
+                    .foregroundStyle(.secondary)
+            }
+        } else if let check = backup.lastIntegrityCheck {
+            HStack(alignment: .top, spacing: Space.small) {
+                Image(systemName: check.succeeded ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(check.succeeded ? Palette.done : Palette.attention)
+                Text(check.succeeded
+                    ? "Intégrité vérifiée \(BackupFormat.age(check.at)) (\(BackupFormat.absolute(check.at)))."
+                    : "Vérification d'intégrité en échec \(BackupFormat.age(check.at)) : \(check.failure?.summary ?? "")")
+                    .font(Type.metaFaint)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            Text("L'intégrité de ce dépôt n'a jamais été vérifiée : bran sait que le snapshot y est "
+                + "référencé, pas encore que son contenu se relit.")
+                .font(Type.metaFaint)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -785,9 +929,11 @@ private struct BackupHeroVerdict: Equatable {
     static func evaluate(
         scheduleDecision: ScheduleDecision,
         hasAllSecrets: Bool,
+        launchAgentStatus: LaunchAgentStatus,
         phase: BackupPhase,
         chainVerdict: ChainVerdict?,
-        coverage: SourceCoverageReport
+        coverage: SourceCoverageReport,
+        lastIntegrityCheck: BackupController.IntegrityCheck?
     ) -> BackupHeroVerdict {
         // P0 — configuration désactivée ou incomplète. `scheduleDecision`
         // porte déjà exactement cette réponse (`SchedulePolicy` vérifie
@@ -811,6 +957,39 @@ private struct BackupHeroVerdict: Equatable {
                 title: "Un secret manque au Trousseau.",
                 detail: "La sauvegarde ne peut pas ouvrir le dépôt sans lui. Complétez-le dans les préférences."
             )
+        }
+
+        // P1bis — le job launchd n'est pas là.
+        //
+        // **Il était calculé et jamais montré.** `BackupController` relit
+        // l'état réel auprès de `launchctl print` toutes les dix minutes et
+        // range le verdict dans `launchAgentStatus` ; aucune vue ne le lisait.
+        // Or c'est exactement la panne fondatrice du projet, une case plus
+        // loin : une planification qui existe sur le papier et que rien
+        // n'exécute. L'écran disait « activée », le job n'était pas chargé, et
+        // le seul témoin était `Console.app`.
+        //
+        // Placé après le Trousseau et avant la couverture, parce que c'est un
+        // blocage technique qu'un geste répare — pas un jugement sur les
+        // fichiers. Et **avant** `phase.isBusy` : un run manuel en cours ne
+        // change rien au fait que rien ne partira tout seul cette nuit.
+        switch launchAgentStatus {
+        case .installFailed(let reason):
+            return BackupHeroVerdict(
+                symbol: "calendar.badge.exclamationmark", tint: Palette.broken,
+                title: "La sauvegarde planifiée n'a pas pu être installée.",
+                detail: "Rien ne partira tout seul tant que ce n'est pas levé — \(reason)"
+            )
+        case .notLoaded:
+            return BackupHeroVerdict(
+                symbol: "calendar.badge.exclamationmark", tint: Palette.attention,
+                title: "La sauvegarde planifiée ne tourne pas.",
+                detail: "Le fichier du job est écrit, mais launchd ne le voit pas chargé : aucune "
+                    + "sauvegarde ne partira d'elle-même. Désactivez puis réactivez la sauvegarde dans "
+                    + "les réglages pour le réinstaller."
+            )
+        case .notApplicable, .running:
+            break
         }
 
         // P2 — une tentative occupe déjà le dépôt.
@@ -872,10 +1051,44 @@ private struct BackupHeroVerdict: Equatable {
                     detail: coverage.headline
                 )
             }
+            // **Ce que cette phrase a le droit d'affirmer, et pas un mot de
+            // plus.**
+            //
+            // Elle disait « Vos fichiers sont à l'abri ». Ce qui est prouvé à
+            // ce point, c'est que chaque dossier configuré est couvert par un
+            // snapshot **relu dans le dépôt** et récent — ce qui est déjà
+            // beaucoup, et bien plus qu'un `create` qui a rendu 0. Mais
+            // personne n'a encore vérifié que ces octets se relisent :
+            // `kopia snapshot verify` existe dans le pilote et n'était appelé
+            // nulle part, et aucune restauration n'a jamais eu lieu.
+            //
+            // « À l'abri » est une promesse de restitution ; « sauvegardés »
+            // est un constat d'envoi. Tant que l'intégrité n'a pas été
+            // vérifiée, c'est le constat qu'on affiche — et le détail dit
+            // exactement ce qui manque, avec le bouton qui le comble juste en
+            // dessous, dans le panneau « Preuves ».
+            if let check = lastIntegrityCheck, check.succeeded {
+                return BackupHeroVerdict(
+                    symbol: "checkmark.shield.fill", tint: Palette.done,
+                    title: "Vos fichiers sont à l'abri.",
+                    detail: coverage.headline
+                        + " Intégrité du dépôt vérifiée \(BackupFormat.age(check.at))."
+                )
+            }
+            if let check = lastIntegrityCheck, let failure = check.failure {
+                return BackupHeroVerdict(
+                    symbol: "exclamationmark.shield.fill", tint: Palette.attention,
+                    title: "Le dépôt ne se relit pas entièrement.",
+                    detail: "Les dossiers sont couverts, mais la vérification d'intégrité a échoué : "
+                        + failure.summary
+                )
+            }
             return BackupHeroVerdict(
                 symbol: "checkmark.shield.fill", tint: Palette.done,
-                title: "Vos fichiers sont à l'abri.",
+                title: "Vos fichiers sont sauvegardés.",
                 detail: coverage.headline
+                    + " L'intégrité du dépôt n'a pas encore été vérifiée — « Vérifier l'intégrité », "
+                    + "dans « Preuves », relit ce que le dépôt contient réellement."
             )
         }
     }
@@ -1094,11 +1307,33 @@ private struct LinkDiagnosticView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             if let rawDetail = result.rawDetail {
-                Text(rawDetail)
-                    .font(Type.code)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .branWell()
+                // **Le détail brut défile, et il est borné à l'affichage.**
+                //
+                // `rawDetail` porte ce que le serveur a répondu :
+                // `ChainProbes.bodyText(_:)` y met le **corps entier** de la
+                // réponse HTTP, et `probeRepository()` la sortie d'erreur de
+                // kopia. Un MinIO qui rend une page d'erreur de plusieurs
+                // milliers de lignes — ou n'importe quoi d'autre qui écoute sur
+                // ce port — produisait un `Text` en hauteur idéale, sans
+                // `ScrollView` ni plafond : le popover devenait plus haut que
+                // l'écran, donc impossible à lire *et* impossible à fermer par
+                // son bouton, puisque le bouton passait sous le bord.
+                //
+                // Deux bornes, pas une : `lineLimit` coupe ce que le moteur de
+                // texte doit composer (un texte d'un million de lignes reste
+                // coûteux même dans un `ScrollView`), et `maxHeight` borne ce
+                // que le popover réclame à l'écran. Le texte entier reste
+                // accessible par « Copier le diagnostic », qui ne tronque rien.
+                ScrollView {
+                    Text(rawDetail)
+                        .font(Type.code)
+                        .textSelection(.enabled)
+                        .lineLimit(BackupPaneMetric.popoverRawLines)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: BackupPaneMetric.popoverRawMaxHeight)
+                .branWell()
             }
 
             Text("Mesuré \(BackupFormat.age(result.measuredAt)).")
@@ -1248,6 +1483,16 @@ enum BackupPaneMetric {
 
     static let consequenceOpacity: Double = 0.45
     static let popoverWidth: CGFloat = 320
+
+    /// Ce qu'un détail brut a le droit d'occuper dans un popover : de quoi
+    /// lire une erreur réelle sans que le popover puisse dépasser la hauteur
+    /// d'un écran de portable. Le texte complet reste accessible par
+    /// « Copier le diagnostic ».
+    static let popoverRawMaxHeight: CGFloat = 260
+    /// Le plafond de composition, distinct du plafond d'affichage : un texte
+    /// d'un million de lignes coûte cher au moteur de disposition même quand
+    /// il défile.
+    static let popoverRawLines = 200
     static let historyLimit = 12
     static let rawOutputLines = 6
 

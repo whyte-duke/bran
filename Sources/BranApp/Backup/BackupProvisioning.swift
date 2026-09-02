@@ -125,7 +125,13 @@ enum BackupProvisioning {
         }
 
         do {
-            let status = try runSynchronously { try await BackupEngine.driver().repositoryStatus() }
+            // `repositoryTimeout` enfin lu ici aussi : sans lui, un import
+            // scripté par SSH pouvait rester suspendu indéfiniment sur un dépôt
+            // qui ne répond plus, sans jamais rendre la main au script.
+            let timeout = provisional.repositoryTimeout
+            let status = try runSynchronously {
+                try await BackupEngine.driver().repositoryStatus(timeout: timeout)
+            }
             var verified = provisional
             verified.isEnabled = true
             try BackupConfigurationStore.save(verified)
@@ -320,6 +326,20 @@ enum BackupProvisioning {
     static func runIfRequested() -> Bool {
         guard CommandLine.arguments.contains(provisionFlag) else { return false }
 
+        // **La version du binaire, dite ici et nulle part ailleurs sur ce
+        // chemin.** `KopiaDriver.matchesExpectedVersion()` existait, documentée,
+        // et n'était appelée dans aucun fichier du dépôt : un binaire qu'un
+        // `brew upgrade` a remplacé, ou qu'un paquet a mal copié, ne se
+        // découvrait qu'au milieu d'une vraie sauvegarde, sous la forme d'un
+        // décodage de sortie qui échoue sans qu'on sache pourquoi. Un
+        // provisionnement scripté est le tout premier moment où la question se
+        // pose, et le seul où quelqu'un lit encore la sortie d'erreur.
+        //
+        // Jamais bloquant : kopia garde une compatibilité de dépôt ascendante,
+        // et refuser de provisionner sur un écart de version transformerait une
+        // incertitude en panne.
+        warnAboutKopiaVersion()
+
         do {
             let status = try provisionFromEnvironmentOrStandardInput()
             let message = """
@@ -400,7 +420,10 @@ enum BackupProvisioning {
         }
 
         do {
-            let status = try runSynchronously { try await BackupEngine.driver().repositoryStatus() }
+            let timeout = candidate.repositoryTimeout
+            let status = try runSynchronously {
+                try await BackupEngine.driver().repositoryStatus(timeout: timeout)
+            }
             var verified = candidate
             verified.isEnabled = true
             try BackupConfigurationStore.save(verified)
@@ -595,6 +618,39 @@ enum BackupProvisioning {
             return try load()
         } catch {
             throw ProvisioningFailure.existingConfigurationCorrupted(underlying: error)
+        }
+    }
+
+    /// Mesure la version de kopia et l'écrit sur la sortie d'erreur quand elle
+    /// n'est pas celle contre laquelle bran a été éprouvé.
+    ///
+    /// Distingue les trois réponses que `KopiaDriver.VersionStanding` nomme :
+    /// « c'est la bonne » (silence), « c'en est une autre, on ne sait pas »
+    /// (avertissement), « on sait qu'elle ne marche pas » (avertissement plus
+    /// net), et « on n'a pas pu la lire » — qui, lui, annonce un
+    /// provisionnement qui va probablement échouer juste après.
+    private static func warnAboutKopiaVersion() {
+        let standing = (try? runSynchronously {
+            let driver = try BackupEngine.driver()
+            return await driver.versionStanding()
+        }) ?? .unreadable("le pilote kopia n'a pas pu être construit")
+
+        let message: String?
+        switch standing {
+        case .matchesExpected:
+            message = nil
+        case .unvalidated(let found, let expected):
+            message = "Attention : kopia annonce « \(found) », bran a été éprouvé contre \(expected). "
+                + "Le provisionnement continue — kopia garde une compatibilité de dépôt ascendante — "
+                + "mais rien ne garantit que bran sait encore lire ses sorties."
+        case .incompatible(let found, let reason):
+            message = "Attention : kopia « \(found) » est connu comme incompatible avec bran : \(reason)"
+        case .unreadable(let reason):
+            message = "Attention : la version de kopia n'a pas pu être lue (\(reason)). "
+                + "Le provisionnement va probablement échouer à l'ouverture du dépôt."
+        }
+        if let message {
+            FileHandle.standardError.write(Data((message + "\n").utf8))
         }
     }
 
