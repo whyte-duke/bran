@@ -342,7 +342,17 @@ public enum RestoreCatalog {
             // absence de mesure. `?? 0` est donc justifié ici — précisément
             // parce que la sémantique de ce champ précis a été vérifiée, pas
             // supposée.
-            fileSize = raw.size ?? 0
+            let size = raw.size ?? 0
+            // Même refus que dans `buildSummary` : une taille négative
+            // remonterait jusqu'à `validateDestination`, où elle rendrait une
+            // marge négative — donc « il y a la place » sur un volume qu'on
+            // n'a pas mesuré.
+            guard size >= 0 else {
+                throw KopiaDecodingFailure.implausibleCounter(
+                    path: "entries[\(name)].size", value: String(size), context: context
+                )
+            }
+            fileSize = size
         }
 
         return RestoreEntry(
@@ -378,6 +388,21 @@ public enum RestoreCatalog {
         // peine de faire disparaître des fichiers réellement en échec.
         guard let numFailed = raw.numFailed else {
             throw KopiaDecodingFailure.missingField(path: "\(path).numFailed", context: context)
+        }
+
+        // Le type ne dit rien de la plausibilité : `Int64` accepte `-1`, et
+        // une taille négative traverserait jusqu'à la garde disque, où elle
+        // rendrait une marge négative — donc « il y a la place », pour un
+        // volume qu'on n'a pas mesuré. Un compteur de fichiers négatif
+        // ferait la même chose à l'affichage. On refuse au décodage, une
+        // fois, plutôt que de se défendre à chaque usage.
+        for (field, value) in [
+            ("size", size), ("files", Int64(files)), ("dirs", Int64(dirs)),
+            ("symlinks", Int64(symlinks)), ("numFailed", Int64(numFailed)),
+        ] where value < 0 {
+            throw KopiaDecodingFailure.implausibleCounter(
+                path: "\(path).\(field)", value: String(value), context: context
+            )
         }
 
         var lastModified: Date?
@@ -665,7 +690,7 @@ public struct RestoreProgressReader: Sendable {
         let parts = text.split(separator: Character(" "))
         guard parts.count == 2, let value = Double(parts[0]) else { return nil }
         guard let multiplier = unitMultiplier(String(parts[1])) else { return nil }
-        return Int64((value * multiplier).rounded())
+        return octets(value * multiplier)
     }
 
     /// « 752.9 » + « KB/s » → 752 900 (octets par seconde).
@@ -673,15 +698,50 @@ public struct RestoreProgressReader: Sendable {
         guard let amount = Double(value) else { return nil }
         guard unit.hasSuffix("/s") else { return nil }
         guard let multiplier = unitMultiplier(String(unit.dropLast(2))) else { return nil }
-        return Int64((amount * multiplier).rounded())
+        return octets(amount * multiplier)
     }
 
+    /// La conversion finale, isolée pour que `parseSize` et `parseRate` la
+    /// fassent de la même façon.
+    ///
+    /// **`Int64(_:)` d'un `Double` non fini ou hors plage est une erreur
+    /// fatale, pas un `nil`.** `Double("nan")` rend `nan` et `Double("1e400")`
+    /// rend `+∞`, tous deux sans se plaindre — mesuré. La ligne
+    /// `Processed 1 (nan MB) of 2 (1 MB).`, parfaitement bien formée, arrêtait
+    /// donc le processus au milieu d'une restauration. Même famille que le
+    /// défaut corrigé dans `KopiaProgressReader.parseSize`, à l'autre bout du
+    /// même moteur.
+    private static func octets(_ value: Double) -> Int64? {
+        let rounded = value.rounded()
+        guard rounded.isFinite,
+              rounded >= Double(Int64.min),
+              rounded <= Double(Int64.max)
+        else { return nil }
+        return Int64(rounded)
+    }
+
+    /// **`TB` et `PB` manquaient, et leur absence tuait la restauration.**
+    /// C'est très exactement le défaut corrigé dans
+    /// `KopiaProgressReader.parseSize` — le même mécanisme, le même moteur,
+    /// l'autre sens du transfert :
+    ///
+    ///     Processed 12 (1.5 TB) of 40 (2 TB).   →  nil
+    ///
+    /// `parseProgress` rend alors `nil`, `accept()` un tableau vide, et
+    /// `KopiaRestoreDriver` ne rafraîchit son horloge que sur un événement
+    /// **décodé** (`if !events.isEmpty { lastProgress = Date() }`). Passé
+    /// `defaultProgressStallThreshold`, son chien de garde conclut « aucune
+    /// progression » et tue une restauration qui avançait — c'est-à-dire
+    /// précisément la restauration d'un Mac de plus d'un téraoctet, le jour
+    /// où on en a besoin.
     private static func unitMultiplier(_ unit: String) -> Double? {
         switch unit {
         case "B": 1
         case "KB": 1_000
         case "MB": 1_000_000
         case "GB": 1_000_000_000
+        case "TB": 1_000_000_000_000
+        case "PB": 1_000_000_000_000_000
         default: nil
         }
     }
@@ -867,10 +927,45 @@ extension RestoreCatalog {
         // contenu, et un volume tout juste à la bonne taille échouerait sur
         // le dernier fichier plutôt qu'avant le premier — exactement le
         // défaut que ce contrôle existe pour fermer.
-        let requiredWithMargin = Int64((Double(requiredBytes) * 1.05).rounded(.up))
+        let requiredWithMargin = withFivePercentMargin(requiredBytes)
         if available < requiredWithMargin {
             problems.append(.insufficientSpace(requiredBytes: requiredWithMargin, availableBytes: available))
         }
         return problems
+    }
+
+    /// `requiredBytes` majoré de 5 %, en arithmétique entière, sans jamais
+    /// piéger.
+    ///
+    /// **Le calcul précédent était `Int64((Double(requiredBytes) * 1.05).rounded(.up))`,
+    /// et il arrêtait l'application.** Mesuré : `Double(Int64.max) * 1.05`
+    /// vaut 9,684 540 638 697 515 × 10¹⁸, une valeur parfaitement finie mais
+    /// supérieure à `Int64.max` — et `Int64(_:)` d'un `Double` hors plage est
+    /// une erreur fatale, pas une troncature. Il suffisait donc que kopia
+    /// rende le manifeste
+    ///
+    ///     {"stream":"kopia:directory","entries":[],
+    ///      "summary":{"size":9223372036854775807,…}}
+    ///
+    /// — décodé sans erreur, `Int64` étant justement le type du champ — pour
+    /// que le clic sur « restaurer » tue le processus **avant** que kopia
+    /// soit lancé. Une garde écrite pour éviter d'échouer au milieu d'un
+    /// transfert échouait plus tôt et plus mal.
+    ///
+    /// On sature à `Int64.max` en cas de débordement plutôt que de refuser :
+    /// c'est le sens de risque de cette fonction. Une arborescence annoncée à
+    /// 8 Eio ne tient sur aucun volume, `insufficientSpace` est le bon
+    /// verdict, et l'utilisateur lit un refus argumenté au lieu de perdre sa
+    /// session.
+    private static func withFivePercentMargin(_ requiredBytes: Int64) -> Int64 {
+        // Une taille négative n'a pas de sens physique ; elle ne peut venir
+        // que d'un manifeste corrompu. Zéro la rend inoffensive ici — c'est au
+        // décodage de la refuser, pas à la garde disque de la deviner.
+        guard requiredBytes > 0 else { return 0 }
+        let (product, overflowed) = requiredBytes.multipliedReportingOverflow(by: 105)
+        guard !overflowed else { return .max }
+        // Division entière tronquée puis arrondi au supérieur, pour reproduire
+        // exactement le `.rounded(.up)` d'avant sans passer par un `Double`.
+        return product / 100 + (product % 100 == 0 ? 0 : 1)
     }
 }

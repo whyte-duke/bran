@@ -190,6 +190,12 @@ public enum KopiaManifest {
         let dirCount: Int
         let errorCount: Int
         let ignoredErrorCount: Int
+        // Le chemin JSON d'où vient le compteur d'erreurs diffère selon la
+        // commande : `stats.errorCount` pour `snapshot list`,
+        // `rootEntry.summ.numFailed` pour `snapshot create`. On le retient
+        // pour que le refus plus bas nomme le champ que l'utilisateur peut
+        // effectivement aller regarder.
+        let errorCountPath: String
 
         if let stats = raw.stats {
             // La taille, les fichiers et les dossiers viennent de `summ` — ce
@@ -224,6 +230,7 @@ public enum KopiaManifest {
             dirCount = dirs
             errorCount = errors
             ignoredErrorCount = ignored
+            errorCountPath = "stats.errorCount"
         } else {
             guard let summ = rootEntry.summ else {
                 throw KopiaDecodingFailure.missingField(path: "rootEntry.summ", context: context)
@@ -262,6 +269,46 @@ public enum KopiaManifest {
             // quoi qu'il arrive tant qu'elle n'a pas été relue par `list`, seul
             // chemin qui rapporte ce compteur pour de vrai.
             ignoredErrorCount = 0
+            errorCountPath = "rootEntry.summ.numFailed"
+        }
+
+        // **Le type ne suffit pas, et l'aval en meurt.** `Int64` accepte `-1`
+        // et `Int64.max` sans broncher, mais `SnapshotProof` fait ensuite
+        // `errorCount + ignoredErrorCount` avec l'addition piégeante de Swift
+        // pour rendre `missingFileCount`. Un manifeste de `snapshot list`
+        // portant
+        //
+        //     "stats":{"errorCount":9223372036854775807,
+        //              "ignoredErrorCount":9223372036854775807}
+        //
+        // décodait donc sans erreur, puis arrêtait l'application au moment
+        // exact où `BackupMachine.partialSnapshotSummary` allait annoncer le
+        // snapshot incomplet — c'est-à-dire au seul moment où ce compteur sert
+        // à quelque chose.
+        //
+        // On refuse ici plutôt que de saturer : un compteur négatif ou une
+        // somme qui déborde ne décrit aucun snapshot réel, et le contrat de ce
+        // fichier interdit d'interpréter au bénéfice du doute. Une future
+        // version de kopia qui dépasserait vraiment la borne serait refusée
+        // explicitement, avec le chemin du champ en cause.
+        for (path, value) in [
+            ("rootEntry.summ.size", Int64(totalSize)),
+            ("rootEntry.summ.files", Int64(fileCount)),
+            ("rootEntry.summ.dirs", Int64(dirCount)),
+            (errorCountPath, Int64(errorCount)),
+            ("stats.ignoredErrorCount", Int64(ignoredErrorCount)),
+        ] where value < 0 {
+            throw KopiaDecodingFailure.implausibleCounter(
+                path: path, value: String(value), context: context
+            )
+        }
+        let (_, sumOverflowed) = errorCount.addingReportingOverflow(ignoredErrorCount)
+        if sumOverflowed {
+            throw KopiaDecodingFailure.implausibleCounter(
+                path: "\(errorCountPath) + stats.ignoredErrorCount",
+                value: "\(errorCount) + \(ignoredErrorCount)",
+                context: context
+            )
         }
 
         return SnapshotProof(
@@ -323,8 +370,30 @@ public enum KopiaManifest {
             throw KopiaDecodingFailure.noRecognizableJSON(context: context)
         }
 
+        // **Le bruit d'après, pas seulement le bruit d'avant.** Ce repli
+        // reconstruisait `lines[startIndex...]` jusqu'à la fin de la sortie :
+        // il savait retirer ce qui précède le JSON, jamais ce qui le suit.
+        // Sur la sortie
+        //
+        //     []
+        //     Finished maintenance.
+        //
+        // — code de sortie 0, dépôt sain, aucun snapshot — le payload valait
+        // « []\nFinished maintenance.\n », `JSONDecoder` échouait, et un dépôt
+        // vide parfaitement valide ressortait classé « JSON tronqué », donc
+        // `.unparseable`, donc un rouge sur un écran où il n'y a rien de
+        // cassé. C'est le cas vécu le 02/09/2026 à un message près.
+        //
+        // On isole donc la première valeur JSON **complète** avant de décoder.
         let payloadText = lines[startIndex...].joined(separator: "\n")
-        guard let payload = payloadText.data(using: .utf8) else {
+        let trimmed = payloadText.drop { $0.isWhitespace }
+        guard let isolated = firstJSONValue(in: trimmed, opening: leadingDelimiter) else {
+            throw KopiaDecodingFailure.truncatedJSON(
+                context: context,
+                underlying: "la valeur JSON commencée par « \(leadingDelimiter) » n'est jamais refermée"
+            )
+        }
+        guard let payload = isolated.data(using: .utf8) else {
             throw KopiaDecodingFailure.notUTF8(context: context)
         }
         do {
@@ -332,6 +401,52 @@ public enum KopiaManifest {
         } catch {
             throw KopiaDecodingFailure.truncatedJSON(context: context, underlying: String(describing: error))
         }
+    }
+
+    /// La première valeur JSON complète de `text`, qui doit commencer par
+    /// `opening` (`{` ou `[`) — ou `nil` si elle n'est jamais refermée.
+    ///
+    /// Compte les délimiteurs de même famille en profondeur, et **ne compte
+    /// pas ceux qui se trouvent dans une chaîne**. C'est le seul piège réel de
+    /// cette fonction : un nom de fichier de snapshot peut contenir `]` ou
+    /// `}`, y compris échappé (`"dossier \"[bis]\""`), et s'arrêter dessus
+    /// couperait le JSON en plein milieu — c'est-à-dire reproduirait le défaut
+    /// qu'on ferme, dans l'autre sens.
+    ///
+    /// Le délimiteur de l'autre famille est ignoré volontairement : `[{"a":1}]`
+    /// se referme sur le `]` de profondeur zéro, quel que soit le nombre
+    /// d'accolades traversées.
+    private static func firstJSONValue(in text: Substring, opening: Character) -> Substring? {
+        let closing: Character = opening == "{" ? "}" : "]"
+        var depth = 0
+        var insideString = false
+        var escaped = false
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            let character = text[index]
+            if insideString {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    insideString = false
+                }
+            } else {
+                switch character {
+                case "\"": insideString = true
+                case opening: depth += 1
+                case closing:
+                    depth -= 1
+                    if depth == 0 { return text[text.startIndex...index] }
+                    if depth < 0 { return nil }
+                default: break
+                }
+            }
+            index = text.index(after: index)
+        }
+        return nil
     }
 
     // MARK: - Les dates
@@ -498,6 +613,19 @@ public enum KopiaDecodingFailure: Error, Equatable, Sendable, CustomStringConver
     /// Une date ne suit aucun des formats connus (0 à 9 décimales, suffixe `Z`).
     case unparsableTimestamp(path: String, value: String)
 
+    /// Un compteur ou une taille est du bon type JSON mais désigne une
+    /// quantité qui n'existe pas : un nombre de fichiers négatif, une taille
+    /// négative, ou deux compteurs d'erreur dont la somme déborde `Int`.
+    ///
+    /// **Ce cas existe parce que le type ne suffit pas.** `Int64` accepte
+    /// `-1` et `9223372036854775807` sans broncher ; c'est l'aval qui tombe.
+    /// Un manifeste portant `"errorCount":9223372036854775807` et
+    /// `"ignoredErrorCount":9223372036854775807` décodait sans erreur, puis
+    /// `SnapshotProof.missingFileCount` faisait l'addition et arrêtait
+    /// l'application — au moment précis où elle allait annoncer un snapshot
+    /// incomplet. Refuser ici, une fois, vaut mieux que se défendre partout.
+    case implausibleCounter(path: String, value: String, context: String)
+
     public var description: String {
         switch self {
         case .emptyOutput(let context):
@@ -512,6 +640,9 @@ public enum KopiaDecodingFailure: Error, Equatable, Sendable, CustomStringConver
             "\(context) : le champ « \(path) » est absent ou du mauvais type."
         case .unparsableTimestamp(let path, let value):
             "Date illisible pour « \(path) » : « \(value) »."
+        case .implausibleCounter(let path, let value, let context):
+            "\(context) : le champ « \(path) » annonce « \(value) », "
+                + "qui ne désigne aucune quantité possible."
         }
     }
 
