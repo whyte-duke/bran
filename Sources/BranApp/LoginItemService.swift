@@ -78,6 +78,22 @@ final class LoginItemService {
         if isEnabled { defaults.set(true, forKey: Self.offeredKey) }
     }
 
+    /// Relit l'état réel auprès du système.
+    ///
+    /// **`isEnabled` était lu une fois, à l'initialisation, et plus jamais.**
+    /// L'élément d'ouverture se retire aussi depuis Réglages système ›
+    /// Général › Ouverture — c'est même l'endroit où macOS envoie les gens par
+    /// sa propre notification. Quelqu'un qui le désactivait là voyait
+    /// l'interrupteur de bran rester allumé jusqu'au prochain lancement, et
+    /// aucun des deux écrans ne disait la vérité sur ce qui allait réellement
+    /// se passer à la session suivante.
+    ///
+    /// À appeler au retour au premier plan : c'est le seul moment où l'on sait
+    /// que l'utilisateur a pu aller ailleurs et revenir.
+    func refresh() {
+        isEnabled = SMAppService.mainApp.status == .enabled
+    }
+
     func setEnabled(_ enabled: Bool) {
         do {
             if enabled {

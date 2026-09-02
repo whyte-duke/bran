@@ -230,3 +230,73 @@ struct KopiaProgressReaderTests {
         #expect(characterResult == wholeBlockResult)
     }
 }
+
+/// **Ce que ce fichier protège** : qu'un Mac assez gros pour avoir quelque
+/// chose à perdre soit encore sauvegardé.
+///
+/// Le défaut qu'il fige était silencieux et complet. `parseSize` connaissait
+/// `B`, `KB`, `MB` et `GB`, pas `TB`. Au-delà d'un téraoctet haché, kopia
+/// écrit son unité comme il se doit, la ligne devenait illisible, et
+/// `accept()` rendait un tableau vide. Or `KopiaDriver` ne rafraîchit son
+/// horloge de blocage que sur une progression **décodée** : dix minutes plus
+/// tard, son chien de garde concluait « plus rien n'avance » et tuait un run
+/// parfaitement sain — à chaque tentative, indéfiniment, pendant que la
+/// chaîne réseau restait verte.
+///
+/// C'est la panne fondatrice du projet, reconstruite un cran plus loin : rien
+/// de restaurable, et rien qui le dise.
+@Suite("Les grandes unités, et les nombres qui n'en sont pas")
+struct KopiaProgressReaderLargeUnitTests {
+
+    /// La ligne canonique, avec la seule unité changée : c'est exactement ce
+    /// que voit un Mac de plus d'un téraoctet.
+    @Test("Un téraoctet haché se lit, au lieu de rendre la ligne muette")
+    func terabytesAreUnderstood() {
+        let progress = try! #require(KopiaProgressReader.parse(
+            line: " - 5 hashing, 7 hashed (1.5 TB), 0 cached (0 B), uploaded 215.2 MB, estimated 2 TB (75.0%) 0s left"
+        ))
+        #expect(progress.hashedBytes == 1_500_000_000_000)
+        #expect(progress.estimatedBytes == 2_000_000_000_000)
+    }
+
+    @Test("Le pétaoctet aussi, pour que le jour venu ne coûte pas une seconde enquête")
+    func petabytesAreUnderstood() {
+        let progress = try! #require(KopiaProgressReader.parse(
+            line: " - 5 hashing, 7 hashed (1 PB), 0 cached (0 B), uploaded 215.2 MB, estimated 2 PB (50.0%) 0s left"
+        ))
+        #expect(progress.hashedBytes == 1_000_000_000_000_000)
+    }
+
+    /// La conséquence, dite dans les termes du pilote : ce qui compte n'est
+    /// pas que la ligne se lise, c'est que `accept()` rende quelque chose —
+    /// c'est ce retour, et lui seul, qui repousse l'échéance du chien de garde.
+    @Test("Une progression en téraoctets nourrit le chien de garde, au lieu de l'affamer")
+    func terabyteProgressFeedsTheWatchdog() {
+        var reader = KopiaProgressReader()
+        let progresses = reader.accept(
+            " - 5 hashing, 7 hashed (1.5 TB), 0 cached (0 B), uploaded 215.2 MB, estimated 2 TB (75.0%) 0s left\r"
+        )
+        #expect(progresses.isEmpty == false)
+    }
+
+    /// `Double("1e400")` rend `+∞` sans se plaindre, et `Int64(+∞)` est une
+    /// erreur fatale — pas un `nil`. Kopia n'écrit pas cette notation ; un
+    /// parseur qui arrête le processus sur une entrée qu'il ne reconnaît pas
+    /// n'a pas à exister quand le refuser coûte trois lignes.
+    @Test("Une taille non finie est refusée, jamais convertie")
+    func nonFiniteSizeIsRefusedRatherThanFatal() {
+        #expect(KopiaProgressReader.parse(
+            line: " - 5 hashing, 7 hashed (1e400 GB), 0 cached (0 B), uploaded 215.2 MB, estimated 240 MB (97.1%) 0s left"
+        ) == nil)
+        #expect(KopiaProgressReader.parse(
+            line: " - 5 hashing, 7 hashed (nan GB), 0 cached (0 B), uploaded 215.2 MB, estimated 240 MB (97.1%) 0s left"
+        ) == nil)
+    }
+
+    @Test("Une taille qui déborde Int64 est refusée, jamais tronquée")
+    func overflowingSizeIsRefused() {
+        #expect(KopiaProgressReader.parse(
+            line: " - 5 hashing, 7 hashed (99999999999 TB), 0 cached (0 B), uploaded 215.2 MB, estimated 240 MB (97.1%) 0s left"
+        ) == nil)
+    }
+}

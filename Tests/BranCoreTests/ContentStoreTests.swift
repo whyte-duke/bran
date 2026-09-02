@@ -1051,3 +1051,114 @@ struct ContentStoreTests {
         #expect(shown.components(separatedBy: "\n").count == 2)
     }
 }
+
+// MARK: - Le nom de fichier lourd est une entrée extérieure
+
+/// **Ce que ce fichier protège** : que le contenu d'un sidecar ne puisse pas
+/// désigner un fichier hors de la bibliothèque.
+///
+/// `blobFileName` est un champ JSON. Il est lu sur le disque, et le disque
+/// n'est pas un endroit sûr : le README promet qu'on peut déplacer le dossier,
+/// le copier sur un autre Mac, le restaurer d'une sauvegarde, et les réglages
+/// permettent de le poser sur un volume partagé. Un sidecar abîmé — ou écrit
+/// par autre chose que bran — suffit.
+///
+/// Le magasin composait ce nom directement : `folder.appending(path: name)`.
+/// Un nom contenant `..` sort du dossier, et la purge appelle `removeItem`
+/// dessus, qui supprime **récursivement**.
+@Suite("Un nom de fichier lourd ne sort jamais de son dossier")
+@MainActor
+struct ContentStoreBlobEscapeTests {
+
+    private static let epoch = Date(timeIntervalSince1970: 1_700_000_000)
+    private static let day: TimeInterval = 86_400
+
+    private func makeStore(root: URL) -> ContentStore<Note> {
+        ContentStore(
+            root: { root },
+            shape: ContentShape(
+                folderName: "Notes",
+                blobExtension: "bin",
+                purge: .blobOnly,
+                inaccessibleFolderMessage: "Dossier des notes inaccessible",
+                blobFailureMessage: "Fichier non conservé"
+            ),
+            retention: BlobAge(lifetime: Self.day)
+        )
+    }
+
+    /// Le scénario, en entier et sans raccourci : un dossier voisin qui n'a
+    /// rien à voir avec bran, un sidecar qui le désigne par `..`, et une purge
+    /// qui passe. Le voisin doit être encore là.
+    @Test("Un sidecar qui désigne un dossier voisin ne le fait pas supprimer")
+    func aSidecarCannotDeleteASiblingFolder() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "bran-evasion-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let notes = root.appending(path: "Notes")
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+
+        // Le voisin : hors de `Notes`, avec quelque chose dedans, comme le
+        // serait un dossier de documents.
+        let victime = root.appending(path: "victime")
+        try FileManager.default.createDirectory(at: victime, withIntermediateDirectories: true)
+        try Data("à ne pas perdre".utf8).write(to: victime.appending(path: "piece.txt"))
+
+        // Le sidecar empoisonné, écrit à la main : c'est exactement ce qu'on
+        // trouverait dans une bibliothèque venue d'ailleurs.
+        let entree = Note(
+            createdAt: Self.epoch.addingTimeInterval(-30 * Self.day),
+            text: "x",
+            blobFileName: "../victime"
+        )
+        let encodeur = JSONEncoder()
+        encodeur.dateEncodingStrategy = .secondsSince1970
+        try encodeur.encode(entree).write(to: notes.appending(path: "\(entree.id).json"))
+
+        let store = makeStore(root: root)
+        _ = await store.reload()
+        // Sans cette affirmation, une entrée non relue ferait passer le test
+        // sur du vide — c'est exactement le piège dans lequel il est tombé
+        // une première fois.
+        #expect(await store.entries.count == 1, "l'entrée empoisonnée n'a pas été relue")
+        _ = await store.purgeExpired(now: Self.epoch)
+
+        #expect(
+            FileManager.default.fileExists(atPath: victime.path(percentEncoded: false)),
+            "la purge est sortie du dossier de la bibliothèque"
+        )
+        #expect(
+            FileManager.default.fileExists(
+                atPath: victime.appending(path: "piece.txt").path(percentEncoded: false)
+            ),
+            "la suppression a été récursive, hors du dossier"
+        )
+    }
+
+    /// L'autre moitié du même problème : ce que le magasin *ouvre*. Un nom qui
+    /// s'échappe ne doit pas non plus donner une URL de lecture vers l'extérieur.
+    @Test("Un nom qui s'échappe ne rend aucune URL lisible")
+    func anEscapingNameYieldsNoReadableURL() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "bran-evasion-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let notes = root.appending(path: "Notes")
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+        let secret = root.appending(path: "secret.bin")
+        try Data("clé".utf8).write(to: secret)
+
+        let entree = Note(createdAt: Self.epoch, text: "x", blobFileName: "../secret.bin")
+        let encodeur = JSONEncoder()
+        encodeur.dateEncodingStrategy = .secondsSince1970
+        try encodeur.encode(entree).write(to: notes.appending(path: "\(entree.id).json"))
+
+        let store = makeStore(root: root)
+        _ = await store.reload()
+
+        let entrees = await store.entries
+        let relue = try #require(entrees.first, "l'entrée n'a même pas été relue : le test ne prouverait rien")
+        #expect(relue.blobFileName == nil, "un nom qui s'échappe a été conservé")
+    }
+}
