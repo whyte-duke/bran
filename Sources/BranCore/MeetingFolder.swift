@@ -123,8 +123,85 @@ public enum MeetingFolder {
     /// est connu. L'horodatage reste en tête dans les deux cas : c'est lui qui
     /// rend le dossier trouvable, et il ne change jamais.
     public static func name(startedAt: Date, title: String?) -> String {
-        guard let title = title.flatMap(sanitized) else { return stamp(startedAt) }
-        return "\(stamp(startedAt)) — \(title)"
+        let head = stamp(startedAt)
+        guard let title = title.flatMap(sanitized) else { return head }
+        return fitted("\(head) — \(title)", fallback: head)
+    }
+
+    // MARK: - La borne du système de fichiers
+
+    /// **Ce que macOS compte dans un nom de fichier : 255 unités UTF-16 de la
+    /// forme décomposée.** Ni des octets, ni des caractères.
+    ///
+    /// Mesuré sur APFS, macOS 26.5, en créant les dossiers :
+    ///
+    /// | nom | graphèmes | unités UTF-16 NFD | `mkdir` |
+    /// |---|---|---|---|
+    /// | 255 × `a` | 255 | 255 | accepté |
+    /// | 256 × `a` | 256 | 256 | refusé (`NSError` 514) |
+    /// | 128 × `é` en NFC | 128 | 256 | refusé |
+    /// | 127 × 🙂 + `a` | 128 | 255 | accepté |
+    /// | 128 × 🙂 | 128 | 256 | refusé |
+    ///
+    /// Les deux lignes du milieu sont celles qui comptent : `é` précomposé pèse
+    /// **une** unité en mémoire et **deux** sur le disque, parce que le système
+    /// décompose avant de compter. C'est l'héritage d'HFS+, qu'APFS a gardé.
+    /// Compter en `String.count` — des graphèmes — ou en octets UTF-8 donne donc
+    /// deux réponses fausses dans deux directions différentes.
+    static let componentLimit = 255
+
+    /// Ce qui s'ajoutera au nom **après** que nous l'ayons choisi, et qu'il faut
+    /// donc lui retrancher d'avance : le suffixe de désambiguïsation le plus
+    /// long que `RecordingStore.reserveFolder` puisse coller — ` (50)`, cinq
+    /// unités — et l'extension d'un média qui reprend le nom du dossier —
+    /// `.mp4`, quatre unités.
+    ///
+    /// Sans cette marge, un dossier pile à la borne se créerait et son `.mp4`
+    /// serait refusé — mesuré : un dossier de 255 unités est accepté, le fichier
+    /// de 259 unités à l'intérieur ne l'est pas. La réunion existerait alors
+    /// sans sa vidéo, ce qui est pire qu'un titre plus court.
+    static let reservedUnits = 9
+
+    /// Combien d'unités ce nom pèse pour le système de fichiers.
+    static func units(_ text: String) -> Int {
+        text.decomposedStringWithCanonicalMapping.utf16.count
+    }
+
+    /// Ramène un nom sous la borne du système de fichiers, **en retirant des
+    /// graphèmes entiers par la fin**.
+    ///
+    /// **Pourquoi le plafond de 60 caractères ne suffisait pas** : il compte des
+    /// graphèmes, et un graphème n'a pas de taille. Mesuré, avec l'horodatage en
+    /// tête et un titre de 60 graphèmes — donc pile à la limite annoncée comme
+    /// sûre : 60 émojis de famille pèsent 679 unités, et 60 `e` portant vingt
+    /// accents combinants chacun en pèsent 1279. Les deux sont refusés par
+    /// `createDirectory`. Un titre de réunion vient d'un titre de fenêtre, donc
+    /// de la page web affichée : personne ne choisit ces caractères-là, et la
+    /// conséquence n'est pas cosmétique — la réunion reste à plat dans la racine,
+    /// ou ses médias gardent leur nom d'UUID.
+    ///
+    /// **Par graphème et non par unité** : couper au milieu d'un `é` décomposé
+    /// laisserait un accent orphelin, et au milieu d'une famille d'émojis un
+    /// bonhomme tout seul. Le prix est de retirer parfois plus que nécessaire,
+    /// et il se paie sur des noms que personne ne lit de toute façon.
+    ///
+    /// Les bornes de fin sont retirées **après** la coupe, comme dans
+    /// `sanitized`, et pour la même raison : c'est la coupe qui peut laisser un
+    /// tiret ou une espace orpheline. Si le titre n'y survit pas, le nom retombe
+    /// sur l'horodatage seul plutôt que sur `2026-08-11 09h57 — `.
+    static func fitted(_ name: String, fallback: String) -> String {
+        let budget = componentLimit - reservedUnits
+        guard units(name) > budget else { return name }
+
+        // Un graphème pèse au moins une unité, donc `budget` graphèmes est une
+        // borne supérieure sûre : elle ramène d'un coup un titre de 4 000
+        // caractères, et la boucle qui suit n'a plus qu'une poignée de tours à
+        // faire au lieu d'en faire un par caractère retiré.
+        var cut = String(name.prefix(budget))
+        while cut.isEmpty == false, units(cut) > budget { cut.removeLast() }
+
+        let trimmed = cut.trimmingCharacters(in: trailingNoise)
+        return trimmed.isEmpty ? fallback : trimmed
     }
 
     /// Le nom d'un morceau brut, `<base>-seg000.mp4`.
