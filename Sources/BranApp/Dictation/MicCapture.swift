@@ -198,6 +198,28 @@ final class MicCapture: NSObject, @unchecked Sendable {
         shared.withLock { $0.samples.removeAll(keepingCapacity: false) }
     }
 
+    /// Rend au système le tampon de la dernière dictée, **sans toucher à une
+    /// capture en cours**.
+    ///
+    /// `start(deviceUID:)` réserve d'un coup la place du plafond de durée —
+    /// 16 000 échantillons par seconde pendant 600 s, soit 9,6 millions de
+    /// `Float` et **38,4 Mo** — pour que la file de capture ne réalloue jamais.
+    /// Ce tampon restait ensuite résident jusqu'à la dictée suivante : bran
+    /// dans la barre de menus toute la journée après une longue dictée, c'était
+    /// 38,4 Mo qui n'appartenaient plus à personne. Pire, la dictée suivante
+    /// devait en constituer un neuf **avant** de libérer l'ancien, parce que le
+    /// contrôleur tenait encore une référence sur le même stockage : deux
+    /// tampons, 76,8 Mo, au moment précis où l'on démarre.
+    ///
+    /// Le garde sur `isRunning` est ce qui rend l'appel sûr depuis la tâche de
+    /// transcription : elle revient après le `record`, c'est-à-dire
+    /// éventuellement après qu'une nouvelle dictée a commencé, et vider le
+    /// tampon à ce moment-là effacerait ce qu'on est en train de dire.
+    func releaseSamples() {
+        guard isRunning == false else { return }
+        shared.withLock { $0.samples = [] }
+    }
+
     // MARK: - Lecture depuis le monde normal
 
     var duration: TimeInterval {
