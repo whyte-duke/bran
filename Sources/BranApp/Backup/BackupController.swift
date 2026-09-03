@@ -142,6 +142,24 @@ final class BackupController {
     /// jamais `lastSuccess` seul.
     private(set) var coverage: SourceCoverageReport?
 
+    /// Les preuves lues **dans le dépôt**, jamais dans le journal de bran.
+    ///
+    /// **Pourquoi les deux sources ne suffisent pas l'une sans l'autre.** Le
+    /// titre de l'écran promet « ce que Kopia a réellement écrit dans le
+    /// dépôt » ; ``refreshCoverage()`` ne lisait pourtant que
+    /// `history.compactMap(\.proof)`, c'est-à-dire le carnet de bran. Les
+    /// deux ont divergé le 02/09/2026, et de la pire façon : un snapshot de
+    /// 1 571 967 fichiers, relu sans erreur par `snapshot verify`, était
+    /// absent du journal parce que la tentative avait été mal classée. L'écran
+    /// affichait donc « jamais sauvegardé » au-dessus d'une sauvegarde
+    /// parfaitement utilisable, et le propriétaire — qui avait raison de ne
+    /// rien y comprendre — n'avait aucun moyen de le savoir depuis l'app.
+    ///
+    /// Le journal garde ce que le dépôt ne sait pas : les tentatives échouées,
+    /// leurs causes, l'historique. Le dépôt garde ce que le journal peut
+    /// rater : ce qui est réellement là. On lit les deux, et le dépôt tranche.
+    private(set) var repositoryProofs: [SnapshotProof] = []
+
     /// Où en est le tout premier envoi, chemin par chemin. `nil` quand tout est
     /// déjà couvert.
     private(set) var firstUploads: [FirstUploadTracking] = []
@@ -751,6 +769,12 @@ final class BackupController {
         do {
             let status = try await BackupEngine.driver().repositoryStatus(timeout: timeout)
             repositoryStatus = status
+            // Le dépôt vient de s'ouvrir : c'est le seul moment où lire ce
+            // qu'il contient coûte une commande qu'on sait pouvoir aboutir.
+            // Détaché, parce que `snapshot list --all` relit tous les
+            // manifestes et que la sonde, elle, doit rendre la main tout de
+            // suite — un écran qui attend est un écran qui ment sur l'état.
+            refreshRepositoryProofs()
             return LinkProbeResult(
                 link: .repositoryOpens,
                 state: .up,
@@ -856,8 +880,39 @@ final class BackupController {
     /// faces de la même question, et les laisser se désynchroniser ferait
     /// exactement ce qu'on cherche à empêcher — un écran qui répond à une
     /// question avec la réponse d'une autre.
+    /// Relit le dépôt et recalcule la couverture.
+    ///
+    /// Le même budget que la relecture d'après-sauvegarde, dérivé du seul
+    /// curseur que l'utilisateur règle — voir l'appel jumeau dans le run.
+    private func refreshRepositoryProofs() {
+        let timeout = configuration.repositoryTimeout * 4
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let driver = try BackupEngine.driver()
+                self.repositoryProofs = try await driver.listSnapshots(timeout: timeout)
+            } catch {
+                // Un dépôt illisible n'efface pas ce qu'on avait déjà lu : la
+                // couverture retombe alors sur le journal, qui est un moins bon
+                // témoin mais pas un mensonge. Perdre les preuves ici ferait
+                // clignoter l'écran entre « sauvegardé » et « jamais » au
+                // rythme des coupures réseau.
+                self.log.debug("relecture des snapshots du dépôt impossible : \(String(describing: error), privacy: .public)")
+            }
+            self.refreshCoverage()
+        }
+    }
+
     private func refreshCoverage() {
-        let proofs = history.compactMap(\.proof)
+        // **Le dépôt tranche, le journal complète.** Une preuve relue dans le
+        // dépôt porte `origin == .confirmedInRepository` ; celles du journal
+        // peuvent n'être que `reportedByCreate`. À identifiant égal, on garde
+        // donc celle du dépôt, et l'union couvre le cas où le journal connaît
+        // une tentative que le dépôt a depuis fait disparaître par rétention.
+        var byIdentifier: [String: SnapshotProof] = [:]
+        for proof in history.compactMap(\.proof) { byIdentifier[proof.id] = proof }
+        for proof in repositoryProofs { byIdentifier[proof.id] = proof }
+        let proofs = Array(byIdentifier.values)
         // L'hôte et l'utilisateur viennent du dépôt lui-même quand on a pu
         // l'ouvrir. Sans lui, on prend ceux de la machine : un dépôt partagé
         // peut contenir les snapshots d'un autre Mac, et ils ne couvrent rien
