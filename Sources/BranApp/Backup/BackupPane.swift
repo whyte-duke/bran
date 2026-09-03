@@ -992,6 +992,33 @@ private struct BackupHeroVerdict: Equatable {
             return busyVerdict(phase)
         }
 
+        // **P2ter — une sauvegarde prouvée et fraîche prime sur un réseau
+        // qu'on ne sait pas encore décrire.**
+        //
+        // L'ordre était inverse, et il répondait à la mauvaise question. Le
+        // propriétaire a lu « État du réseau pas encore su » en haut d'un
+        // écran dont le panneau Preuves affichait, deux lignes plus bas, un
+        // snapshot de 1 581 466 fichiers relu dans le dépôt, sans une seule
+        // erreur. Sa question n'est pas « puis-je sauvegarder à cet
+        // instant ? » mais « mes fichiers sont-ils à l'abri ? » — et une
+        // mesure de sonde périmée de 265 secondes ne change rien à la
+        // réponse.
+        //
+        // La distinction qui suit est tout : une chaîne **cassée** garde le
+        // titre, parce qu'elle annonce que la prochaine sauvegarde n'aura pas
+        // lieu — c'est une information sur l'avenir, que l'écran doit porter
+        // haut. Une chaîne **pas encore mesurée** n'annonce rien du tout ; la
+        // reléguer sous la couverture ne cache aucun risque, et la ligne
+        // « Chaîne réseau » juste en dessous la donne intégralement.
+        let coverageIsStale = coverage.coverages.contains {
+            if case .coveredButStale = $0.state { return true }
+            return false
+        }
+        let coverageIsFullyProven: Bool = {
+            if case .fullyCovered = coverage.verdict { return coverageIsStale == false }
+            return false
+        }()
+
         // P3 / P4 — la chaîne réseau.
         if let chainVerdict {
             if chainVerdict.canBackUp == false, chainVerdict.firstFailure != nil {
@@ -1001,7 +1028,7 @@ private struct BackupHeroVerdict: Equatable {
                     detail: chainVerdict.headline
                 )
             }
-            if chainVerdict.canBackUp == false {
+            if chainVerdict.canBackUp == false, coverageIsFullyProven == false {
                 // Ni panne ferme ni chaîne prête : sonde en vol ou mesure
                 // périmée (`connecting`/`unknown`). Bleu, jamais rouge — un
                 // maillon `degraded` ne tombe pas ici, `canBackUp` reste vrai
@@ -1012,7 +1039,7 @@ private struct BackupHeroVerdict: Equatable {
                     detail: chainVerdict.headline
                 )
             }
-        } else {
+        } else if coverageIsFullyProven == false {
             return BackupHeroVerdict(
                 symbol: "questionmark.circle.fill", tint: Palette.machine,
                 title: "État du réseau pas encore su.",
