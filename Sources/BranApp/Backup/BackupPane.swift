@@ -229,9 +229,6 @@ struct BackupPane: View {
             if let interruptedNotice {
                 NoticeRow(text: interruptedNotice, symbol: "pause.circle.fill", tint: Palette.machine)
             }
-            if let batteryNotice {
-                NoticeRow(text: batteryNotice, symbol: "battery.25percent", tint: Palette.machine)
-            }
         }
         .branAnimation(Motion.enter, value: backup.phase)
     }
@@ -316,20 +313,18 @@ struct BackupPane: View {
         return "\(failure.summary) La sauvegarde reprendra d'où elle s'est arrêtée."
     }
 
-    /// **La politique batterie, dite en clair.** Purement descriptive de
-    /// `configuration.onBatteryPolicy` : « que se passera-t-il, en général,
-    /// si je débranche ? » — question antérieure à celle du verdict, qui dit
-    /// ce qui se passe *maintenant*.
-    private var batteryNotice: String? {
-        guard backup.configuration.isEnabled else { return nil }
-        guard case .waitForPower(let forceAfterHours) = backup.configuration.onBatteryPolicy else { return nil }
-        let hours = Int(forceAfterHours.rounded())
-        return """
-            Sur batterie, une grosse sauvegarde attend le retour du secteur — \
-            mais pas indéfiniment : passé \(hours)\u{202F}heures de retard, elle se \
-            lance quand même, batterie ou pas.
-            """
-    }
+    // **La politique batterie ne s'affiche plus en permanence, à la demande
+    // du propriétaire.** Elle était purement descriptive — « que se
+    // passera-t-il si je débranche ? » — et s'affichait donc aussi sur un Mac
+    // branché en permanence, où elle ne décrivait rien. Sur un écran dont le
+    // reproche est « il y a des erreurs affichées dans tous les sens », une
+    // ligne qui ne parle jamais de l'instant présent coûte plus d'attention
+    // qu'elle n'en mérite.
+    //
+    // Rien n'est perdu : quand une sauvegarde attend **réellement** le
+    // secteur, le héros le dit, avec la date limite — et c'est là que le
+    // chiffre compte. Le réglage lui-même reste expliqué dans les réglages de
+    // sauvegarde, à l'endroit où on le change.
 
     // MARK: - Le héros
 
