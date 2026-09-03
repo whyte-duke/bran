@@ -498,8 +498,39 @@ public actor KopiaDriver {
         // filtre déjà les lignes vides.
         let patterns = rules.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
 
+        // **Deux commandes, et surtout pas une seule : kopia applique
+        // `--clear-ignore` APRÈS les `--add-ignore` de la même invocation.**
+        //
+        // Mesuré le 03/09/2026 sur kopia 0.23.1 :
+        //
+        //     kopia policy set … --clear-ignore --add-ignore=A --add-ignore=B
+        //      - removing all from "ignore rules"        ← et rien d'autre
+        //
+        // La politique ressort **vide**. Cette fonction avait donc exactement
+        // l'effet qu'elle existait pour supprimer : un no-op silencieux, code
+        // de sortie 0, résumé rassurant sur stderr. Les seules exclusions qui
+        // s'appliquaient venaient de la politique *globale*, écrite autrefois
+        // par un autre chemin — d'où l'illusion que le réglage marchait.
+        //
+        // Le propriétaire a exclu ses dossiers cloud, relancé, et compté
+        // 131 fichiers toujours lus : c'est ce chiffre qui a fait remonter le
+        // fil jusqu'ici. Un réglage qui ne fait rien est pire qu'un réglage
+        // absent — l'écran affirmait une exclusion que le dépôt ignorait.
         for path in paths {
-            var arguments = ["policy", "set", "--no-progress", "--clear-ignore"]
+            let cleared = try await run(
+                arguments: ["policy", "set", "--no-progress", "--clear-ignore", path],
+                needsPassword: true, totalTimeout: timeout)
+            if cleared.totalTimeoutExpired {
+                throw KopiaDriverFailure.timedOut(command: "policy set --clear-ignore", seconds: timeout)
+            }
+            try Self.throwIfPolicySetFailed(cleared, path: path)
+
+            // Une liste vide n'a rien à réécrire : la remise à zéro ci-dessus
+            // **est** le résultat voulu, et une seconde commande sans aucun
+            // `--add-ignore` ne ferait qu'ajouter un aller-retour au dépôt.
+            guard patterns.isEmpty == false else { continue }
+
+            var arguments = ["policy", "set", "--no-progress"]
             arguments += patterns.map { "--add-ignore=\($0)" }
             arguments.append(path)
 
@@ -527,18 +558,27 @@ public actor KopiaDriver {
             // cas-là est de toute façon rattrapé à la commande suivante — le
             // `snapshot create` qui suit immédiatement ne s'ouvrira pas
             // davantage.
-            guard result.exitCode == 0 else {
-                throw KopiaDriverFailure.backup(BackupFailure(
-                    kind: .unparseable,
-                    summary: "Les règles d'exclusion n'ont pas pu être appliquées à « \(path) » "
-                        + "(kopia est sorti avec le code \(result.exitCode)).",
-                    suggestedAction: "Corriger ou vider les règles d'exclusion dans les réglages de "
-                        + "sauvegarde : bran refuse de sauvegarder tant qu'il n'est pas sûr que ce qui "
-                        + "doit être exclu le sera.",
-                    rawOutput: KopiaFailureClassifier.maskSecrets(in: result.stderr)
-                ))
-            }
+            try Self.throwIfPolicySetFailed(result, path: path)
         }
+    }
+
+    /// Le même verdict pour les deux moitiés de l'écriture de politique — la
+    /// remise à zéro et les ajouts. Les séparer sans partager ce contrôle
+    /// laisserait passer en silence l'échec de la première, c'est-à-dire une
+    /// politique qui garde des exclusions que l'écran ne montre plus.
+    private static func throwIfPolicySetFailed(
+        _ result: ProcessResult, path: String
+    ) throws {
+        guard result.exitCode != 0 else { return }
+        throw KopiaDriverFailure.backup(BackupFailure(
+            kind: .unparseable,
+            summary: "Les règles d'exclusion n'ont pas pu être appliquées à « \(path) » "
+                + "(kopia est sorti avec le code \(result.exitCode)).",
+            suggestedAction: "Corriger ou vider les règles d'exclusion dans les réglages de "
+                + "sauvegarde : bran refuse de sauvegarder tant qu'il n'est pas sûr que ce qui "
+                + "doit être exclu le sera.",
+            rawOutput: KopiaFailureClassifier.maskSecrets(in: result.stderr)
+        ))
     }
 
     // MARK: - La sauvegarde
