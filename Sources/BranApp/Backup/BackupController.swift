@@ -1207,6 +1207,14 @@ final class BackupController {
                 to: configuration.sourcePaths,
                 timeout: configuration.repositoryTimeout)
 
+            // **La notification part ici, pas au début du run.** Entre
+            // l'appui sur le bouton et cette ligne il y a la chaîne réseau et
+            // l'écriture de la politique, qui peuvent l'une comme l'autre
+            // refuser. Annoncer « sauvegarde démarrée » avant elles, c'est
+            // promettre un travail qui n'aura peut-être pas lieu — et
+            // rejouer, en petit, le défaut que tout cet écran combat.
+            await BackupAlerts.notifyBackupStarted(trigger: trigger)
+
             // 3. Le run. La progression est publiée au compte-gouttes.
             let reported = try await driver.createSnapshot(
                 paths: configuration.sourcePaths,
