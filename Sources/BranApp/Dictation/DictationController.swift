@@ -61,6 +61,7 @@ final class DictationController {
     private var currentToken = UUID()
 
     var onPhaseChange: ((DictationMachine.Phase) -> Void)?
+    var onCancellationAvailabilityChange: (() -> Void)?
 
     /// « Rien entendu » n'est pas une phase : c'est un retour au repos avec une
     /// raison. Sans ce signal, l'encoche afficherait « annulé » alors que
@@ -199,6 +200,7 @@ final class DictationController {
     /// Vrai quand une dictée est en cours. Sert au routeur pour arbitrer entre
     /// les deux fonctions.
     var isBusy: Bool { machine.phase.isBusy }
+    var isCancellationAvailable: Bool { machine.phase.isCancellable }
 
     /// Point d'entrée depuis l'interface — le bouton « Dicter » de la fenêtre.
     func toggleFromUI() {
@@ -212,7 +214,8 @@ final class DictationController {
     }
 
     func cancel() {
-        guard machine.phase.isBusy else { return }
+        guard machine.phase.isCancellable else { return }
+        if settings.playsSound { Self.playCancelCue() }
         apply(machine.handle(.cancelRequested))
     }
 
@@ -625,8 +628,10 @@ final class DictationController {
     private func publish() {
         let next = machine.phase
         guard next != phase else { return }
+        let cancellationAvailabilityChanged = next.isCancellable != phase.isCancellable
         phase = next
         onPhaseChange?(next)
+        if cancellationAvailabilityChanged { onCancellationAvailabilityChange?() }
     }
 
     var elapsed: TimeInterval {
@@ -670,7 +675,7 @@ final class DictationController {
 
     // MARK: - Retours sonores
 
-    /// Deux repères sonores, volontairement discrets.
+    /// Trois repères sonores, volontairement discrets.
     ///
     /// Avec un casque et l'encoche hors du champ de vision, c'est souvent le
     /// seul retour réellement perçu — mais on dicte vingt fois par heure, et un
@@ -680,7 +685,8 @@ final class DictationController {
     /// Les instances sont conservées : `NSSound(named:)` relit le fichier depuis
     /// le disque à chaque appel, ce qui ajoute un délai juste avant de parler.
     private static let startCue = DictationController.cue("Tink")
-    private static let stopCue = DictationController.cue("Morse")
+    private static let confirmCue = DictationController.cue("Morse")
+    private static let cancelCue = DictationController.cue("Basso")
 
     private static func cue(_ name: String) -> NSSound? {
         let sound = NSSound(named: name)
@@ -692,8 +698,13 @@ final class DictationController {
 
     private static func playStopCue() {
         // Rejouer un son déjà en cours ne fait rien : il faut le rembobiner.
-        stopCue?.stop()
-        stopCue?.play()
+        confirmCue?.stop()
+        confirmCue?.play()
+    }
+
+    private static func playCancelCue() {
+        cancelCue?.stop()
+        cancelCue?.play()
     }
 
     /// macOS ne dit pas qui a activé la saisie sécurisée. On nomme le suspect le

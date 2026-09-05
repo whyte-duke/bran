@@ -119,6 +119,19 @@ final class HotkeyMonitor {
         }
     }
 
+    /// Vrai uniquement pendant qu'une fonction annulable de bran tourne.
+    ///
+    /// Le callback du tap doit décider de consommer Échap avant de rendre
+    /// l'événement au système ; il ne peut donc pas aller interroger les
+    /// contrôleurs sur le main actor. Cette valeur reconstruit à chaud la petite
+    /// table immuable que le callback lit sous verrou.
+    var cancellationIsActive = false {
+        didSet {
+            guard cancellationIsActive != oldValue else { return }
+            refreshWatchedKeys()
+        }
+    }
+
     /// Les codes de touche qui méritent qu'on regarde de plus près, lisibles
     /// depuis le callback du tap.
     ///
@@ -166,12 +179,11 @@ final class HotkeyMonitor {
         /// fonction que bran existe précisément pour observer.
         ///
         /// N'y entrent donc que les liaisons à touche réelle, avec leurs
-        /// modificateurs. **Ni les déclencheurs à modificateur seul** — avaler
-        /// Commande droite casserait tous les raccourcis à deux mains des autres
-        /// applications, ce qui était la raison d'être du mode « écoute seule »
-        /// — **ni la touche d'annulation** : Échap appartient à celui qui est
-        /// devant, et une dictée qui n'a pas lieu ne lui donne aucun droit
-        /// dessus.
+        /// modificateurs. **Jamais les déclencheurs à modificateur seul** :
+        /// avaler Commande droite casserait tous les raccourcis à deux mains des
+        /// autres applications. Échap n'y entre que temporairement, pendant une
+        /// opération annulable ; au repos, il appartient intégralement à
+        /// l'application de devant.
         var exclusive: [HotkeyBinding] = []
     }
 
@@ -189,19 +201,14 @@ final class HotkeyMonitor {
         var codes = WatchedKeys(claimed: bindings.keyCodes)
         codes.claimed.insert(cancelKey.keyCode)
         if watchesCopies { codes.copyHint = CopyGesture.keyCodes }
-        // Les accords consommés se dérivent des mêmes liaisons, filtrées par la
-        // seule règle qui compte : une touche réelle. Voir `WatchedKeys.exclusive`.
-        codes.exclusive = bindings.assigned
-            .map(\.1)
-            .filter { $0.isModifierOnly == false }
-            // **Et il faut un modificateur.** Une liaison sur une touche nue —
-            // Échap, F5, une lettre — désigne une touche que les autres
-            // applications reçoivent comme saisie ordinaire ; la retirer du flux
-            // la ferait disparaître partout, et une touche Échap morte dans tout
-            // le système est exactement le genre de panne qu'on ne rattache
-            // jamais à l'application qui l'a causée. Ces liaisons-là restent
-            // observées sans être consommées, comme avant.
-            .filter { $0.modifiers != 0 }
+        // La table pure porte la frontière délicate : les accords complets sont
+        // réservés, les touches nues restent à l'application de devant, sauf
+        // l'annulation pendant les quelques secondes où elle a réellement
+        // quelque chose à interrompre.
+        codes.exclusive = bindings.exclusiveBindings(
+            cancelKey: cancelKey,
+            cancellationIsActive: cancellationIsActive
+        )
         watchedKeys.withLock { $0 = codes }
     }
 
@@ -728,7 +735,7 @@ final class HotkeyMonitor {
         switch type {
         case .keyDown:
             guard matchesExclusive(keyCode: keyCode, flags: flags) else { return .pass }
-            consumedKeys.withLock { $0.insert(keyCode) }
+            _ = consumedKeys.withLock { $0.insert(keyCode) }
             return .consume
 
         case .keyUp:

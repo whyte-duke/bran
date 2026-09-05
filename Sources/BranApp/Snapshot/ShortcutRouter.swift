@@ -80,6 +80,17 @@ final class ShortcutRouter {
     func attach(dictation: DictationController, snapshot: SnapshotController) {
         self.dictation = dictation
         self.snapshot = snapshot
+        dictation.onCancellationAvailabilityChange = { [weak self] in
+            self?.refreshCancellationClaim()
+        }
+        refreshCancellationClaim()
+    }
+
+    /// Échap appartient à bran uniquement tant qu'il peut sauver l'utilisateur
+    /// d'une opération en cours. Le callback clavier lit ce miroir synchrone
+    /// pour avaler la frappe avant qu'elle n'atteigne l'application de devant.
+    private func refreshCancellationClaim() {
+        monitor.cancellationIsActive = dictation?.isCancellationAvailable == true
     }
 
     private func route(_ signal: HotkeyMonitor.Signal) {

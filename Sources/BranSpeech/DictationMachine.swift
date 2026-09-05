@@ -42,6 +42,17 @@ public struct DictationMachine: Sendable {
             case .capturing, .transcribing, .pasting: true
             }
         }
+
+        /// Échap peut encore abandonner le travail sans laisser une livraison
+        /// en cours derrière lui. Une fois le collage lancé, l'événement n'a
+        /// plus d'effet et ne doit surtout pas être retiré à l'application de
+        /// devant.
+        public var isCancellable: Bool {
+            switch self {
+            case .capturing, .transcribing: true
+            case .idle, .pasting, .failed: false
+            }
+        }
     }
 
     /// Comment le raccourci se comporte.

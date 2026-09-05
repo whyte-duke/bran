@@ -254,6 +254,35 @@ struct TriggerTableTests {
         #expect(table.isTaken(Self.f1) == false)
     }
 
+    // MARK: - Touches retirées du flux
+
+    @Test("Échap n'est réservé que pendant une opération annulable")
+    func escapeIsExclusiveOnlyWhileCancellationIsActive() {
+        let table = TriggerTable([.dictation: .rightCommand])
+
+        #expect(table.exclusiveBindings(cancelKey: .escape, cancellationIsActive: false).isEmpty)
+        #expect(table.exclusiveBindings(cancelKey: .escape, cancellationIsActive: true) == [.escape])
+    }
+
+    @Test("Une fonction liée à Échap garde la priorité sur l'annulation")
+    func triggerBindingWinsOverCancellation() {
+        let table = TriggerTable([.dictation: .escape])
+
+        #expect(table.exclusiveBindings(cancelKey: .escape, cancellationIsActive: true).isEmpty)
+    }
+
+    @Test("Seuls les accords complets des fonctions sont réservés")
+    func onlyModifiedTriggerBindingsAreExclusive() {
+        let modified = HotkeyBinding(keyCode: 19, modifiers: 0x12_0000)
+        let table = TriggerTable([
+            .dictation: .rightCommand,
+            .snapshot: Self.f2,
+            .clipboard: modified,
+        ])
+
+        #expect(table.exclusiveBindings(cancelKey: .escape, cancellationIsActive: false) == [modified])
+    }
+
     // MARK: - Remise à l'heure du masque de modificateurs
 
     /// Les valeurs de cette section ne sont pas choisies : ce sont celles que le
