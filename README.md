@@ -53,6 +53,9 @@ machine: not a byte, not a probe.
   everything still works.
 - **Keeps the Mac awake on request** — one click, indefinitely, from the same
   menu bar item as everything else. See [Keeping the Mac awake](#keeping-the-mac-awake).
+- **Makes scheduled backups visible while they run.** The window follows the
+  LaunchAgent's live progress, then reloads the proof written to the repository;
+  it no longer offers a second backup while the automatic one owns the lock.
 
 Two things can send data off the Mac, and both are entirely opt-in. bran can
 back up chosen folders, end-to-end encrypted, to S3-compatible storage you own;
@@ -80,10 +83,13 @@ your Mac — no account, no API key, nothing leaves the machine.
 - **The model loads while you talk.** Loading starts on key-down, in parallel
   with capture, so a cold start is hidden by the first two seconds of speech.
 - **Right Command by default**, configurable, hold-to-talk or press-to-toggle.
-  Escape cancels.
+  Escape cancels without also reaching the app underneath, and is immediately
+  returned to that app when no dictation can be cancelled.
 - **Notch overlay** on MacBooks that have one, a floating pill everywhere else —
-  because the feature is useless if it goes silent the moment you plug in a
-  monitor.
+  including below the notch in full-screen apps, because the feature is useless
+  if it goes silent the moment you plug in a monitor or enter full screen.
+- **Three optional sound cues** distinguish recording started, speech accepted,
+  and dictation cancelled. They can be disabled in Dictation settings.
 - **A correction dictionary.** Whisper-class models mangle your company and
   client names. Twenty entries fixes most of it.
 - **History is a folder.** Text is kept forever, audio is purged after a week
@@ -404,10 +410,12 @@ On first launch bran asks for:
 macOS only applies the Screen Recording and Accessibility grants at the **next
 process start** — quit and relaunch bran after granting them.
 
-**What the keyboard access is used for.** The event tap is installed in
-listen-only mode and inspects nothing but modifier flags and the two key codes
-you bound. It never swallows an event, never logs a keystroke, and is only
-installed when you turn dictation on. `Sources/BranApp/Dictation/HotkeyMonitor.swift`
+**What the keyboard access is used for.** The event tap inspects only modifier
+flags and the key codes used by enabled features. It never logs a keystroke. A
+complete shortcut explicitly assigned to bran is removed from the stream so it
+does not also trigger the frontmost app; modifier-only shortcuts still pass
+through. Escape is removed only while a dictation is actually cancellable, then
+returned immediately. `Sources/BranApp/Dictation/HotkeyMonitor.swift`
 is 200 lines — read it.
 
 **One thing macOS will do to you.** When the cursor is in a password field, or
