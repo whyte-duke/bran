@@ -1,4 +1,6 @@
 import AppKit
+import BranWindows
+import CoreGraphics
 import SwiftUI
 
 /// Le panneau qui affiche l'état de la dictée, au-dessus de tout.
@@ -45,10 +47,57 @@ final class NotchOverlay {
     /// `NSEvent.mouseLocation`, ce que son propre commentaire contredisait :
     /// dicter dans une fenêtre de l'écran interne en ayant laissé le curseur sur
     /// l'écran externe affichait l'encoche sur le mauvais écran.
-    private static var activeScreen: NSScreen? {
-        NSApp.keyWindow?.screen
+    private struct ScreenContext {
+        let screen: NSScreen
+        let isFullScreen: Bool
+    }
+
+    /// L'écran et le mode de la fenêtre réellement au premier plan.
+    ///
+    /// `NSApp.keyWindow` ne répond pas à cette question quand bran est en
+    /// arrière-plan : elle peut encore désigner sa propre fenêtre de réglages,
+    /// sur un autre écran. Le serveur de fenêtres donne au contraire le cadre de
+    /// la fenêtre que l'utilisateur utilise. Ses coordonnées sont celles de
+    /// Core Graphics ; `CGDisplayBounds` permet de les comparer sans conversion
+    /// fragile avec les coordonnées AppKit.
+    private static var activeContext: ScreenContext? {
+        if let application = NSWorkspace.shared.frontmostApplication,
+           let window = WindowList.onScreen(titled: false).first(where: {
+               $0.processID == application.processIdentifier
+                   && $0.layer == 0
+                   && $0.frame.isEmpty == false
+           }),
+           let pair = NSScreen.screens.compactMap({ screen -> (NSScreen, CGRect)? in
+               guard let bounds = displayBounds(of: screen) else { return nil }
+               return (screen, bounds)
+           }).first(where: { $0.1.contains(CGPoint(x: window.frame.midX, y: window.frame.midY)) }) {
+            return ScreenContext(
+                screen: pair.0,
+                isFullScreen: fillsDisplay(window.frame, displayBounds: pair.1)
+            )
+        }
+
+        let screen = NSApp.keyWindow?.screen
             ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
             ?? NSScreen.main
+        return screen.map { ScreenContext(screen: $0, isFullScreen: false) }
+    }
+
+    private static func displayBounds(of screen: NSScreen) -> CGRect? {
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        guard let number = screen.deviceDescription[key] as? NSNumber else { return nil }
+        return CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
+    }
+
+    /// Une fenêtre plein écran couvre le display, contrairement à une fenêtre
+    /// simplement maximisée qui laisse au moins la barre de menus. Une petite
+    /// tolérance absorbe les arrondis de pixels et les bordures invisibles.
+    private static func fillsDisplay(_ window: CGRect, displayBounds: CGRect) -> Bool {
+        let tolerance: CGFloat = 4
+        return abs(window.minX - displayBounds.minX) <= tolerance
+            && abs(window.minY - displayBounds.minY) <= tolerance
+            && abs(window.width - displayBounds.width) <= tolerance
+            && abs(window.height - displayBounds.height) <= tolerance
     }
 
     /// Tout ce que le panneau doit savoir — et **rien du contenu**.
@@ -72,10 +121,16 @@ final class NotchOverlay {
     /// La fenêtre est transparente et ignore la souris : la faire plus large
     /// qu'il ne faut ne coûte rien, et le contenu qui grandit à l'intérieur est
     /// animé par SwiftUI au lieu d'être redimensionné image par image.
-    private static func geometry(of screen: NSScreen) -> Geometry {
+    private static func geometry(for context: ScreenContext) -> Geometry {
+        let screen = context.screen
         let notchHeight = notchHeight(of: screen)
         let notchWidth = notchWidth(of: screen)
-        let hasNotch = notchHeight > 0 && notchWidth > 0
+        // En plein écran, la zone de l'encoche appartient au Space principal et
+        // peut masquer notre dessin malgré `.fullScreenAuxiliary`. La parade est
+        // volontairement visuelle : on garde exactement le même contenu dans
+        // une pilule placée juste sous la zone sûre, donc toujours dans les
+        // pixels de l'application plein écran.
+        let hasNotch = context.isFullScreen == false && notchHeight > 0 && notchWidth > 0
 
         let contentHeight = hasNotch ? notchHeight + NotchView.dropHeight : NotchView.pillSize.height
         let size = CGSize(
@@ -85,7 +140,14 @@ final class NotchOverlay {
 
         // Le haut du **contenu**, pas celui de la fenêtre : le contenu est calé
         // en haut d'un panneau plus grand que lui.
-        let contentTop = hasNotch ? screen.frame.maxY : screen.visibleFrame.maxY - 8
+        let contentTop: CGFloat
+        if hasNotch {
+            contentTop = screen.frame.maxY
+        } else if context.isFullScreen {
+            contentTop = screen.frame.maxY - notchHeight - 8
+        } else {
+            contentTop = screen.visibleFrame.maxY - 8
+        }
 
         return Geometry(
             hasNotch: hasNotch,
@@ -100,10 +162,18 @@ final class NotchOverlay {
         )
     }
 
-    /// Hauteur du trou physique, ou zéro. `safeAreaInsets.top` ne vaut plus de
-    /// zéro que sur l'écran interne d'un MacBook à encoche.
+    /// Hauteur du trou physique, ou zéro.
+    ///
+    /// La zone sûre suffit sur le bureau normal. Les rectangles auxiliaires
+    /// gardent en plus la mesure matérielle quand une application plein écran
+    /// reprend la barre de menus, précisément au moment où le repli en pilule
+    /// en a besoin pour ne pas se poser sous la caméra.
     private static func notchHeight(of screen: NSScreen) -> CGFloat {
-        screen.safeAreaInsets.top
+        let auxiliaryHeight = max(
+            screen.auxiliaryTopLeftArea?.height ?? 0,
+            screen.auxiliaryTopRightArea?.height ?? 0
+        )
+        return max(screen.safeAreaInsets.top, auxiliaryHeight)
     }
 
     /// Largeur de l'encoche, déduite des deux zones auxiliaires : ce qui reste
@@ -118,14 +188,14 @@ final class NotchOverlay {
     // MARK: - Présentation
 
     func show() {
-        guard let screen = Self.activeScreen else { return }
+        guard let context = Self.activeContext else { return }
 
         collapseTask?.cancel()
         collapseTask = nil
 
-        let next = Self.geometry(of: screen)
+        let next = Self.geometry(for: context)
 
-        if let panel, let hosting {
+        if let panel, let hosting, panel.isOnActiveSpace {
             // **La `rootView` n'est plus remplacée qu'au changement d'écran
             // physique.** `show()` est appelé à chaque changement de phase, et
             // remplacer la `rootView` d'un `NSHostingView` pendant qu'une
@@ -141,6 +211,17 @@ final class NotchOverlay {
             panel.orderFrontRegardless()
             content.isExpanded = true
             return
+        }
+
+        // `NSPanel.isVisible` ne suffit pas après une veille : AppKit peut
+        // conserver une fenêtre ordonnée sur l'ancien Space alors qu'elle
+        // n'est plus composée sur celui où l'utilisateur travaille. C'est le
+        // même état qui rendait le panneau du presse-papiers « visible et clé »
+        // dans le journal, mais absent de l'écran. L'encoche ne porte aucun état
+        // durable ; la recréer sur l'écran actif est donc la réparation la plus
+        // petite et ne touche ni à la dictée ni à l'OCR en cours.
+        if panel != nil {
+            dismiss()
         }
 
         geometry = next

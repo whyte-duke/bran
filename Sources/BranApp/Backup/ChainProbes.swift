@@ -565,7 +565,24 @@ private let knownTailscaleBinaries = [
 // à l'import, et dupliquer cette liste d'emplacements serait la façon
 // classique de les faire diverger en silence.
 func locateTailscaleBinary() -> String? {
-    knownTailscaleBinaries.first { FileManager.default.isExecutableFile(atPath: $0) }
+    locateTailscaleBinaries().first
+}
+
+/// Tous les emplacements présents, dans l'ordre de préférence — parce qu'« il
+/// existe » et « il répond » sont deux choses différentes, et que la
+/// confusion des deux a empêché toute sauvegarde planifiée sur ce Mac.
+///
+/// **Mesuré le 02/09/2026.** Sous launchd, l'environnement se réduit à
+/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`. Le binaire de `Tailscale.app` —
+/// premier de la liste, parce qu'il a la version du démon — n'est pas un vrai
+/// CLI : privé de session graphique il tente de démarrer l'interface, échoue,
+/// et écrit `The Tailscale GUI failed to start: … (Tailscale.CLIError error
+/// 3.)` **sur stdout**. Une sortie non vide qui n'est pas du JSON, donc
+/// `unreadableJSON`, donc chaîne réseau déclarée en panne, donc job planifié
+/// qui sort en code 1 sans jamais lancer kopia. Le binaire Homebrew, lui,
+/// rend un JSON parfaitement valide dans ce même environnement vide.
+func locateTailscaleBinaries() -> [String] {
+    knownTailscaleBinaries.filter { FileManager.default.isExecutableFile(atPath: $0) }
 }
 
 /// Lance `tailscale status --json` et le décode.
@@ -578,8 +595,24 @@ func locateTailscaleBinary() -> String? {
 /// sonde honnête d'une sonde qui panique sur du bruit. Seule l'absence de
 /// JSON exploitable sur stdout est un signal.
 private func runTailscaleStatus(timeout: TimeInterval) async -> TailscaleFetch {
-    guard let binary = locateTailscaleBinary() else { return .binaryMissing }
+    let binaries = locateTailscaleBinaries()
+    guard binaries.isEmpty == false else { return .binaryMissing }
 
+    // On essaie chaque emplacement jusqu'à ce que l'un **réponde**, au lieu de
+    // s'arrêter au premier qui existe : voir ``locateTailscaleBinaries()``
+    // pour la panne que ça a coûtée. L'échec rapporté est celui du binaire le
+    // **plus préféré**, pas le dernier essayé — sinon le diagnostic
+    // désignerait un binaire de repli alors que le problème est ailleurs.
+    var firstFailure: TailscaleFetch?
+    for binary in binaries {
+        let fetch = await fetchTailscaleStatus(binary: binary, timeout: timeout)
+        if case .decoded = fetch { return fetch }
+        if firstFailure == nil { firstFailure = fetch }
+    }
+    return firstFailure ?? .binaryMissing
+}
+
+private func fetchTailscaleStatus(binary: String, timeout: TimeInterval) async -> TailscaleFetch {
     let outcome = await runProcess(executable: binary, arguments: ["status", "--json"], timeout: timeout)
     switch outcome {
     case .timedOut:

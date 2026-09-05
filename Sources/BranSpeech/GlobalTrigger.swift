@@ -201,6 +201,34 @@ public struct TriggerTable: Equatable, Sendable {
         }
     }
 
+    /// Les accords que le guet doit retirer du flux clavier.
+    ///
+    /// Une fonction n'est exclusive que si elle porte un accord complet : une
+    /// touche nue appartient encore à l'application de devant, et un
+    /// modificateur seul sert à composer ses propres raccourcis. L'annulation
+    /// est la seule exception. Échap doit être consommé pendant une opération,
+    /// sinon il annule bran **et** ce que faisait l'application de devant ; il
+    /// doit en revanche lui être rendu dès que bran revient au repos.
+    ///
+    /// Si une fonction utilise déjà la touche d'annulation, elle gagne : le
+    /// même événement ne peut pas vouloir dire à la fois « démarrer » et
+    /// « abandonner ».
+    public func exclusiveBindings(
+        cancelKey: HotkeyBinding,
+        cancellationIsActive: Bool
+    ) -> [HotkeyBinding] {
+        var result = assigned
+            .map(\.binding)
+            .filter { $0.isModifierOnly == false && $0.modifiers != 0 }
+
+        if cancellationIsActive,
+           cancelKey.isModifierOnly == false,
+           isTaken(cancelKey) == false {
+            result.append(cancelKey)
+        }
+        return result
+    }
+
     // MARK: - Conflits
 
     /// Les fonctions — autres qu'`trigger` — qui tiennent déjà cette touche.

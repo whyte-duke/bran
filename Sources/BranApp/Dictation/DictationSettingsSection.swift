@@ -31,6 +31,10 @@ struct DictationSettingsSection: View {
                 triggerRow
                 modeRow
                 languageRow
+                Toggle("Jouer les sons de démarrage, validation et annulation", isOn: Binding(
+                    get: { settings.playsSound },
+                    set: { settings.playsSound = $0 }
+                ))
             }
         }
 
@@ -313,11 +317,6 @@ struct DictationSettingsSection: View {
             Toggle("Restaurer le presse-papiers après le collage", isOn: Binding(
                 get: { settings.restoresClipboard },
                 set: { settings.restoresClipboard = $0; controller.applySettings() }
-            ))
-
-            Toggle("Jouer un son au début et à la fin", isOn: Binding(
-                get: { settings.playsSound },
-                set: { settings.playsSound = $0 }
             ))
 
             Stepper(

@@ -187,6 +187,12 @@ enum BackupHeadlessRun {
             return ExitCode.alreadyRunning.rawValue
 
         case .acquired(let lock):
+            // Un état abandonné par un ancien crash ne doit jamais décrire le
+            // nouveau détenteur du verrou. À la sortie, libérer le verrou avant
+            // de retirer le fichier permet à l'interface de ne jamais croire
+            // vivant un état qui ne l'est plus.
+            BackupRuntimeStatusStore.remove()
+            defer { BackupRuntimeStatusStore.remove() }
             defer { lock.release() }
             return await runWithLockHeld(forced: CommandLine.arguments.contains(forceFlag))
         }
@@ -419,6 +425,8 @@ enum BackupHeadlessRun {
     ) async -> Int32 {
         let attemptID = UUID()
         let startedAt = Date()
+        let runtime = RuntimeStatusWriter(
+            attemptID: attemptID, trigger: trigger, startedAt: startedAt)
         // Déclarée **hors** du bloc `do` : sur une interruption — le cas le
         // plus intéressant de tous — c'est le `catch` qui écrit la tentative,
         // et c'est là que le nombre d'octets déjà montés a le plus de valeur.
@@ -452,9 +460,18 @@ enum BackupHeadlessRun {
                 to: configuration.sourcePaths,
                 timeout: configuration.repositoryTimeout)
 
+            // La publication interprocessus part au même instant que la
+            // notification : le travail est désormais réellement prêt à
+            // commencer, et la fenêtre peut le montrer sans l'avoir lancé.
+            runtime.started()
+            await BackupAlerts.notifyBackupStarted(trigger: trigger)
+
             let reported = try await driver.createSnapshot(
                 paths: configuration.sourcePaths,
-                onProgress: { progress in uploaded.record(progress) }
+                onProgress: { progress in
+                    uploaded.record(progress)
+                    runtime.progressed(progress)
+                }
             )
 
             // 2. Confirmer. Relire le dépôt est l'étape qu'un pilote naïf
@@ -462,6 +479,7 @@ enum BackupHeadlessRun {
             //    143,1 Go envoyés, zéro manifeste retrouvable.
             // Quatre fois le budget d'une ouverture : `snapshot list --all`
             // relit tous les manifestes, pas seulement l'en-tête du dépôt.
+            runtime.verifying()
             let confirmed = try await driver.listSnapshots(timeout: configuration.repositoryTimeout * 4)
 
             guard let matched = confirmed.first(where: { $0.id == reported.id }) else {
@@ -548,6 +566,64 @@ enum BackupHeadlessRun {
             log.error("sauvegarde en échec (\(failure.kind.rawValue, privacy: .public))")
             print("sauvegarde en échec : \(failure.summary)")
             return ExitCode.backupFailed.rawValue
+        }
+    }
+
+    /// Sérialise et limite les écritures du fichier d'état à quatre par
+    /// seconde. Les rappels de Kopia arrivent depuis ses lecteurs de tubes et
+    /// peuvent se croiser ; le verrou garde leur ordre et leur JSON entier.
+    private final class RuntimeStatusWriter: @unchecked Sendable {
+        private let lock = NSLock()
+        private let attemptID: UUID
+        private let trigger: BackupTrigger
+        private let startedAt: Date
+        private var latest = BackupProgress()
+        private var lastWrite = Date.distantPast
+        private var didReportWriteFailure = false
+
+        init(attemptID: UUID, trigger: BackupTrigger, startedAt: Date) {
+            self.attemptID = attemptID
+            self.trigger = trigger
+            self.startedAt = startedAt
+        }
+
+        func started() {
+            publish(stage: .running, progress: latest, force: true)
+        }
+
+        func progressed(_ progress: BackupProgress) {
+            publish(stage: .running, progress: progress, force: false)
+        }
+
+        func verifying() {
+            publish(stage: .verifying, progress: latest, force: true)
+        }
+
+        private func publish(
+            stage: BackupRuntimeStatus.Stage,
+            progress: BackupProgress,
+            force: Bool
+        ) {
+            lock.lock()
+            defer { lock.unlock() }
+
+            latest = progress
+            let now = Date()
+            guard force || now.timeIntervalSince(lastWrite) >= 0.25 else { return }
+            lastWrite = now
+            let written = BackupRuntimeStatusStore.write(BackupRuntimeStatus(
+                attemptID: attemptID,
+                trigger: trigger,
+                startedAt: startedAt,
+                updatedAt: now,
+                stage: stage,
+                progress: progress
+            ))
+            if !written && !didReportWriteFailure {
+                didReportWriteFailure = true
+                FileHandle.standardError.write(Data(
+                    "état courant de la sauvegarde impossible à publier dans l'interface\n".utf8))
+            }
         }
     }
 

@@ -392,6 +392,60 @@ enum BackupAlerts {
     /// s'en charge déjà au lancement de l'interface. Un Mac qui n'aurait
     /// jamais ouvert l'interface au moins une fois ne verra donc aucune de
     /// ces notifications — voir le rapport de mission.
+    // MARK: - La notification de démarrage
+
+    static let startedIdentifier = "bran.backup.started"
+
+    /// **« Sauvegarde démarrée », demandée par le propriétaire.**
+    ///
+    /// Toutes les autres notifications de ce fichier annoncent un problème ;
+    /// celle-ci annonce un travail qui commence, et c'est une différence de
+    /// nature. Elle existe parce qu'une sauvegarde planifiée est **invisible**
+    /// : elle part pendant qu'on travaille, occupe le disque quelques minutes,
+    /// et rien ne le dit. La voir partir, c'est pouvoir ne pas s'inquiéter du
+    /// ventilateur — et surtout constater qu'elle part vraiment, ce que ce Mac
+    /// a été incapable d'affirmer pendant des mois.
+    ///
+    /// Identifiant fixe, comme les autres : deux démarrages rapprochés
+    /// remplacent la notification plutôt que d'en empiler deux.
+    static func notifyBackupStarted(
+        trigger: BackupTrigger,
+        center: UNUserNotificationCenter = .current()
+    ) async {
+        await fire(
+            Content(
+                identifier: startedIdentifier,
+                title: "Sauvegarde démarrée",
+                body: startedBody(for: trigger)
+            ),
+            center: center
+        )
+    }
+
+    /// Le déclencheur dit en clair. « Pourquoi maintenant ? » est la première
+    /// question que pose une notification qu'on n'a pas demandée, et y
+    /// répondre dans le corps coûte une phrase.
+    ///
+    /// Le cas `catchUp` dit explicitement qu'il n'y a **pas** d'enchaînement :
+    /// c'est la crainte naturelle devant un Mac rallumé après plusieurs jours,
+    /// et `SchedulePolicy.resolveIntent` rend bien une décision unique, jamais
+    /// une file de retards à rejouer.
+    static func startedBody(for trigger: BackupTrigger) -> String {
+        switch trigger {
+        case .manual:
+            return "Lancée à la main. Le détail est dans l'écran Sauvegarde."
+        case .scheduled:
+            return "Échéance atteinte. Le détail est dans l'écran Sauvegarde."
+        case .catchUp:
+            return "Échéance dépassée pendant que le Mac était éteint ou en veille — "
+                + "une seule sauvegarde, pas un rattrapage en chaîne."
+        case .networkReturned:
+            return "Le réseau est revenu : la sauvegarde qui attendait repart."
+        case .resume:
+            return "Reprise d'une sauvegarde interrompue — la déduplication rend la reprise bon marché."
+        }
+    }
+
     @discardableResult
     private static func fire(_ content: Content, center: UNUserNotificationCenter) async -> Bool {
         center.removeDeliveredNotifications(withIdentifiers: [content.identifier])

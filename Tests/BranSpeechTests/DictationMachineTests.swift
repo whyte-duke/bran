@@ -4,6 +4,15 @@ import Testing
 @Suite("Machine à états de la dictée")
 struct DictationMachineTests {
 
+    @Test("Échap n'est réservé que pendant les deux phases annulables")
+    func cancellablePhasesAreExact() {
+        #expect(DictationMachine.Phase.capturing.isCancellable)
+        #expect(DictationMachine.Phase.transcribing.isCancellable)
+        #expect(DictationMachine.Phase.idle.isCancellable == false)
+        #expect(DictationMachine.Phase.pasting.isCancellable == false)
+        #expect(DictationMachine.Phase.failed(.diskFull).isCancellable == false)
+    }
+
     // MARK: - Chemin nominal
 
     @Test("Bascule : appui démarre, second appui transcrit, collage revient au repos")

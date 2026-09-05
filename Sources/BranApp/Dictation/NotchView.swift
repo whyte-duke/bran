@@ -27,7 +27,7 @@ struct NotchView: View {
     static let pillSize = CGSize(width: 320, height: 54)
 
     /// La largeur de la **fenêtre**, la même pour tous les écrans et tous les
-    /// contenus. Voir `NotchOverlay.geometry(of:)` : c'est ce qui permet de ne
+    /// contenus. Voir `NotchOverlay.geometry(for:)` : c'est ce qui permet de ne
     /// plus jamais redimensionner le panneau, donc de ne plus jamais remplacer
     /// sa `rootView`. Large de quoi loger l'encoche la plus large d'un MacBook
     /// avec ses deux oreilles, et n'importe quel contenu à venir.

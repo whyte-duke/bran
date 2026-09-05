@@ -498,8 +498,39 @@ public actor KopiaDriver {
         // filtre déjà les lignes vides.
         let patterns = rules.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
 
+        // **Deux commandes, et surtout pas une seule : kopia applique
+        // `--clear-ignore` APRÈS les `--add-ignore` de la même invocation.**
+        //
+        // Mesuré le 03/09/2026 sur kopia 0.23.1 :
+        //
+        //     kopia policy set … --clear-ignore --add-ignore=A --add-ignore=B
+        //      - removing all from "ignore rules"        ← et rien d'autre
+        //
+        // La politique ressort **vide**. Cette fonction avait donc exactement
+        // l'effet qu'elle existait pour supprimer : un no-op silencieux, code
+        // de sortie 0, résumé rassurant sur stderr. Les seules exclusions qui
+        // s'appliquaient venaient de la politique *globale*, écrite autrefois
+        // par un autre chemin — d'où l'illusion que le réglage marchait.
+        //
+        // Le propriétaire a exclu ses dossiers cloud, relancé, et compté
+        // 131 fichiers toujours lus : c'est ce chiffre qui a fait remonter le
+        // fil jusqu'ici. Un réglage qui ne fait rien est pire qu'un réglage
+        // absent — l'écran affirmait une exclusion que le dépôt ignorait.
         for path in paths {
-            var arguments = ["policy", "set", "--no-progress", "--clear-ignore"]
+            let cleared = try await run(
+                arguments: ["policy", "set", "--no-progress", "--clear-ignore", path],
+                needsPassword: true, totalTimeout: timeout)
+            if cleared.totalTimeoutExpired {
+                throw KopiaDriverFailure.timedOut(command: "policy set --clear-ignore", seconds: timeout)
+            }
+            try Self.throwIfPolicySetFailed(cleared, path: path)
+
+            // Une liste vide n'a rien à réécrire : la remise à zéro ci-dessus
+            // **est** le résultat voulu, et une seconde commande sans aucun
+            // `--add-ignore` ne ferait qu'ajouter un aller-retour au dépôt.
+            guard patterns.isEmpty == false else { continue }
+
+            var arguments = ["policy", "set", "--no-progress"]
             arguments += patterns.map { "--add-ignore=\($0)" }
             arguments.append(path)
 
@@ -527,18 +558,27 @@ public actor KopiaDriver {
             // cas-là est de toute façon rattrapé à la commande suivante — le
             // `snapshot create` qui suit immédiatement ne s'ouvrira pas
             // davantage.
-            guard result.exitCode == 0 else {
-                throw KopiaDriverFailure.backup(BackupFailure(
-                    kind: .unparseable,
-                    summary: "Les règles d'exclusion n'ont pas pu être appliquées à « \(path) » "
-                        + "(kopia est sorti avec le code \(result.exitCode)).",
-                    suggestedAction: "Corriger ou vider les règles d'exclusion dans les réglages de "
-                        + "sauvegarde : bran refuse de sauvegarder tant qu'il n'est pas sûr que ce qui "
-                        + "doit être exclu le sera.",
-                    rawOutput: KopiaFailureClassifier.maskSecrets(in: result.stderr)
-                ))
-            }
+            try Self.throwIfPolicySetFailed(result, path: path)
         }
+    }
+
+    /// Le même verdict pour les deux moitiés de l'écriture de politique — la
+    /// remise à zéro et les ajouts. Les séparer sans partager ce contrôle
+    /// laisserait passer en silence l'échec de la première, c'est-à-dire une
+    /// politique qui garde des exclusions que l'écran ne montre plus.
+    private static func throwIfPolicySetFailed(
+        _ result: ProcessResult, path: String
+    ) throws {
+        guard result.exitCode != 0 else { return }
+        throw KopiaDriverFailure.backup(BackupFailure(
+            kind: .unparseable,
+            summary: "Les règles d'exclusion n'ont pas pu être appliquées à « \(path) » "
+                + "(kopia est sorti avec le code \(result.exitCode)).",
+            suggestedAction: "Corriger ou vider les règles d'exclusion dans les réglages de "
+                + "sauvegarde : bran refuse de sauvegarder tant qu'il n'est pas sûr que ce qui "
+                + "doit être exclu le sera.",
+            rawOutput: KopiaFailureClassifier.maskSecrets(in: result.stderr)
+        ))
     }
 
     // MARK: - La sauvegarde
@@ -597,6 +637,39 @@ public actor KopiaDriver {
             ))
         }
 
+        // **Le manifeste d'abord, le diagnostic ensuite — et cet ordre est la
+        // doctrine de l'écran Sauvegarde, pas une commodité.**
+        //
+        // « Ce que Kopia a réellement écrit dans le dépôt, jamais ce qu'il
+        // croit avoir écrit. » Un manifeste décodable sur stdout **est** ce
+        // que kopia a écrit : il porte l'identifiant du snapshot, sa taille,
+        // ses compteurs d'erreurs. Rien sur stderr, ni un code de sortie, ne
+        // peut le contredire — au mieux ils l'expliquent.
+        //
+        // L'ordre était inverse, et il a coûté la première sauvegarde réussie
+        // de ce Mac. Relevé le 02/09/2026 : 1 571 967 fichiers, 70 minutes,
+        // snapshot `k89c30b3c…` relu sans erreur par `snapshot verify` sur
+        // 1 448 825 objets. Kopia sort en code non nul dès qu'il a ignoré des
+        // erreurs de lecture — ce que la politique lui demande de faire — donc
+        // `classifiedFailure` levait, et le manifeste posé juste à côté sur
+        // stdout n'était jamais lu. L'écran affichait « message non
+        // interprété » au-dessus d'une sauvegarde parfaitement utilisable.
+        //
+        // Le compte des fichiers sautés n'est pas perdu pour autant : il est
+        // dans le manifeste, ``SnapshotProof/isComplete`` exige qu'il soit
+        // nul, et l'appelant dira « incomplète, et voilà de combien ». C'est
+        // la place juste pour ce chiffre — pas un échec sans nom.
+        //
+        // Un stdout tronqué est exclu de cette porte : un préfixe de JSON
+        // n'est pas un manifeste, et `overflowFailure` reste seul juge.
+        if result.stdoutOverflowed == false,
+           result.stdout.isEmpty == false,
+           let manifest = try? KopiaManifest.decodeCreatedSnapshot(result.stdout) {
+            return manifest
+        }
+
+        // Pas de manifeste exploitable : c'est seulement maintenant qu'il faut
+        // chercher pourquoi.
         if let failure = classifiedFailure(from: result) {
             throw KopiaDriverFailure.backup(failure)
         }
@@ -1047,6 +1120,28 @@ private final class OutputCollector: @unchecked Sendable {
     func appendStderr(_ data: Data) {
         stderr.append(data)
 
+        // **Le chien de garde se réarme sur toute sortie, jamais sur les
+        // seules lignes que le lecteur a su décoder.**
+        //
+        // Deux fois déjà, un run parfaitement sain a été tué parce qu'une
+        // ligne de progression avait changé de forme sans que rien ne
+        // s'arrête : d'abord l'unité `TB` absente du `switch`, puis le
+        // suffixe `(127 errors ignored)` accolé au champ `uploaded`. Dans les
+        // deux cas Kopia écrivait, travaillait, envoyait des gigaoctets — et
+        // `lastProgress` restait figé parce que `parse(line:)` rendait `nil`.
+        // Lier la preuve de vie à la fidélité du parseur, c'est faire d'un
+        // défaut d'affichage une panne de sauvegarde.
+        //
+        // Ce que le contrat dit vraiment, et qui ne dépend d'aucun format :
+        // « le silence ne dit jamais "c'est juste lent", il dit "plus rien
+        // n'avance" ». Un octet reçu sur stderr est une preuve de vie ; sa
+        // lisibilité est une autre question, qui a le droit d'échouer sans
+        // tuer le run. `lastProgress` mesure donc désormais le silence, ce
+        // qu'il aurait toujours dû mesurer.
+        lock.lock()
+        lastProgress = Date()
+        lock.unlock()
+
         guard let onProgress else { return }
         // Décodage indulgent, uniquement pour cette lecture en direct : un
         // paquet peut couper une séquence UTF-8 multi-octets en plein milieu
@@ -1060,7 +1155,6 @@ private final class OutputCollector: @unchecked Sendable {
         let chunkText = String(decoding: data, as: UTF8.self)
         lock.lock()
         let progresses = progressReader.accept(chunkText)
-        if !progresses.isEmpty { lastProgress = Date() }
         lock.unlock()
         for progress in progresses { onProgress(progress) }
     }

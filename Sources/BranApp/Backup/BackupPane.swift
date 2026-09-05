@@ -133,7 +133,8 @@ struct BackupPane: View {
             scheduleDecision: backup.scheduleDecision,
             hasAllSecrets: hasAllSecrets,
             launchAgentStatus: backup.launchAgentStatus,
-            phase: backup.phase,
+            phase: backup.displayedPhase,
+            externalRun: backup.externalRunStatus,
             chainVerdict: backup.chainVerdict,
             coverage: coverage,
             lastIntegrityCheck: backup.lastIntegrityCheck
@@ -229,11 +230,8 @@ struct BackupPane: View {
             if let interruptedNotice {
                 NoticeRow(text: interruptedNotice, symbol: "pause.circle.fill", tint: Palette.machine)
             }
-            if let batteryNotice {
-                NoticeRow(text: batteryNotice, symbol: "battery.25percent", tint: Palette.machine)
-            }
         }
-        .branAnimation(Motion.enter, value: backup.phase)
+        .branAnimation(Motion.enter, value: backup.displayedPhase)
     }
 
     /// **Le journal illisible, dit franchement.** Un journal absent est
@@ -316,20 +314,18 @@ struct BackupPane: View {
         return "\(failure.summary) La sauvegarde reprendra d'où elle s'est arrêtée."
     }
 
-    /// **La politique batterie, dite en clair.** Purement descriptive de
-    /// `configuration.onBatteryPolicy` : « que se passera-t-il, en général,
-    /// si je débranche ? » — question antérieure à celle du verdict, qui dit
-    /// ce qui se passe *maintenant*.
-    private var batteryNotice: String? {
-        guard backup.configuration.isEnabled else { return nil }
-        guard case .waitForPower(let forceAfterHours) = backup.configuration.onBatteryPolicy else { return nil }
-        let hours = Int(forceAfterHours.rounded())
-        return """
-            Sur batterie, une grosse sauvegarde attend le retour du secteur — \
-            mais pas indéfiniment : passé \(hours)\u{202F}heures de retard, elle se \
-            lance quand même, batterie ou pas.
-            """
-    }
+    // **La politique batterie ne s'affiche plus en permanence, à la demande
+    // du propriétaire.** Elle était purement descriptive — « que se
+    // passera-t-il si je débranche ? » — et s'affichait donc aussi sur un Mac
+    // branché en permanence, où elle ne décrivait rien. Sur un écran dont le
+    // reproche est « il y a des erreurs affichées dans tous les sens », une
+    // ligne qui ne parle jamais de l'instant présent coûte plus d'attention
+    // qu'elle n'en mérite.
+    //
+    // Rien n'est perdu : quand une sauvegarde attend **réellement** le
+    // secteur, le héros le dit, avec la date limite — et c'est là que le
+    // chiffre compte. Le réglage lui-même reste expliqué dans les réglages de
+    // sauvegarde, à l'endroit où on le change.
 
     // MARK: - Le héros
 
@@ -397,13 +393,13 @@ struct BackupPane: View {
             HStack(alignment: .center, spacing: Space.inset) {
                 scheduleText
                 Spacer(minLength: Space.small)
-                actionButton
+                actionControl
             }
             VStack(alignment: .leading, spacing: Space.small) {
                 scheduleText
                 HStack {
                     Spacer()
-                    actionButton
+                    actionControl
                 }
             }
         }
@@ -421,20 +417,27 @@ struct BackupPane: View {
         .clipped()
     }
 
-    private var actionButton: some View {
-        Button {
-            if backup.phase.isBusy {
-                backup.cancel()
-            } else {
-                backup.backUpNow()
+    @ViewBuilder
+    private var actionControl: some View {
+        if backup.isDisplayingExternalRun {
+            Label("Lancée automatiquement", systemImage: "clock.arrow.circlepath")
+                .font(Type.cardBody)
+                .foregroundStyle(.secondary)
+        } else {
+            Button {
+                if backup.phase.isBusy {
+                    backup.cancel()
+                } else {
+                    backup.backUpNow()
+                }
+            } label: {
+                Text(backup.phase.isBusy ? "Annuler" : "Sauvegarder maintenant")
             }
-        } label: {
-            Text(backup.phase.isBusy ? "Annuler" : "Sauvegarder maintenant")
+            .buttonStyle(.borderedProminent)
+            .tint(backup.phase.isBusy ? Palette.broken : Color.accentColor)
+            .disabled(startDisabled)
+            .help(startHelp)
         }
-        .buttonStyle(.borderedProminent)
-        .tint(backup.phase.isBusy ? Palette.broken : Color.accentColor)
-        .disabled(startDisabled)
-        .help(startHelp)
     }
 
     /// **Jamais désactivé pendant un run** : c'est alors le bouton d'annulation,
@@ -478,6 +481,7 @@ struct BackupPane: View {
     private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Space.stack) {
+                currentRunSection
                 firstUploadSection
                 chainSection
                 proofPanel
@@ -488,6 +492,37 @@ struct BackupPane: View {
         }
         .popover(item: $openLink) { item in
             LinkDiagnosticView(link: item.link, result: item.result)
+        }
+    }
+
+    // MARK: - Le travail vivant
+
+    /// Toujours présent pendant une tentative, y compris après la première
+    /// sauvegarde. L'ancien affichage plaçait la progression uniquement dans
+    /// « Première sauvegarde » : dès qu'un snapshot couvrait déjà la source,
+    /// le héros promettait « le détail est ci-dessous » et il n'y avait rien.
+    @ViewBuilder
+    private var currentRunSection: some View {
+        switch backup.displayedPhase {
+        case .checkingChain:
+            Panel(title: "Préparation", help: "Les contrôles qui précèdent le transfert.") {
+                indeterminateRow(backup.isDisplayingExternalRun
+                    ? "Le processus automatique prépare la sauvegarde…"
+                    : "Sondage de la chaîne réseau avant de commencer…")
+            }
+        case .running(let progress):
+            Panel(
+                title: backup.isDisplayingExternalRun ? "Transfert automatique" : "Transfert en cours",
+                help: "Les compteurs réellement publiés par Kopia pendant cette tentative."
+            ) {
+                runningRows(progress)
+            }
+        case .verifying:
+            Panel(title: "Confirmation", help: "Le snapshot est relu dans le dépôt avant d'être déclaré réussi.") {
+                indeterminateRow("Confirmation dans le dépôt — la seule étape qui prouve vraiment le snapshot…")
+            }
+        case .idle, .success, .failed, .waitingForNetwork, .interrupted:
+            EmptyView()
         }
     }
 
@@ -529,14 +564,7 @@ struct BackupPane: View {
                 .font(Type.cardBody)
                 .fixedSize(horizontal: false, vertical: true)
 
-            switch backup.phase {
-            case .running(let progress):
-                runningRows(progress)
-            case .checkingChain:
-                indeterminateRow("Sondage de la chaîne réseau avant de reprendre…")
-            case .verifying:
-                indeterminateRow("Confirmation dans le dépôt — la seule étape qui prouve vraiment le snapshot…")
-            default:
+            if !backup.isBusy {
                 // **Hors run actif, premier envoi non terminé.** Exactement
                 // ce que le propriétaire voit le lendemain matin : le
                 // panneau reste, les chiffres restent, seule la phrase
@@ -680,7 +708,7 @@ struct BackupPane: View {
     }
 
     private var progressSnapshot: BackupProgress? {
-        if case .running(let progress) = backup.phase { return progress }
+        if case .running(let progress) = backup.displayedPhase { return progress }
         return nil
     }
 
@@ -701,7 +729,10 @@ struct BackupPane: View {
     /// dernier mot dans les deux sens.
     private var chainExpandedBinding: Binding<Bool> {
         Binding(
-            get: { chainExpandedOverride ?? (backup.chainVerdict.map { $0.canBackUp == false } ?? false) },
+            get: {
+                chainExpandedOverride
+                    ?? (!backup.isBusy && (backup.chainVerdict.map { $0.canBackUp == false } ?? false))
+            },
             set: { chainExpandedOverride = $0 }
         )
     }
@@ -735,6 +766,9 @@ struct BackupPane: View {
     }
 
     private var chainSummary: String {
+        if backup.isBusy {
+            return "Chaîne réseau — utilisée par la sauvegarde en cours."
+        }
         guard let verdict = backup.chainVerdict else {
             return "Chaîne réseau — jamais sondée depuis le lancement."
         }
@@ -778,10 +812,10 @@ struct BackupPane: View {
                     HStack {
                         Spacer()
                         Button("Vérifier maintenant") { backup.verifyChainNow() }
-                            .disabled(backup.phase.isBusy)
+                            .disabled(backup.isBusy)
                             .help("Resonde les six maillons, dépôt compris — le plus cher, et le plus vrai.")
                         Button("Vérifier l'intégrité") { backup.verifyRepositoryIntegrity() }
-                            .disabled(backup.phase.isBusy || backup.isVerifyingIntegrity)
+                            .disabled(backup.isBusy || backup.isVerifyingIntegrity)
                             .help("Lance « kopia snapshot verify » : relit ce que le dépôt contient "
                                 + "réellement, snapshot par snapshot. C'est la commande la plus chère de "
                                 + "tout l'écran — plusieurs minutes sur un dépôt fourni.")
@@ -795,7 +829,7 @@ struct BackupPane: View {
                     HStack {
                         Spacer()
                         Button("Vérifier maintenant") { backup.verifyChainNow() }
-                            .disabled(backup.phase.isBusy)
+                            .disabled(backup.isBusy)
                     }
                 }
             }
@@ -931,6 +965,7 @@ private struct BackupHeroVerdict: Equatable {
         hasAllSecrets: Bool,
         launchAgentStatus: LaunchAgentStatus,
         phase: BackupPhase,
+        externalRun: BackupRuntimeStatus? = nil,
         chainVerdict: ChainVerdict?,
         coverage: SourceCoverageReport,
         lastIntegrityCheck: BackupController.IntegrityCheck?
@@ -994,8 +1029,35 @@ private struct BackupHeroVerdict: Equatable {
 
         // P2 — une tentative occupe déjà le dépôt.
         if phase.isBusy {
-            return busyVerdict(phase)
+            return busyVerdict(phase, externalRun: externalRun)
         }
+
+        // **P2ter — une sauvegarde prouvée et fraîche prime sur un réseau
+        // qu'on ne sait pas encore décrire.**
+        //
+        // L'ordre était inverse, et il répondait à la mauvaise question. Le
+        // propriétaire a lu « État du réseau pas encore su » en haut d'un
+        // écran dont le panneau Preuves affichait, deux lignes plus bas, un
+        // snapshot de 1 581 466 fichiers relu dans le dépôt, sans une seule
+        // erreur. Sa question n'est pas « puis-je sauvegarder à cet
+        // instant ? » mais « mes fichiers sont-ils à l'abri ? » — et une
+        // mesure de sonde périmée de 265 secondes ne change rien à la
+        // réponse.
+        //
+        // La distinction qui suit est tout : une chaîne **cassée** garde le
+        // titre, parce qu'elle annonce que la prochaine sauvegarde n'aura pas
+        // lieu — c'est une information sur l'avenir, que l'écran doit porter
+        // haut. Une chaîne **pas encore mesurée** n'annonce rien du tout ; la
+        // reléguer sous la couverture ne cache aucun risque, et la ligne
+        // « Chaîne réseau » juste en dessous la donne intégralement.
+        let coverageIsStale = coverage.coverages.contains {
+            if case .coveredButStale = $0.state { return true }
+            return false
+        }
+        let coverageIsFullyProven: Bool = {
+            if case .fullyCovered = coverage.verdict { return coverageIsStale == false }
+            return false
+        }()
 
         // P3 / P4 — la chaîne réseau.
         if let chainVerdict {
@@ -1006,7 +1068,7 @@ private struct BackupHeroVerdict: Equatable {
                     detail: chainVerdict.headline
                 )
             }
-            if chainVerdict.canBackUp == false {
+            if chainVerdict.canBackUp == false, coverageIsFullyProven == false {
                 // Ni panne ferme ni chaîne prête : sonde en vol ou mesure
                 // périmée (`connecting`/`unknown`). Bleu, jamais rouge — un
                 // maillon `degraded` ne tombe pas ici, `canBackUp` reste vrai
@@ -1017,7 +1079,7 @@ private struct BackupHeroVerdict: Equatable {
                     detail: chainVerdict.headline
                 )
             }
-        } else {
+        } else if coverageIsFullyProven == false {
             return BackupHeroVerdict(
                 symbol: "questionmark.circle.fill", tint: Palette.machine,
                 title: "État du réseau pas encore su.",
@@ -1093,7 +1155,10 @@ private struct BackupHeroVerdict: Equatable {
         }
     }
 
-    private static func busyVerdict(_ phase: BackupPhase) -> BackupHeroVerdict {
+    private static func busyVerdict(
+        _ phase: BackupPhase,
+        externalRun: BackupRuntimeStatus?
+    ) -> BackupHeroVerdict {
         switch phase {
         case .checkingChain:
             return BackupHeroVerdict(
@@ -1102,10 +1167,17 @@ private struct BackupHeroVerdict: Equatable {
                 detail: "bran sonde les six maillons avant de commencer."
             )
         case .running:
+            let detail: String
+            if let externalRun {
+                detail = "\(externalRunOrigin(externalRun.trigger)) démarré "
+                    + "\(BackupFormat.age(externalRun.startedAt)). Le détail du transfert est ci-dessous."
+            } else {
+                detail = "Le détail du transfert est ci-dessous."
+            }
             return BackupHeroVerdict(
                 symbol: "arrow.up.circle.fill", tint: Palette.machine,
-                title: "Sauvegarde en cours…",
-                detail: "Le détail du transfert est ci-dessous."
+                title: externalRun == nil ? "Sauvegarde en cours…" : "Sauvegarde automatique en cours…",
+                detail: detail
             )
         case .verifying:
             return BackupHeroVerdict(
@@ -1122,6 +1194,16 @@ private struct BackupHeroVerdict: Equatable {
                 symbol: "arrow.triangle.2.circlepath", tint: Palette.machine,
                 title: "En cours…", detail: nil
             )
+        }
+    }
+
+    private static func externalRunOrigin(_ trigger: BackupTrigger) -> String {
+        switch trigger {
+        case .manual: "Tentative demandée manuellement"
+        case .scheduled: "Échéance planifiée"
+        case .catchUp: "Rattrapage après veille ou arrêt du Mac"
+        case .networkReturned: "Reprise après le retour du réseau"
+        case .resume: "Reprise automatique"
         }
     }
 }

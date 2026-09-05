@@ -565,6 +565,53 @@ public enum BackupTrigger: String, Codable, Sendable, Hashable {
     case resume
 }
 
+// MARK: - L'état partagé entre les deux processus
+
+/// L'instantané léger qu'un run sans interface publie pendant qu'il travaille.
+///
+/// `BackupPhase` reste l'état complet d'une tentative pilotée par la fenêtre.
+/// Le LaunchAgent, lui, vit dans un autre processus : sans un petit contrat sur
+/// disque, sa progression meurt dans sa propre mémoire et l'interface affiche
+/// « Sauvegarder maintenant » pendant que Kopia travaille déjà. Ce type ne
+/// porte que ce que l'autre processus peut affirmer à l'instant présent.
+public struct BackupRuntimeStatus: Codable, Sendable, Hashable {
+    public enum Stage: String, Codable, Sendable, Hashable {
+        case running
+        case verifying
+    }
+
+    public var attemptID: UUID
+    public var trigger: BackupTrigger
+    public var startedAt: Date
+    public var updatedAt: Date
+    public var stage: Stage
+    public var progress: BackupProgress
+
+    public init(
+        attemptID: UUID,
+        trigger: BackupTrigger,
+        startedAt: Date,
+        updatedAt: Date,
+        stage: Stage,
+        progress: BackupProgress = BackupProgress()
+    ) {
+        self.attemptID = attemptID
+        self.trigger = trigger
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt
+        self.stage = stage
+        self.progress = progress
+    }
+
+    /// La forme déjà comprise par toutes les vues de progression.
+    public var phase: BackupPhase {
+        switch stage {
+        case .running: .running(progress)
+        case .verifying: .verifying
+        }
+    }
+}
+
 // MARK: - La configuration
 
 /// Tout ce qui distingue ce Mac d'un autre. **Aucun secret ici.**

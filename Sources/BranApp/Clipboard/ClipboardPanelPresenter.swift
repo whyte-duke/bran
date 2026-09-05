@@ -81,7 +81,15 @@ final class ClipboardPanelPresenter {
         self.thumbnails = thumbnails
     }
 
-    var isOpen: Bool { panel?.isVisible == true }
+    /// `isVisible` seul ment après une veille ou un changement de bureau :
+    /// AppKit peut garder le panneau ordonné sur l'ancien espace, donc le dire
+    /// visible alors qu'aucun pixel n'est composé sur le bureau courant. Dans
+    /// cet état, traiter le raccourci comme une fermeture donne exactement le
+    /// symptôme « ⌘⇧C ne fait rien ».
+    var isOpen: Bool {
+        guard let panel else { return false }
+        return panel.isVisible && panel.isOnActiveSpace
+    }
 
     // MARK: - Ouvrir et fermer
 
@@ -159,6 +167,21 @@ final class ClipboardPanelPresenter {
 
     private func existingPanel() -> NSPanel? {
         guard let panel, model != nil else { return nil }
+
+        // Un panneau AppKit conserve son rattachement aux Spaces pendant toute
+        // sa vie. Après une veille, la fenêtre peut donc rester `isVisible`
+        // tout en n'étant plus sur l'espace actif. `.canJoinAllSpaces` évite le
+        // cas ordinaire, mais ne répare pas toujours une fenêtre déjà créée
+        // avant la reconfiguration des écrans. La reconstruire ici est sans
+        // effet sur l'historique, qui appartient au store, et garantit que la
+        // prochaine ouverture naît sur le bureau où le raccourci a été tapé.
+        guard panel.isOnActiveSpace else {
+            stopObservingDismissal()
+            panel.orderOut(nil)
+            self.panel = nil
+            self.model = nil
+            return nil
+        }
         return panel
     }
 
