@@ -245,7 +245,7 @@ struct BackupSettingsSection: View {
         Section("Vérification") {
             HStack(spacing: Space.small) {
                 Button("Tester la chaîne") { backup.verifyChainNow() }
-                    .disabled(backup.phase.isBusy)
+                    .disabled(backup.isBusy)
                 if case .checkingChain = backup.phase {
                     ProgressView().controlSize(.small)
                 }

@@ -128,6 +128,20 @@ final class BackupController {
 
     private(set) var scheduleDecision: ScheduleDecision = .disabled("Sauvegarde non configurée.")
 
+    /// Le run publié par le LaunchAgent, donc extérieur à ce contrôleur.
+    /// `nil` signifie qu'aucun état publié ne tient actuellement le verrou.
+    private(set) var externalRunStatus: BackupRuntimeStatus?
+
+    /// La phase à montrer. Un run lancé depuis cette fenêtre gagne toujours ;
+    /// sinon, l'état atomique du LaunchAgent remplit le trou interprocessus.
+    var displayedPhase: BackupPhase {
+        if phase.isBusy { return phase }
+        return externalRunStatus?.phase ?? phase
+    }
+
+    var isBusy: Bool { displayedPhase.isBusy }
+    var isDisplayingExternalRun: Bool { !phase.isBusy && externalRunStatus != nil }
+
     /// **La réponse à « mes fichiers sont-ils à l'abri », et non à « un
     /// snapshot a-t-il réussi ».**
     ///
@@ -244,6 +258,7 @@ final class BackupController {
     private var machine = BackupMachine()
     private var runTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
+    private var externalRunPollTask: Task<Void, Never>?
     private var sleepObservers: [NSObjectProtocol] = []
 
     /// La resynchronisation du `LaunchAgent` en attente, regroupée — voir
@@ -437,6 +452,7 @@ final class BackupController {
         syncLaunchAgent()
         observeSleepAndWake()
         pollTask = Task { [weak self] in await self?.pollLoop() }
+        externalRunPollTask = Task { [weak self] in await self?.externalRunPollLoop() }
     }
 
     /// Met le LaunchAgent en accord avec la configuration : installé quand la
@@ -580,6 +596,7 @@ final class BackupController {
     /// gérer, seulement un arrêt propre à offrir si un jour il en faut un.
     func stop() {
         pollTask?.cancel()
+        externalRunPollTask?.cancel()
         runTask?.cancel()
         launchAgentSyncTask?.cancel()
         for observer in sleepObservers {
@@ -623,7 +640,7 @@ final class BackupController {
                 // maillon 6 non plus ne doit pas être touché : `performRun`
                 // tient déjà le dépôt ouvert via `kopia snapshot create`.
             } else {
-                let needsRepository = !phase.isBusy
+                let needsRepository = !isBusy
                     && Date().timeIntervalSince(lastRepositoryProbe) >= Self.repositoryProbeInterval
                 await probeChain(includingRepository: needsRepository)
                 if needsRepository { lastRepositoryProbe = Date() }
@@ -633,7 +650,7 @@ final class BackupController {
             // rejoue ici : sans ça, un réglage modifié pendant une sauvegarde
             // de trente heures ne serait jamais porté au job launchd, et
             // l'écran dirait encore une chose que le système ne ferait pas.
-            if launchAgentSyncPending, !phase.isBusy {
+            if launchAgentSyncPending, !isBusy {
                 await performLaunchAgentSync(enabled: configuration.isEnabled)
                 lastLaunchAgentVerify = Date()
             } else if Date().timeIntervalSince(lastLaunchAgentVerify) >= Self.launchAgentVerifyInterval {
@@ -650,6 +667,47 @@ final class BackupController {
             maybeResumeAfterNetworkReturn()
 
             try? await Task.sleep(for: .seconds(Self.fastProbeInterval))
+        }
+    }
+
+    /// Relit l'état du processus automatique une fois par seconde.
+    ///
+    /// Le fichier seul ne suffit pas : un arrêt brutal peut le laisser sur le
+    /// disque. Le verrou seul ne suffit pas non plus : il dit « occupé », sans
+    /// dire par quoi ni avec quelle progression. Les deux doivent être vrais.
+    private func externalRunPollLoop() async {
+        var wasRunning = false
+
+        while !Task.isCancelled {
+            let status: BackupRuntimeStatus? = if phase.isBusy || isVerifyingIntegrity {
+                nil
+            } else {
+                await Task.detached(priority: .utility) {
+                    guard let status = BackupRuntimeStatusStore.read(),
+                          BackupRunLock.isHeldByAnotherProcess()
+                    else { return nil }
+                    return status
+                }.value
+            }
+
+            let isRunning = status != nil
+            if status != externalRunStatus {
+                externalRunStatus = status
+            }
+
+            if isRunning != wasRunning {
+                reloadJournal()
+                refreshScheduleDecision()
+                if wasRunning && !isRunning {
+                    // Le run headless a consigné son issue avant de libérer le
+                    // verrou. On relit aussi le dépôt pour mettre les preuves
+                    // et la couverture à jour sans demander un redémarrage.
+                    refreshRepositoryProofs()
+                }
+                wasRunning = isRunning
+            }
+
+            try? await Task.sleep(for: .seconds(1))
         }
     }
 
@@ -966,7 +1024,7 @@ final class BackupController {
             chain: chainVerdict,
             isOnBattery: isOnBattery,
             batteryFraction: level,
-            isRunning: phase.isBusy,
+            isRunning: isBusy,
             consecutiveFailures: BackupJournalModel.consecutiveFailures(in: attempts)
         )
     }
@@ -985,7 +1043,7 @@ final class BackupController {
     /// publique, sans paramètre, pour ne rien changer à ce que l'écran
     /// appelle déjà.
     private func startRun(trigger: BackupTrigger) {
-        guard runTask == nil, !phase.isBusy else { return }
+        guard runTask == nil, !isBusy else { return }
         runTask = Task { [weak self] in
             await self?.performRun(trigger: trigger)
             self?.runTask = nil
@@ -1398,7 +1456,7 @@ final class BackupController {
     /// résultat, lui, est **affiché** : c'est ce qui distingue « un snapshot
     /// existe dans le dépôt » de « bran a relu ce que le dépôt contient ».
     func verifyRepositoryIntegrity() {
-        guard !isVerifyingIntegrity, !phase.isBusy else { return }
+        guard !isVerifyingIntegrity, !isBusy else { return }
         isVerifyingIntegrity = true
         Task { [weak self] in
             guard let self else { return }
@@ -1566,6 +1624,40 @@ final class BackupController {
         } catch {
             return (false, nil)
         }
+    }
+}
+
+/// Le petit canal interprocessus entre `bran --backup-run` et la fenêtre.
+///
+/// Écriture atomique : l'interface voit l'ancien JSON ou le nouveau, jamais un
+/// fichier à moitié remplacé pendant qu'elle le relit. Le verrou de run reste
+/// la preuve de vie ; ce fichier n'est qu'une description du travail vivant.
+enum BackupRuntimeStatusStore {
+    private static var path: URL {
+        BackupJournal.directory.appending(path: "runtime-status.json", directoryHint: .notDirectory)
+    }
+
+    static func read() -> BackupRuntimeStatus? {
+        guard let data = try? Data(contentsOf: path) else { return nil }
+        return try? JSONDecoder().decode(BackupRuntimeStatus.self, from: data)
+    }
+
+    @discardableResult
+    static func write(_ status: BackupRuntimeStatus) -> Bool {
+        do {
+            try FileManager.default.createDirectory(
+                at: BackupJournal.directory, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(status)
+            try data.write(to: path, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static func remove() {
+        guard FileManager.default.fileExists(atPath: path.path(percentEncoded: false)) else { return }
+        try? FileManager.default.removeItem(at: path)
     }
 }
 
