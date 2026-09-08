@@ -28,6 +28,13 @@ public actor CaptureSession: CaptureBackend {
     public nonisolated let failures: AsyncStream<String>
 
     private nonisolated let failureContinuation: AsyncStream<String>.Continuation
+
+    /// La sortie a été arrêtée depuis l'indicateur système de macOS, sans que
+    /// bran ait demandé de pause ou d'arrêt. Le flux existe encore mais il
+    /// n'écrit plus rien : l'interface doit donc arrêter sa session elle aussi.
+    public nonisolated let externalStops: AsyncStream<Void>
+
+    private nonisolated let externalStopContinuation: AsyncStream<Void>.Continuation
     private var settings: Settings
 
     /// Signaux du segment courant. **Une instance neuve par segment**, et pas un
@@ -68,6 +75,7 @@ public actor CaptureSession: CaptureBackend {
     public init(settings: Settings = Settings()) {
         self.settings = settings
         (failures, failureContinuation) = AsyncStream.makeStream(of: String.self)
+        (externalStops, externalStopContinuation) = AsyncStream.makeStream(of: Void.self)
     }
 
     /// Sans effet sur un enregistrement en cours : changer la configuration
@@ -170,7 +178,9 @@ public actor CaptureSession: CaptureBackend {
         recordingConfiguration.outputFileType = .mp4
         recordingConfiguration.videoCodecType = settings.codec
 
-        let signals = CaptureSignals()
+        let signals = CaptureSignals { [externalStopContinuation] in
+            externalStopContinuation.yield(())
+        }
         self.signals = signals
         let delegate = CaptureDelegate(signals: signals, failures: failureContinuation)
         let stream = SCStream(filter: filter, configuration: configuration, delegate: delegate)
@@ -241,7 +251,13 @@ public actor CaptureSession: CaptureBackend {
         // En cas d'échec, tout est laissé en place : le flux, le delegate et la
         // sortie. C'est ce qui rend un nouvel essai possible, et c'est ce qui
         // permet à `openSegment()` de constater qu'un flux traîne encore.
-        try await stream.stopCapture()
+        signals.requestFinish()
+        do {
+            try await stream.stopCapture()
+        } catch {
+            signals.cancelFinishRequest()
+            throw error
+        }
 
         // Passé ce point le flux est arrêté pour de bon : le relâcher est sûr,
         // et un `stop()` suivant a raison de ne rien faire.

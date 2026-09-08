@@ -1,5 +1,64 @@
 import Foundation
 
+/// Distingue la fermeture normale d'une sortie d'enregistrement de celle que
+/// macOS provoque quand l'utilisateur clique son bouton d'arrêt dans la barre
+/// des menus.
+///
+/// `SCRecordingOutputDelegate` envoie le même callback dans les deux cas. Sans
+/// cette petite machine, une sortie retirée par macOS ressemble à une
+/// finalisation normale, tandis que le `SCStream` et le chrono de l'application
+/// continuent de tourner sans plus rien écrire.
+public struct RecordingOutputWatch: Sendable {
+
+    public enum FinishOrigin: Equatable, Sendable {
+        case requested
+        case external
+        case duplicate
+    }
+
+    private enum State: Sendable {
+        case recording
+        case finishRequested
+        case finished
+    }
+
+    private var state: State = .recording
+
+    public init() {}
+
+    public mutating func requestFinish() {
+        guard state == .recording else { return }
+        state = .finishRequested
+    }
+
+    /// `stopCapture()` peut échouer avant d'avoir demandé la fermeture à
+    /// `replayd`. La sortie reste alors active et doit de nouveau être surveillée
+    /// comme telle.
+    public mutating func cancelFinishRequest() {
+        guard state == .finishRequested else { return }
+        state = .recording
+    }
+
+    public mutating func observeFinished() -> FinishOrigin {
+        switch state {
+        case .recording:
+            state = .finished
+            return .external
+        case .finishRequested:
+            state = .finished
+            return .requested
+        case .finished:
+            return .duplicate
+        }
+    }
+
+    /// Une panne possède déjà son propre signal. Le callback de fin qui peut la
+    /// suivre ne doit pas être pris pour un second arrêt venu de macOS.
+    public mutating func observeFailure() {
+        state = .finished
+    }
+}
+
 /// Décide, à chaque coup de sonde, s'il faut continuer d'attendre la
 /// finalisation d'un enregistrement — ou déclarer qu'elle est morte.
 ///
