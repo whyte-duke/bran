@@ -25,7 +25,6 @@ struct SectionSidebar: View {
     @Binding var pane: LibraryPane
     @Binding var showsSettings: Bool
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -35,13 +34,11 @@ struct SectionSidebar: View {
             VStack(spacing: Space.hair) {
                 ForEach(LibraryPane.allCases) { item in
                     SidebarItem(pane: item, isSelected: pane == item, badge: badge(for: item)) {
-                        // Le seul mouvement ample de l'application, et le
-                        // dernier qui échappait à « Réduire les animations » :
-                        // un `withAnimation` posé au point de mutation ne peut
-                        // pas être atteint par un modificateur.
-                        withAnimation(Motion.honouring(Motion.pane, reduceMotion: reduceMotion)) {
-                            pane = item
-                        }
+                        // Deux longues listes en fondu dessinent leurs textes
+                        // l'une sur l'autre pendant la transition. Changer de
+                        // section est une navigation, pas un effet visuel : le
+                        // contenu bascule donc sans animation globale.
+                        pane = item
                     }
                 }
             }
@@ -365,6 +362,8 @@ private struct CompactStatusRow: View {
 
 /// Les sections de la fenêtre. D'autres viendront s'ajouter ici.
 enum LibraryPane: String, CaseIterable, Identifiable {
+    static let defaultsKey = "library.selectedPane"
+
     /// **En premier, et c'est la vue par défaut.** Les quatre autres sections
     /// répondent chacune à « qu'est-ce que j'ai dans cette boîte ». Celle-ci
     /// répond à « qu'est-ce que j'ai fait », qui est la question qu'on se pose

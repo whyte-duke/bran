@@ -180,7 +180,6 @@ struct DictationPane: View {
                 .padding(.horizontal, Space.gutter)
                 .padding(.vertical, Space.stack)
             }
-            .branAnimation(Motion.enter, value: controller.store.entries.count)
         }
     }
 
@@ -416,6 +415,12 @@ private struct DictationCard: View {
                 actions
             }
         }
+        // Le rendu sélectionnable de `Text` passe par une vue AppKit. Pendant
+        // une animation de hauteur, son calque peut conserver l'ancienne taille
+        // une image de plus que le fond SwiftUI et peindre sur la carte suivante.
+        // La liste n'anime plus ses centaines de lignes au chargement, et cette
+        // coupure garde aussi les transitions locales dans leur propre carte.
+        .clipped()
         .cardBackground(isHovering: isHovering)
         // Sans ça, le texte déborde du cadre pendant que la carte se
         // redimensionne au dépliage.
@@ -466,6 +471,8 @@ private struct DictationCard: View {
 
     @ViewBuilder
     private var text: some View {
+        let policy = TranscriptCardPolicy(isExpanded: isExpanded)
+
         if isRetrying {
             retryingText
         } else if entry.text.isEmpty, let failure = entry.failure {
@@ -474,13 +481,19 @@ private struct DictationCard: View {
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
-            Text(entry.text)
+            Group {
+                if policy.allowsSelection {
+                    Text(entry.text)
+                        .textSelection(.enabled)
+                } else {
+                    Text(entry.text)
+                }
+            }
                 .font(.callout)
-                .textSelection(.enabled)
                 // Replié : trois lignes, assez pour reconnaître la dictée.
                 // Déplié : tout, sans changer de page.
-                .lineLimit(isExpanded ? nil : 3)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(policy.lineLimit)
+                .fixedSize(horizontal: false, vertical: policy.fixesVerticalSize)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 // Le texte arrivé par une relance se substitue à l'ancien en
                 // fondu, plutôt que d'apparaître d'un coup — c'est la seule
@@ -496,11 +509,13 @@ private struct DictationCard: View {
     /// exactement la même hauteur — sinon toute la liste sursaute à chaque
     /// relance — et on continue de savoir de quelle dictée il s'agit.
     private var retryingText: some View {
-        ZStack(alignment: .topLeading) {
+        let policy = TranscriptCardPolicy(isExpanded: isExpanded)
+
+        return ZStack(alignment: .topLeading) {
             Text(entry.text.isEmpty ? " " : entry.text)
                 .font(.callout)
-                .lineLimit(isExpanded ? nil : 3)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(policy.lineLimit)
+                .fixedSize(horizontal: false, vertical: policy.fixesVerticalSize)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .opacity(0.12)
                 .accessibilityHidden(true)

@@ -142,7 +142,8 @@ final class ThumbnailCache {
 
     /// Le plafond de l'étage mémoire, en octets de bitmap décodé.
     ///
-    /// 32 Mio, soit ~1 200 vignettes de ligne ou ~128 vignettes de détail. Une
+    /// 32 Mio, soit ~1 200 vignettes de ligne ou environ huit aperçus carrés de
+    /// 1024 px. Une
     /// fenêtre de panneau en montre au plus quelques dizaines ; le reste du
     /// plafond sert à ce que remonter dans la liste ne redemande rien au disque.
     private static let memoryCostLimit = 32 * 1024 * 1024

@@ -106,6 +106,8 @@ final class BranAppDelegate: NSObject, NSApplicationDelegate {
 struct BranApp: App {
     @State private var model = AppModel()
     @NSApplicationDelegateAdaptor(BranAppDelegate.self) private var delegate
+    @AppStorage(AppLaunchPreferences.opensWindowAtLaunchKey)
+    private var opensWindowAtLaunch = true
 
     var body: some Scene {
         // **Un seul élément de barre de menus, et c'est un choix qui a été
@@ -159,7 +161,7 @@ struct BranApp: App {
         .defaultSize(width: 1080, height: 700)
         // Une app dont le seul point d'entrée est une icône de barre de menus
         // n'a pas de premier lancement utilisable si cette icône est masquée.
-        .defaultLaunchBehavior(.presented)
+        .defaultLaunchBehavior(opensWindowAtLaunch ? .presented : .suppressed)
         .commands { branCommands }
 
         // « Bienvenue » et non « autorisations » : l'écran dit ce que bran sait

@@ -15,6 +15,15 @@ struct GeneralSettingsSection: View {
     /// aux changements de `UserDefaults`, y compris ceux qui viennent du
     /// rattrapage d'échec.
     @AppStorage(DockPresence.defaultsKey) private var showsDockIcon = true
+    @AppStorage(AppLaunchPreferences.opensWindowAtLaunchKey)
+    private var opensWindowAtLaunch = true
+
+    @AppStorage(MenuBarPreferences.showsHistoryKey) private var showsHistory = true
+    @AppStorage(MenuBarPreferences.showsUpcomingMeetingKey) private var showsUpcomingMeeting = true
+    @AppStorage(MenuBarPreferences.showsAwakeKey) private var showsAwake = true
+    @AppStorage(MenuBarPreferences.showsSpeedKey) private var showsSpeed = true
+    @AppStorage(MenuBarPreferences.showsRecordingKey) private var showsRecording = true
+    @AppStorage(MenuBarPreferences.showsUpdatesKey) private var showsUpdates = true
 
     var body: some View {
         Section("Démarrage") {
@@ -22,7 +31,7 @@ struct GeneralSettingsSection: View {
                 get: { model.loginItem.isEnabled },
                 set: { model.setLaunchAtLogin($0) }
             ))
-            Text("bran ouvre sa fenêtre au démarrage, puis se contente d'observer.")
+            Text("bran se lance à l'ouverture de session et reste disponible en arrière-plan.")
                 .font(Type.meta)
                 .foregroundStyle(.secondary)
 
@@ -32,28 +41,35 @@ struct GeneralSettingsSection: View {
             // parce que le système a refusé le changement, rien n'invalidait la
             // vue et l'interrupteur restait sur la position demandée. Il mentait
             // exactement dans le cas que le rattrapage existe pour couvrir.
-            Toggle("Afficher bran dans le Dock", isOn: Binding(
-                get: { showsDockIcon },
-                set: { showsDockIcon = $0; DockPresence.apply() }
+            Toggle("Utiliser bran uniquement dans la barre des menus", isOn: Binding(
+                get: { showsDockIcon == false && opensWindowAtLaunch == false },
+                set: { useMenuBarOnly($0) }
             ))
-            Text(DockPresence.explanation)
+            Text("Activé, bran ne montre ni fenêtre au démarrage, ni icône dans le Dock. « Ouvrir bran… » reste toujours disponible dans son menu.")
+                .font(Type.meta)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        Section("Barre des menus") {
+            Toggle("Historique", isOn: $showsHistory)
+            Toggle("Prochain rendez-vous", isOn: $showsUpcomingMeeting)
+            Toggle("Garder le Mac éveillé", isOn: $showsAwake)
+            Toggle("Tester le débit", isOn: $showsSpeed)
+            Toggle("Démarrer un enregistrement", isOn: $showsRecording)
+            Toggle("Consommation", isOn: Binding(
+                get: { model.meter.showsInMenuBar },
+                set: { model.meter.showsInMenuBar = $0 }
+            ))
+            Toggle("Rechercher des mises à jour", isOn: $showsUpdates)
+
+            Text("Les commandes d'une action en cours et les alertes restent toujours visibles, même si leur rubrique est masquée.")
                 .font(Type.meta)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
 
         AwakeSettingsSection(model: model)
-
-        Section("Consommation") {
-            Toggle("Afficher la consommation dans la barre de menus", isOn: Binding(
-                get: { model.meter.showsInMenuBar },
-                set: { model.meter.showsInMenuBar = $0 }
-            ))
-            Text("Deux lignes dans le menu de bran — « processeur » et « mémoire » —, et le même chiffre dans le libellé chaque fois que rien d'autre ne s'y montre. Éteint, bran ne mesure plus rien : la boucle s'arrête aussi.")
-                .font(Type.meta)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
 
         Section("Dossier des enregistrements") {
             HStack(spacing: Space.small) {
@@ -137,6 +153,12 @@ struct GeneralSettingsSection: View {
                 }
             }
         }
+    }
+
+    private func useMenuBarOnly(_ enabled: Bool) {
+        showsDockIcon = enabled == false
+        opensWindowAtLaunch = enabled == false
+        DockPresence.apply()
     }
 
     // MARK: - L'arborescence, montrée

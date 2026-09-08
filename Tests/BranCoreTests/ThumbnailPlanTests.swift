@@ -111,7 +111,7 @@ struct ThumbnailPlanTests {
 
         let url = ThumbnailPlan.url(for: blob(hash), size: .detail, in: clipboardFolder)
         #expect(url.deletingLastPathComponent().lastPathComponent == ThumbnailPlan.folderName)
-        #expect(url.lastPathComponent == "\(hash)-256.png")
+        #expect(url.lastPathComponent == "\(hash)-1024.png")
     }
 
     // MARK: - Ce qui n'a pas de vignette du tout
