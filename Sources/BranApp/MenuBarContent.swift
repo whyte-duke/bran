@@ -4,12 +4,18 @@ import SwiftUI
 struct MenuBarContent: View {
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @AppStorage(MenuBarPreferences.showsHistoryKey) private var showsHistory = true
+    @AppStorage(MenuBarPreferences.showsUpcomingMeetingKey) private var showsUpcomingMeeting = true
+    @AppStorage(MenuBarPreferences.showsAwakeKey) private var showsAwake = true
+    @AppStorage(MenuBarPreferences.showsSpeedKey) private var showsSpeed = true
+    @AppStorage(MenuBarPreferences.showsRecordingKey) private var showsRecording = true
+    @AppStorage(MenuBarPreferences.showsUpdatesKey) private var showsUpdates = true
 
     var body: some View {
         // Affiché **aussi** pendant un enregistrement, c'est-à-dire pendant la
         // réunion : le lien de la visio disparaissait exactement au moment où
         // on en a besoin — pour rejoindre à nouveau après une déconnexion.
-        if let next = model.directory.next {
+        if showsUpcomingMeeting, let next = model.directory.next {
             Text("Prochain RDV — \(next.displayName)")
             if let link = next.meeting_url, let url = URL(string: link) {
                 Link("Rejoindre la visio", destination: url)
@@ -33,24 +39,45 @@ struct MenuBarContent: View {
         // dialogue et sans coût mesurable.
         .onAppear { model.permissions.refresh() }
 
+        if showsHistory {
+            Menu("Historique", systemImage: "clock.arrow.circlepath") {
+                historyButton("Journal", pane: .week)
+                historyButton("Réunions", pane: .meetings)
+                historyButton("Dictées", pane: .dictation)
+                historyButton("Captures", pane: .snapshots)
+                historyButton("Presse-papiers", pane: .clipboard)
+            }
+        }
+
+        Button("Réglages…", systemImage: "gearshape") {
+            model.showsSettings = true
+            WindowPresenter.bringToFront("library", using: openWindow)
+        }
+        .keyboardShortcut(",")
+
         Divider()
 
-        AwakeMenu(awake: model.awake)
+        if showsAwake || model.awake.isOn {
+            AwakeMenu(awake: model.awake)
 
-        Divider()
+            Divider()
+        }
 
-        SpeedMenu(speed: model.speed)
+        if showsSpeed || model.speed.phase.isRunning {
+            SpeedMenu(speed: model.speed)
 
-        Divider()
+            Divider()
+        }
 
         dictationItems
 
-        Text(model.statusSummary)
+        if showsRecordingSection {
+            Text(model.statusSummary)
 
-        if let failure = model.lastFailure {
-            Text("⚠︎ \(failure)")
-            Button("Ignorer cet avertissement") { model.lastFailure = nil }
-        }
+            if let failure = model.lastFailure {
+                Text("⚠︎ \(failure)")
+                Button("Ignorer cet avertissement") { model.lastFailure = nil }
+            }
 
         Divider()
 
@@ -66,7 +93,7 @@ struct MenuBarContent: View {
         // Rien n'interdit d'enregistrer pendant que bran compresse : la
         // compression tourne hors du flux de capture, c'est même la raison pour
         // laquelle elle est lancée après la finalisation et pas pendant.
-        if isPilotable == false, model.isFinalizing || model.currentStep != nil {
+            if isPilotable == false, model.isFinalizing || model.currentStep != nil {
             // **Aucun bouton pendant la chaîne de fin.** « Mettre en pause » et
             // « Arrêter et enregistrer le fichier » restaient offerts alors que
             // la machine ne les accepte plus : cliquer ne produisait rien, pas
@@ -100,47 +127,48 @@ struct MenuBarContent: View {
             // le menu aurait proposé « Arrêter » pendant ce trou-là — c'est-à-dire
             // exactement le défaut que ce bloc existe pour fermer. La phrase de
             // repli dit ce qu'on sait alors, et rien de plus.
-            if let step = model.currentStep {
-                Text(model.currentStepTitle.map { "Réunion — \($0)" } ?? step.title)
-                Text(step.detail)
+                if let step = model.currentStep {
+                    Text(model.currentStepTitle.map { "Réunion — \($0)" } ?? step.title)
+                    Text(step.detail)
+                } else {
+                    Text("La capture est terminée, le fichier s'écrit. Ne quittez pas bran.")
+                }
+            }
+
+            // Les commandes. La finalisation est le seul état où il n'y en a
+            // aucune : la machine n'accepte plus ni pause ni arrêt, et les offrir
+            // ferait croire qu'un clic est resté sans effet.
+            if isPilotable {
+                Button(model.isPaused ? "Reprendre l'enregistrement" : "Mettre en pause") {
+                    model.togglePause()
+                }
+                .keyboardShortcut("p")
+
+                Button("Arrêter et enregistrer le fichier") {
+                    model.stopRecording()
+                }
+                .keyboardShortcut("s")
+            } else if model.isFinalizing {
+                EmptyView()
+            } else if let meeting = model.pendingMeeting {
+                Button("Démarrer — \(meeting.title ?? "réunion non reconnue")") {
+                    model.startPendingRecording()
+                }
+                .keyboardShortcut("r")
+
+                Button("Pas cette fois") {
+                    model.dismissProposal()
+                }
             } else {
-                Text("La capture est terminée, le fichier s'écrit. Ne quittez pas bran.")
+                Button("Démarrer un enregistrement") {
+                    model.startManualRecording()
+                }
+                .keyboardShortcut("r")
+                .disabled(model.permissions.canRecord == false)
             }
+
+            Divider()
         }
-
-        // Les commandes. La finalisation est le seul état où il n'y en a
-        // aucune : la machine n'accepte plus ni pause ni arrêt, et les offrir
-        // ferait croire qu'un clic est resté sans effet.
-        if isPilotable {
-            Button(model.isPaused ? "Reprendre l'enregistrement" : "Mettre en pause") {
-                model.togglePause()
-            }
-            .keyboardShortcut("p")
-
-            Button("Arrêter et enregistrer le fichier") {
-                model.stopRecording()
-            }
-            .keyboardShortcut("s")
-        } else if model.isFinalizing {
-            EmptyView()
-        } else if let meeting = model.pendingMeeting {
-            Button("Démarrer — \(meeting.title ?? "réunion non reconnue")") {
-                model.startPendingRecording()
-            }
-            .keyboardShortcut("r")
-
-            Button("Pas cette fois") {
-                model.dismissProposal()
-            }
-        } else {
-            Button("Démarrer un enregistrement") {
-                model.startManualRecording()
-            }
-            .keyboardShortcut("r")
-            .disabled(model.permissions.canRecord == false)
-        }
-
-        Divider()
 
         // La consommation, **ici et plus dans un second élément de barre de
         // menus**. Voir `ResourceLines` pour ce que ce déménagement coûte et
@@ -186,15 +214,33 @@ struct MenuBarContent: View {
         // Éteinte pendant qu'une vérification ou une installation tourne, plutôt
         // que de ne rien faire quand on clique : la même règle que les boutons de
         // la barre de session pendant la finalisation.
-        Button("Rechercher des mises à jour — version \(model.updates.installedVersion)") {
-            model.updates.checkForUpdates()
-        }
-        .disabled(model.updates.canCheckForUpdates == false)
+        if showsUpdates {
+            Button("Rechercher des mises à jour — version \(model.updates.installedVersion)") {
+                model.updates.checkForUpdates()
+            }
+            .disabled(model.updates.canCheckForUpdates == false)
 
-        Divider()
+            Divider()
+        }
 
         Button(quitTitle, action: quit)
             .keyboardShortcut("q")
+    }
+
+    private var showsRecordingSection: Bool {
+        showsRecording
+            || model.hasOpenSession
+            || model.isFinalizing
+            || model.currentStep != nil
+            || model.pendingMeeting != nil
+            || model.lastFailure != nil
+    }
+
+    private func historyButton(_ title: String, pane: LibraryPane) -> some View {
+        Button(title) {
+            UserDefaults.standard.set(pane.rawValue, forKey: LibraryPane.defaultsKey)
+            WindowPresenter.bringToFront("library", using: openWindow)
+        }
     }
 
     // MARK: - Quitter

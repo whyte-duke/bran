@@ -13,7 +13,7 @@ import Foundation
 ///     blobs/<sha256>.png          ← l'image copiée, jusqu'à 10000×10000
 ///   Thumbnails/
 ///     <sha256>-80.png             ← la vignette de ligne
-///     <sha256>-256.png            ← la vignette de détail
+///     <sha256>-1024.png           ← la vignette de détail
 /// ```
 ///
 /// ## Pourquoi ce fichier existe
@@ -312,12 +312,9 @@ public struct ThumbnailPlan: Sendable, Equatable {
     ///
     /// **48 Mio, et le chiffre vient d'une mesure.** L'historique réel du
     /// propriétaire porte 183 lignes d'image pour 250 entrées. Une vignette de
-    /// détail (256 px) d'une capture d'écran pèse ~100 Ko en PNG, une vignette de
-    /// ligne (80 px) ~8 Ko : le jeu complet des deux tailles pour cet historique
-    /// tient dans ~20 Mo. Le plafond laisse donc plus du double de marge sur le
-    /// cas mesuré — assez pour que l'éviction ne morde pas dans l'usage normal,
-    /// et assez bas pour rester dérisoire devant les 158 Mo de blobs qu'il sert à
-    /// ne pas décoder.
+    /// détail n'est fabriquée qu'à l'ouverture explicite d'une image, alors que
+    /// les vignettes de ligne sont nombreuses. Le plafond garde donc les images
+    /// récemment consultées sans laisser ces aperçus 1024 px croître sans borne.
     public static let defaultBudgetBytes = 48 * 1024 * 1024
 
     /// Le plafond effectif. Réglable **pour les tests**, comme la fenêtre de
@@ -430,14 +427,15 @@ public enum ThumbnailSize: Sendable, Equatable, CaseIterable {
     /// La ligne de la liste du panneau.
     case row
 
-    /// Le détail d'une entrée sélectionnée.
+    /// Le détail d'une entrée sélectionnée. 512 points permettent d'ouvrir une
+    /// image pour la regarder, sans décoder sa pleine définition en mémoire.
     case detail
 
     /// Le côté le plus long, en **points**.
     public var points: Int {
         switch self {
         case .row: 40
-        case .detail: 128
+        case .detail: 512
         }
     }
 

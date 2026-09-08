@@ -89,6 +89,7 @@ struct ClipboardPane: View {
     /// `PasteboardAccess.write(_:expecting:claiming:)`, dont c'est la condition
     /// d'existence.
     @State private var paster: Paster?
+    @State private var openedEntry: ClipboardEntry?
 
     private var controller: ClipboardController { model.clipboard }
     private var store: ClipboardStore { controller.store }
@@ -146,6 +147,14 @@ struct ClipboardPane: View {
             // deux autres panes en arrivant.
             await store.load()
             await searchDeeper()
+        }
+        .sheet(item: $openedEntry) { entry in
+            ClipboardDetailView(
+                entry: entry,
+                store: store,
+                thumbnails: controller.thumbnails,
+                onCopy: { copy(entry) }
+            )
         }
     }
 
@@ -337,7 +346,6 @@ struct ClipboardPane: View {
     /// Même forme, même symbole et mêmes mots que les trois autres panes : un
     /// bandeau qui dirait la même panne autrement obligerait à la reconnaître
     /// deux fois.
-    @ViewBuilder
     /// Va chercher sur le disque ce que la fenêtre en mémoire ne contient pas.
     ///
     /// Appelée à l'arrivée sur l'écran **et à la validation de la recherche**,
@@ -506,6 +514,7 @@ struct ClipboardPane: View {
                 expiry: expiry(of: entry),
                 showsDay: sort.groupsByDay == false,
                 canReveal: revealURL(for: entry) != nil,
+                onOpen: { openedEntry = entry },
                 onTogglePin: { togglePin(entry) },
                 onCopy: { copy(entry) },
                 onReveal: { reveal(entry) },
@@ -671,6 +680,7 @@ private struct ClipboardLibraryRow: View {
 
     let canReveal: Bool
 
+    let onOpen: () -> Void
     let onTogglePin: () -> Void
     let onCopy: () -> Void
     let onReveal: () -> Void
@@ -726,6 +736,7 @@ private struct ClipboardLibraryRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAction(named: entry.isPinned ? "Désépingler" : "Épingler") { onTogglePin() }
+        .accessibilityAction(named: openLabel, onOpen)
         .accessibilityAction(named: "Remettre au presse-papiers") { copyNow() }
         .accessibilityAction(named: "Afficher dans le Finder") { onReveal() }
         .accessibilityAction(named: "Supprimer", confirmDeletion)
@@ -775,23 +786,31 @@ private struct ClipboardLibraryRow: View {
         // c'est une promesse visuelle fausse — et cette ligne montre par
         // ailleurs, en toutes lettres, la date à laquelle le contenu s'en va.
         if showsThumbnail {
-            if let thumbnail, ThumbnailPlan.hasThumbnail(entry) {
-                thumbnail
-                    .resizable()
-                    // Rempli puis rogné, jamais déformé : un carré au rapport de
-                    // l'image désalignerait les colonnes de texte d'une ligne à
-                    // l'autre, ce qui rend une liste illisible en diagonale.
-                    .scaledToFill()
-                    .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
-                    .clipShape(.rect(cornerRadius: Radius.control))
-                    .accessibilityHidden(true)
+            if entry.kind == .image {
+                Button(action: onOpen) {
+                    thumbnailContent
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(openLabel)
             } else {
-                Image(systemName: ClipboardPanelVocabulary.symbolName(entry))
-                    .font(Type.cardBody)
-                    .foregroundStyle(.secondary)
-                    .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
-                    .accessibilityHidden(true)
+                thumbnailContent
             }
+        }
+    }
+
+    @ViewBuilder
+    private var thumbnailContent: some View {
+        if let thumbnail, ThumbnailPlan.hasThumbnail(entry) {
+            thumbnail
+                .resizable()
+                .scaledToFill()
+                .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
+                .clipShape(.rect(cornerRadius: Radius.control))
+        } else {
+            Image(systemName: ClipboardPanelVocabulary.symbolName(entry))
+                .font(Type.cardBody)
+                .foregroundStyle(.secondary)
+                .frame(width: Size.clipboardThumbnail, height: Size.clipboardThumbnail)
         }
     }
 
@@ -824,11 +843,23 @@ private struct ClipboardLibraryRow: View {
         // `ClipboardFilter.rowText` : un `Text` qui porterait les 2 Mio d'un
         // aperçu géant les mettrait en page à chaque image, `lineLimit` ou pas.
         // L'ellipse vient du modèle, jamais du stockage.
+        Group {
+            if entry.kind == .text || entry.kind == .richText {
+                Button(action: onOpen) { titleText }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(openLabel)
+            } else {
+                titleText
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var titleText: some View {
         Text(displayedTitle)
             .font(Type.cardBody)
             .lineLimit(1)
             .truncationMode(.tail)
-            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var displayedTitle: String {
@@ -943,6 +974,13 @@ private struct ClipboardLibraryRow: View {
     private var actions: some View {
         HStack(spacing: Space.hair) {
             CardAction(
+                symbol: "eye",
+                help: openLabel,
+                isRevealed: isHovering,
+                action: onOpen
+            )
+
+            CardAction(
                 symbol: entry.isPinned ? "pin.slash" : "pin",
                 help: entry.isPinned
                     ? "Désépingler : l'entrée redevient soumise à la rétention"
@@ -983,11 +1021,21 @@ private struct ClipboardLibraryRow: View {
             : "Il n'y a plus de fichier à montrer pour cette entrée"
     }
 
+    private var openLabel: String {
+        switch entry.kind {
+        case .text, .richText: "Lire le texte"
+        case .image: "Afficher l'image"
+        case .file: "Afficher l'aperçu"
+        }
+    }
+
     /// Les mêmes gestes, nommés, au clic droit — le seul endroit où une action
     /// de ligne porte un nom plutôt qu'un pictogramme, et le seul qui reste
     /// atteignable sans survoler.
     @ViewBuilder
     private var menu: some View {
+        Button(openLabel, action: onOpen)
+        Divider()
         Button(entry.isPinned ? "Désépingler" : "Épingler", action: onTogglePin)
         Button("Remettre au presse-papiers", action: copyNow)
             .disabled(entry.canPaste == false)

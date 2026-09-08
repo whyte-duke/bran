@@ -284,6 +284,19 @@ public final class AppModel {
             }
         }
 
+        // Le bouton carré-rond de macOS retire `SCRecordingOutput`, mais laisse
+        // le `SCStream` vivant. Sans ce second canal, le chrono continuait donc
+        // tandis que plus aucun octet de réunion n'était enregistré.
+        Task { [weak self, capture] in
+            for await _ in capture.externalStops {
+                guard let self else { return }
+                let duration = self.elapsedDescription
+                FeatureLog.record("Réunion — arrêt depuis l'indicateur système après \(duration)")
+                self.report("Enregistrement arrêté depuis la barre des menus de macOS après \(duration).")
+                self.stopRecording()
+            }
+        }
+
         // La bibliothèque parle par le canal d'échec unique de bran, comme
         // `AwakeController` : une fiche qu'on n'a pas pu écrire, une fiche qu'on
         // n'a pas pu relire, un fichier que la corbeille a refusé. Une

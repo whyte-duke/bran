@@ -31,7 +31,7 @@ struct LibraryView: View {
     /// fichiers oblige à visiter les quatre sections pour reconstituer sa
     /// semaine ; ouvrir sur le journal donne la réponse avant le premier clic,
     /// et les listes restent à une touche de distance.
-    @State private var pane: LibraryPane = .week
+    @AppStorage(LibraryPane.defaultsKey) private var pane: LibraryPane = .week
     @State private var meetingsPath: [UUID] = []
     @State private var weekQuery = ""
     @State private var meetingsQuery = ""
@@ -142,7 +142,6 @@ struct LibraryView: View {
         switch pane {
         case .week:
             WeekPane(model: model, query: $weekQuery)
-                .transition(.opacity)
 
         case .meetings:
             NavigationStack(path: $meetingsPath) {
@@ -162,23 +161,18 @@ struct LibraryView: View {
                         }
                     }
             }
-            .transition(.opacity)
 
         case .dictation:
             DictationPane(model: model, query: $dictationQuery)
-                .transition(.opacity)
 
         case .snapshots:
             SnapshotPane(model: model, query: $snapshotQuery)
-                .transition(.opacity)
 
         case .clipboard:
             ClipboardPane(model: model, query: $clipboardQuery)
-                .transition(.opacity)
 
         case .watch:
             WatchPane(model: model, query: $watchQuery)
-                .transition(.opacity)
 
         // La seule section qui ne reçoive pas le modèle entier : le test de
         // débit ne connaît ni les réunions, ni la dictée, ni le veilleur, et
@@ -186,11 +180,9 @@ struct LibraryView: View {
         // que `AppModel` a pris soin de garder fermée.
         case .speed:
             SpeedPane(speed: model.speed)
-                .transition(.opacity)
 
         case .backup:
             BackupPane(backup: model.backup)
-                .transition(.opacity)
         }
     }
 }

@@ -51,6 +51,11 @@ machine: not a byte, not a probe.
 - **A library that is just a folder.** Metadata lives in a `.json` next to each
   `.mp4`. Move the folder, copy it to another Mac, restore it from a backup —
   everything still works.
+- **A clipboard history you can actually read.** Click a text entry to open its
+  complete contents, or an image thumbnail to inspect a large preview.
+- **Can live only in the menu bar.** One setting removes the Dock icon and the
+  window at launch; separate toggles keep only the menu sections you use. The
+  history shortcut, active recording controls and alerts remain easy to reach.
 - **Keeps the Mac awake on request** — one click, indefinitely, from the same
   menu bar item as everything else. See [Keeping the Mac awake](#keeping-the-mac-awake).
 - **Makes scheduled backups visible while they run.** The window follows the
@@ -470,6 +475,10 @@ Findings from building it, each verified on a real machine:
 - **Never call `removeRecordingOutput()` before `stopCapture()`.** `stopCapture`
   removes it itself; doing both triggers a double `exportAndInvalidate` on the
   same asset writer, and the file is never written.
+- **The macOS recording indicator can remove `SCRecordingOutput` without
+  stopping `SCStream`.** bran treats that delegate callback as an external stop,
+  ends the session immediately, and never leaves a timer claiming that bytes are
+  still being recorded.
 - **`SCRecordingOutput` exposes no bitrate control** — only codec and container.
   If you need a target file size, you must re-encode afterwards.
 - **System audio and microphone arrive in different formats.** System audio uses
@@ -555,7 +564,7 @@ Two conventions to know before comparing against anything else:
 
 ```bash
 swift build          # builds everything
-swift test           # 322 tests, runs in about a millisecond
+swift test           # 1,293 tests
 open Package.swift   # opens in Xcode, with SwiftUI previews
 ```
 

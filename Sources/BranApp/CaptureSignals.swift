@@ -13,12 +13,22 @@ final class CaptureSignals: Sendable {
     private struct State {
         var didFinish = false
         var failure: String?
+        var outputWatch = RecordingOutputWatch()
     }
 
     private let storage = Mutex(State())
+    private let onUnexpectedFinish: @Sendable () -> Void
+
+    init(onUnexpectedFinish: @escaping @Sendable () -> Void = {}) {
+        self.onUnexpectedFinish = onUnexpectedFinish
+    }
 
     func markFinished() {
-        storage.withLock { $0.didFinish = true }
+        let origin = storage.withLock { state -> RecordingOutputWatch.FinishOrigin in
+            state.didFinish = true
+            return state.outputWatch.observeFinished()
+        }
+        if origin == .external { onUnexpectedFinish() }
     }
 
     func markFailed(_ reason: String) {
@@ -27,7 +37,16 @@ final class CaptureSignals: Sendable {
             // Une défaillance débloque l'attente de finalisation : le fichier
             // n'arrivera jamais.
             state.didFinish = true
+            state.outputWatch.observeFailure()
         }
+    }
+
+    func requestFinish() {
+        storage.withLock { $0.outputWatch.requestFinish() }
+    }
+
+    func cancelFinishRequest() {
+        storage.withLock { $0.outputWatch.cancelFinishRequest() }
     }
 
     var failure: String? {

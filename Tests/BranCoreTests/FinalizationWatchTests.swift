@@ -161,3 +161,44 @@ struct FinalizationWatchTests {
         #expect(FinalizationWatch.Verdict.keepWaiting(bytesWritten: 10, silentFor: .zero).bytesWritten == 10)
     }
 }
+
+@Suite("RecordingOutputWatch")
+struct RecordingOutputWatchTests {
+
+    @Test("Le bouton d'arrêt de macOS est distingué d'un arrêt demandé par bran")
+    func externalFinishIsDetected() {
+        var watch = RecordingOutputWatch()
+
+        #expect(watch.observeFinished() == .external)
+        #expect(watch.observeFinished() == .duplicate)
+    }
+
+    @Test("La fin qui suit une pause ou un arrêt demandé par bran est attendue")
+    func requestedFinishIsExpected() {
+        var watch = RecordingOutputWatch()
+
+        watch.requestFinish()
+
+        #expect(watch.observeFinished() == .requested)
+        #expect(watch.observeFinished() == .duplicate)
+    }
+
+    @Test("Un stopCapture refusé rend de nouveau une fin externe détectable")
+    func failedStopRequestCanBeCancelled() {
+        var watch = RecordingOutputWatch()
+
+        watch.requestFinish()
+        watch.cancelFinishRequest()
+
+        #expect(watch.observeFinished() == .external)
+    }
+
+    @Test("Une panne déjà signalée ne produit pas ensuite un faux arrêt externe")
+    func failureConsumesTheFinish() {
+        var watch = RecordingOutputWatch()
+
+        watch.observeFailure()
+
+        #expect(watch.observeFinished() == .duplicate)
+    }
+}

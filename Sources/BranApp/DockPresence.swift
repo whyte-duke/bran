@@ -12,8 +12,8 @@ import Foundation
 /// menus que rien n'annonce.
 ///
 /// Le défaut s'inverse donc : bran est une application normale, et celui qui
-/// préfère l'agent de barre de menus le décoche. Un défaut qu'un clic corrige
-/// vaut mieux qu'un défaut sans interface.
+/// préfère l'agent active « uniquement dans la barre des menus ». Un défaut
+/// qu'un clic corrige vaut mieux qu'un défaut sans interface.
 ///
 /// ```
 ///   Info.plist LSUIElement = false     ← macOS lance en .regular
@@ -50,7 +50,7 @@ enum DockPresence {
 
     /// Pose la politique d'activation qui correspond au réglage.
     ///
-    /// **Trois précautions, toutes payées par des comportements observés de
+    /// **Quatre précautions, toutes payées par des comportements observés de
     /// macOS.**
     ///
     /// 1. On ne repose pas une politique déjà en place. `setActivationPolicy`
@@ -86,14 +86,4 @@ enum DockPresence {
         }
         return true
     }
-
-    /// Ce que les réglages affichent sous l'interrupteur.
-    ///
-    /// Il dit la conséquence, pas le mécanisme : personne n'a besoin de savoir
-    /// ce qu'est une politique d'activation, tout le monde a besoin de savoir
-    /// par où revenir dans l'application.
-    static let explanation = """
-        Sans icône dans le Dock, bran reste accessible par son élément de barre \
-        de menus — et par lui seul. L'application disparaît aussi de ⌘Tab.
-        """
 }
